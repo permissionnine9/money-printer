@@ -1,0 +1,24 @@
+[project]
+name = "money-print"
+version = "0.1.0"
+description = "AI视频创作智能体 - 基于LangGraph的视频生成工作流"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph>=0.3.0",
+    "langgraph-checkpoint-sqlite>=1.0.0",
+    "langchain>=0.3.0",
+    "langchain-google-genai>=2.0.0",
+    "google-genai>=0.3.0",
+    "gradio>=5.0.0",
+    "pydantic>=2.0.0",
+    "httpx>=0.27.0",
+    "python-dotenv>=1.0.0",
+    "pillow>=10.0.0",
+    "aiofiles>=24.0.0",
+    "openai>=1.0.0",
+    "oss2>=2.18.0",
+]
+
+[tool.uv]
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
