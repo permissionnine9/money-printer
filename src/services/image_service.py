@@ -8,6 +8,7 @@ from src.config import (
     SHENGSUANYUN_BASE_URL,
     SHENGSUANYUN_IMAGE_MODEL,
     SHENGSUANYUN_IMAGE2IMAGE_MODEL,
+    SHENGSUANYUN_MATERIAL_IMAGE_MODEL,
 )
 from src.models import MaterialImage, VideoParams
 
@@ -45,6 +46,55 @@ class ImageService:
             "10:16": "9:16",
         }
         return mapping.get(aspect_ratio, "16:9")
+
+    def _get_size_for_material(self, resolution: str) -> str:
+        """获取 gemini-3-pro-image-preview 模型支持的尺寸"""
+        # gemini-3-pro-image-preview 支持的尺寸: 1K, 2K, 4K
+        size_map = {
+            "720p": "1K",
+            "1080p": "2K",
+            "4K": "4K",
+        }
+        return size_map.get(resolution, "2K")
+
+    def _image_to_base64(self, image_path: str) -> str | None:
+        """将图片转换为 base64 格式
+
+        Args:
+            image_path: 图片路径（本地路径或URL）
+
+        Returns:
+            base64 编码的图片字符串，格式为 data:image/xxx;base64,xxx
+        """
+        import base64
+        import mimetypes
+        from pathlib import Path
+
+        try:
+            # 如果是URL，直接返回（API 可能支持URL）
+            if image_path.startswith(('http://', 'https://')):
+                return image_path
+
+            # 本地文件
+            path = Path(image_path)
+            if not path.exists():
+                logger.error(f"图片文件不存在: {image_path}")
+                return None
+
+            # 获取 MIME 类型
+            mime_type, _ = mimetypes.guess_type(str(path))
+            if not mime_type:
+                mime_type = "image/png"  # 默认使用 PNG
+
+            # 读取并编码
+            with open(path, "rb") as f:
+                image_data = f.read()
+                base64_str = base64.b64encode(image_data).decode("utf-8")
+                return f"data:{mime_type};base64,{base64_str}"
+
+        except Exception as e:
+            logger.error(f"转换图片为 base64 失败: {e}")
+            return None
 
     async def query_task_result(self, task_id: str) -> dict:
         """查询任务结果
@@ -260,13 +310,25 @@ class ImageService:
 
         Args:
             prompt: 图片提示词
-            reference_images: 参考图URL列表
+            reference_images: 参考图路径列表（本地路径或URL）
             video_params: 视频参数
 
         Returns:
             {"success": bool, "request_id": str, "error": str}
         """
         aspect_ratio = self._get_aspect_ratio_for_i2i(video_params.aspect_ratio)
+
+        # 将参考图转换为 base64 或保持URL
+        images_data = []
+        for img_path in reference_images:
+            img_data = self._image_to_base64(img_path)
+            if img_data:
+                images_data.append(img_data)
+            else:
+                logger.warning(f"跳过无效的参考图: {img_path}")
+
+        if not images_data:
+            return {"success": False, "error": "没有有效的参考图"}
 
         url = f"{self._base_url}/tasks/generations"
         headers = {
@@ -276,7 +338,7 @@ class ImageService:
         payload = {
             "model": SHENGSUANYUN_IMAGE2IMAGE_MODEL,
             "prompt": prompt,
-            "images": reference_images,
+            "images": images_data,
             "aspect_ratio": aspect_ratio,
         }
 
@@ -313,7 +375,7 @@ class ImageService:
     async def poll_i2i_task(
         self,
         request_id: str,
-        timeout: int = 120,
+        timeout: int = 60,
         poll_interval: int = 3
     ) -> dict:
         """轮询图生图任务结果
@@ -359,7 +421,7 @@ class ImageService:
         prompt: str,
         reference_images: list[str],
         video_params: VideoParams,
-        timeout: int = 120,
+        timeout: int = 60,
         poll_interval: int = 3
     ) -> dict:
         """基于参考图生成图片（图生图）- 提交并等待完成
@@ -368,7 +430,7 @@ class ImageService:
             prompt: 图片提示词，可以引用参考图，如"基于参考图中的角色..."
             reference_images: 参考图URL列表
             video_params: 视频参数
-            timeout: 超时时间（秒），默认120秒
+            timeout: 超时时间（秒），默认60秒
             poll_interval: 轮询间隔（秒），默认3秒
 
         Returns:
@@ -383,12 +445,126 @@ class ImageService:
         request_id = submit_result["request_id"]
         return await self.poll_i2i_task(request_id, timeout, poll_interval)
 
-    async def generate_material_images(
+    async def _generate_material_image_with_reference(
+        self,
+        prompt: str,
+        reference_images: list[str],
+        video_params: VideoParams,
+        timeout: int = 180,
+        poll_interval: int = 5
+    ) -> dict:
+        """使用 gemini-3-pro-image-preview 模型基于参考图生成素材图
+
+        Args:
+            prompt: 图片提示词
+            reference_images: 用户上传的参考图路径列表（支持本地路径和URL）
+            video_params: 视频参数
+            timeout: 超时时间（秒），默认180秒
+            poll_interval: 轮询间隔（秒），默认5秒
+
+        Returns:
+            {"success": bool, "image_url": str, "error": str}
+        """
+        import asyncio
+
+        # 获取尺寸和宽高比
+        size = self._get_size_for_material(video_params.resolution)
+        aspect_ratio = self._get_aspect_ratio_for_i2i(video_params.aspect_ratio)
+
+        # 将参考图转换为 base64 或保持URL
+        images_data = []
+        for img_path in reference_images:
+            img_data = self._image_to_base64(img_path)
+            if img_data:
+                images_data.append(img_data)
+            else:
+                logger.warning(f"跳过无效的参考图: {img_path}")
+
+        if not images_data:
+            logger.warning("没有有效的参考图，将使用纯文生图")
+
+        url = f"{self._base_url}/tasks/generations"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._api_key}",
+        }
+
+        payload = {
+            "model": SHENGSUANYUN_MATERIAL_IMAGE_MODEL,
+            "prompt": prompt,
+            "size": size,
+            "aspect_ratio": aspect_ratio,
+        }
+
+        # 如果有参考图，添加到请求中
+        if images_data:
+            payload["images"] = images_data
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                logger.info(f"提交素材图生成任务 (gemini-3-pro): {prompt[:50]}... (参考图: {len(images_data)}张)")
+                response = await client.post(url, json=payload, headers=headers)
+
+                if response.status_code not in (200, 201, 202):
+                    logger.error(f"素材图生成失败: HTTP {response.status_code} - {response.text}")
+                    return {"success": False, "error": f"HTTP {response.status_code}"}
+
+                result = response.json()
+                logger.info(f"提交响应: {result}")
+
+                # 获取任务ID
+                data = result.get('data')
+                if isinstance(data, dict):
+                    request_id = data.get('request_id')
+                else:
+                    request_id = result.get('request_id') or result.get('id') or result.get('task_id')
+
+                if not request_id:
+                    logger.error(f"无法获取任务ID: {result}")
+                    return {"success": False, "error": "无法获取任务ID"}
+
+                logger.info(f"获得任务ID: {request_id}，开始轮询...")
+
+                # 轮询等待结果
+                elapsed = 0
+                while elapsed < timeout:
+                    await asyncio.sleep(poll_interval)
+                    elapsed += poll_interval
+
+                    query_result = await self.query_task_result(request_id)
+                    status = query_result.get("status")
+
+                    if query_result.get("success"):
+                        image_url = query_result.get("image_url")
+                        logger.info(f"素材图生成完成，URL: {image_url}")
+                        return {"success": True, "image_url": image_url}
+
+                    if status == "failed":
+                        logger.error(f"任务失败: {query_result.get('error')}")
+                        return {"success": False, "error": query_result.get("error", "任务失败")}
+
+                    if status == "pending":
+                        logger.info(f"任务处理中... ({elapsed}s/{timeout}s)")
+                        continue
+
+                    logger.warning(f"未知状态: {status}，继续等待...")
+
+                # 超时
+                logger.error(f"任务超时 ({timeout}s)")
+                return {"success": False, "error": f"任务超时 ({timeout}s)"}
+
+        except Exception as e:
+            logger.error(f"素材图生成异常: {e}")
+            return {"success": False, "error": str(e)}
+
+    
+    async def generate_material_images_with_reference(
         self,
         prompts_data: list[dict],
-        video_params: VideoParams
+        video_params: VideoParams,
+        reference_images: list[str] | None = None
     ) -> list[MaterialImage]:
-        """生成素材图片（设定稿风格）
+        """生成素材图片（支持用户上传参考图，使用 gemini-3-pro-image-preview）
 
         Args:
             prompts_data: 提示词数据列表，每项包含:
@@ -396,15 +572,129 @@ class ImageService:
                 - description: 中文描述
                 - type: 素材图类型 (character/props/environment/general)
             video_params: 视频参数
+            reference_images: 用户上传的参考图路径列表（可选）
 
         Returns:
             生成的素材图列表
         """
         results = []
         type_names = {
-            "character": "角色设定图",
-            "props": "物品设定图",
-            "environment": "场景设定图",
+            "character": "角色设定图",  # 兼容旧类型
+            "character_main": "主要角色设定图",
+            "character_minor": "边缘角色设定图",
+            "props": "物品/道具设定图",
+            "environment": "场景设定图",  # 兼容旧类型
+            "environment_main": "主场景设定图",
+            "environment_minor": "副场景设定图",
+            "general": "素材图"
+        }
+
+        for i, item in enumerate(prompts_data):
+            # 兼容旧格式（纯字符串）
+            if isinstance(item, str):
+                prompt = item
+                description = f"素材图 {i + 1}"
+                image_type = "general"
+            else:
+                prompt = item.get("prompt", "")
+                description = item.get("description", f"素材图 {i + 1}")
+                image_type = item.get("type", "general")
+
+            # 素材图提示词增强
+            styled_prompt = f"{prompt}, high quality, detailed, professional concept art"
+
+            # 如果有参考图，在提示词中说明
+            if reference_images:
+                styled_prompt = f"Based on the reference images provided, {styled_prompt}"
+
+            type_name = type_names.get(image_type, "素材图")
+
+            try:
+                image_id = str(uuid.uuid4())
+
+                logger.info(f"生成{type_name} {i + 1}/{len(prompts_data)} (使用 gemini-3-pro-image-preview)...")
+
+                # 使用新的 gemini-3-pro-image-preview 方法
+                result = await self._generate_material_image_with_reference(
+                    styled_prompt,
+                    reference_images or [],
+                    video_params
+                )
+
+                if result.get("success"):
+                    results.append(MaterialImage(
+                        image_id=image_id,
+                        image_path=result.get("image_url", ""),
+                        prompt=styled_prompt,
+                        description=description,
+                        image_type=image_type,
+                        task_id="",
+                        task_status="completed"
+                    ))
+                else:
+                    results.append(MaterialImage(
+                        image_id=f"error_{i}",
+                        image_path="",
+                        prompt=styled_prompt,
+                        description=f"生成失败: {result.get('error', '未知错误')}",
+                        image_type=image_type,
+                        task_id="",
+                        task_status="failed"
+                    ))
+
+            except Exception as e:
+                logger.error(f"生成{type_name} {i + 1} 失败: {e}")
+                results.append(MaterialImage(
+                    image_id=f"error_{i}",
+                    image_path="",
+                    prompt=styled_prompt,
+                    description=f"生成失败: {str(e)}",
+                    image_type=image_type,
+                    task_id="",
+                    task_status="failed"
+                ))
+
+        return results
+
+    async def generate_material_images(
+        self,
+        prompts_data: list[dict],
+        video_params: VideoParams,
+        reference_images: list[str] | None = None
+    ) -> list[MaterialImage]:
+        """生成素材图片（设定稿风格）
+
+        如果提供了参考图，将使用 gemini-3-pro-image-preview 模型进行图生图；
+        否则使用默认的文生图模型。
+
+        Args:
+            prompts_data: 提示词数据列表，每项包含:
+                - prompt: 英文提示词
+                - description: 中文描述
+                - type: 素材图类型 (character/props/environment/general)
+            video_params: 视频参数
+            reference_images: 用户上传的参考图路径列表（可选，支持本地路径和URL）
+
+        Returns:
+            生成的素材图列表
+        """
+        # 如果有参考图，使用 gemini-3-pro-image-preview 模型
+        if reference_images and len(reference_images) > 0:
+            logger.info(f"检测到 {len(reference_images)} 张参考图，使用 gemini-3-pro-image-preview 模型")
+            return await self.generate_material_images_with_reference(
+                prompts_data, video_params, reference_images
+            )
+
+        # 没有参考图，使用原来的文生图方法
+        results = []
+        type_names = {
+            "character": "角色设定图",  # 兼容旧类型
+            "character_main": "主要角色设定图",
+            "character_minor": "边缘角色设定图",
+            "props": "物品/道具设定图",
+            "environment": "场景设定图",  # 兼容旧类型
+            "environment_main": "主场景设定图",
+            "environment_minor": "副场景设定图",
             "general": "素材图"
         }
 
@@ -427,7 +717,7 @@ class ImageService:
             try:
                 image_id = str(uuid.uuid4())
 
-                logger.info(f"生成{type_name} {i + 1}/{len(prompts_data)}...")
+                logger.info(f"生成{type_name} {i + 1}/{len(prompts_data)} (文生图模式)...")
                 result = await self._generate_image(styled_prompt, video_params)
 
                 if result.get("success"):
@@ -550,3 +840,214 @@ class ImageService:
             logger.error(f"生成图片失败: {e}")
 
         return "error", ""
+
+    async def _generate_image_with_base64_i2i(
+        self,
+        prompt: str,
+        images_data: list[str],
+        video_params: VideoParams,
+        timeout: int = 180,
+        poll_interval: int = 5
+    ) -> dict:
+        """使用 gemini-2.5-flash-image 模型基于base64或URL进行图生图
+
+        Args:
+            prompt: 图片提示词
+            images_data: 图片数据列表（可以是base64 data URL或http URL）
+            video_params: 视频参数
+            timeout: 超时时间（秒），默认180秒
+            poll_interval: 轮询间隔（秒），默认5秒
+
+        Returns:
+            {"success": bool, "image_url": str, "error": str}
+        """
+        import asyncio
+
+        # 获取宽高比（gemini-2.5-flash-image 使用 aspect_ratio，不支持 size）
+        aspect_ratio = self._get_aspect_ratio_for_i2i(video_params.aspect_ratio)
+
+        url = f"{self._base_url}/tasks/generations"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._api_key}",
+        }
+
+        payload = {
+            "model": SHENGSUANYUN_IMAGE2IMAGE_MODEL,  # google/gemini-2.5-flash-image
+            "prompt": prompt,
+            "aspect_ratio": aspect_ratio,
+            "images": images_data,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                logger.info(f"提交图生图任务 (gemini-2.5-flash-image): {prompt[:50]}... (参考图: {len(images_data)}张)")
+                response = await client.post(url, json=payload, headers=headers)
+
+                if response.status_code not in (200, 201, 202):
+                    logger.error(f"图生图失败: HTTP {response.status_code} - {response.text}")
+                    return {"success": False, "error": f"HTTP {response.status_code}"}
+
+                result = response.json()
+                logger.info(f"提交响应: {result}")
+
+                # 获取任务ID
+                data = result.get('data')
+                if isinstance(data, dict):
+                    request_id = data.get('request_id')
+                else:
+                    request_id = result.get('request_id') or result.get('id') or result.get('task_id')
+
+                if not request_id:
+                    logger.error(f"无法获取任务ID: {result}")
+                    return {"success": False, "error": "无法获取任务ID"}
+
+                logger.info(f"获得任务ID: {request_id}，开始轮询...")
+
+                # 轮询等待结果
+                elapsed = 0
+                while elapsed < timeout:
+                    await asyncio.sleep(poll_interval)
+                    elapsed += poll_interval
+
+                    query_result = await self.query_task_result(request_id)
+                    status = query_result.get("status")
+
+                    if query_result.get("success"):
+                        image_url = query_result.get("image_url")
+                        logger.info(f"图生图完成，URL: {image_url}")
+                        return {"success": True, "image_url": image_url}
+
+                    if status == "failed":
+                        logger.error(f"任务失败: {query_result.get('error')}")
+                        return {"success": False, "error": query_result.get("error", "任务失败")}
+
+                    if status == "pending":
+                        logger.info(f"任务处理中... ({elapsed}s/{timeout}s)")
+                        continue
+
+                    logger.warning(f"未知状态: {status}，继续等待...")
+
+                # 超时
+                logger.error(f"任务超时 ({timeout}s)")
+                return {"success": False, "error": f"任务超时 ({timeout}s)"}
+
+        except Exception as e:
+            logger.error(f"图生图异常: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def edit_material_image(
+        self,
+        original_image_path: str,
+        edit_prompt: str,
+        video_params: VideoParams,
+        reference_images: list[str] | None = None,
+        timeout: int = 180,
+        poll_interval: int = 5
+    ) -> dict:
+        """编辑单个素材图（使用 gemini-2.5-flash-image 模型进行图生图）
+
+        支持用户完全控制参考图列表，实现高度自由的编辑。
+        如果用户提供了reference_images，则使用用户提供的参考图；
+        如果用户没有提供参考图，则使用original_image_path作为保底。
+
+        Args:
+            original_image_path: 原始素材图路径（本地路径或URL），当reference_images为空时作为保底使用
+            edit_prompt: 编辑提示词，描述想要做的修改，例如："更鲜艳的颜色"、"添加笑容"、"卡通风格"等
+            video_params: 视频参数
+            reference_images: 用户选择的参考图路径列表（可选），用户可自由决定是否包含原素材图
+            timeout: 超时时间（秒），默认180秒
+            poll_interval: 轮询间隔（秒），默认5秒
+
+        Returns:
+            {"success": bool, "image_url": str, "error": str}
+        """
+        logger.info(f"[素材图编辑] 开始编辑素材图: {edit_prompt[:50]}...")
+        
+        # 确定最终使用的参考图列表
+        # 如果用户提供了reference_images，使用用户提供的；否则使用原素材图作为保底
+        if reference_images and len(reference_images) > 0:
+            all_reference_images = reference_images
+            logger.info(f"[素材图编辑] 使用用户选择的 {len(reference_images)} 张参考图")
+        else:
+            all_reference_images = [original_image_path]
+            logger.info(f"[素材图编辑] 用户未选择参考图，使用原素材图作为保底")
+        
+        # 构建完整提示词：参考 generate_material_prompts 风格
+        # 素材图编辑应保持设定稿/角色设计表风格
+        full_prompt = f"""Edit this concept design reference image according to the following requirements: {edit_prompt}
+
+Requirements:
+- Maintain the original character/object/scene design structure and key visual elements
+- Keep the consistent art style, color palette, and visual atmosphere
+- Ensure high quality, detailed illustration suitable for video production
+- Focus on visual clarity and professional concept art presentation
+- Avoid adding text annotations, labels, rulers, or measurement markings
+- The result should be a clean design reference image, not a annotated sheet
+
+Style: high quality illustration, detailed concept art, professional design reference, cinematic visual style."""
+
+        logger.info(f"[素材图编辑] 总共需要处理 {len(all_reference_images)} 张参考图")
+
+        # 将所有参考图转换为base64格式
+        images_base64 = []
+        import os
+        import base64
+        
+        for idx, img_path in enumerate(all_reference_images):
+            if not img_path:
+                logger.warning(f"[素材图编辑] 第 {idx+1} 张图片路径为空，跳过")
+                continue
+            
+            # 如果是URL，直接使用
+            if img_path.startswith(('http://', 'https://')):
+                images_base64.append(img_path)
+                logger.info(f"[素材图编辑] 第 {idx+1} 张是URL，直接使用: {img_path[:80]}...")
+            else:
+                # 本地文件转换为base64
+                try:
+                    if not os.path.exists(img_path):
+                        logger.error(f"[素材图编辑] 第 {idx+1} 张图片文件不存在: {img_path}")
+                        continue
+                    
+                    # 读取文件并转换为base64
+                    with open(img_path, 'rb') as f:
+                        file_data = f.read()
+                    
+                    # 检测文件类型
+                    mime_type = "image/png"
+                    if img_path.lower().endswith('.jpg') or img_path.lower().endswith('.jpeg'):
+                        mime_type = "image/jpeg"
+                    elif img_path.lower().endswith('.webp'):
+                        mime_type = "image/webp"
+                    elif img_path.lower().endswith('.gif'):
+                        mime_type = "image/gif"
+                    
+                    base64_str = base64.b64encode(file_data).decode('utf-8')
+                    data_url = f"data:{mime_type};base64,{base64_str}"
+                    images_base64.append(data_url)
+                    logger.info(f"[素材图编辑] 第 {idx+1} 张转换为base64: {len(data_url)} chars")
+                except Exception as e:
+                    logger.error(f"[素材图编辑] 第 {idx+1} 张转换base64失败: {e}")
+                        
+        
+        if not images_base64:
+            return {"success": False, "error": "没有有效的参考图"}
+
+        logger.info(f"[素材图编辑] 共 {len(images_base64)} 张参考图（base64格式）")
+
+        # 使用 gemini-2.5-flash-image 模型的图生图功能，传入base64图片
+        result = await self._generate_image_with_base64_i2i(
+            prompt=full_prompt,
+            images_data=images_base64,
+            video_params=video_params,
+            timeout=timeout,
+            poll_interval=poll_interval
+        )
+
+        if result.get("success"):
+            logger.info(f"[素材图编辑] 编辑成功，新图URL: {result.get('image_url')}")
+        else:
+            logger.error(f"[素材图编辑] 编辑失败: {result.get('error')}")
+
+        return result

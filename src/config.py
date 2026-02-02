@@ -17,10 +17,6 @@ VIDEOS_DIR = STATIC_DIR / "videos"
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
 
-# 火山引擎 ARK (豆包) 配置
-ARK_API_KEY = os.getenv("ARK_API_KEY", "")
-ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
-
 # 胜算云 API 配置（用于视频生成和图片生成）
 SHENGSUANYUN_API_KEY = os.getenv(
     "SHENGSUANYUN_API_KEY",
@@ -39,15 +35,16 @@ SHENGSUANYUN_VIDEO_MODEL_WAN22 = "ali/wan2.2-kf2v-flash"  # 阿里wan2.2首尾�
 # 图片模型配置
 SHENGSUANYUN_IMAGE_MODEL = "openai/gpt-image-1.5"  # 文生图模型
 SHENGSUANYUN_IMAGE2IMAGE_MODEL = "google/gemini-2.5-flash-image"  # 图生图模型（支持参考图）
+SHENGSUANYUN_MATERIAL_IMAGE_MODEL = "google/gemini-3-pro-image-preview"  # 素材图模型（支持图生图，高质量）
 
 SHENGSUANYUN_IMAGE2IMAGE_REQUEST_TIME_GAP = 4  # 图生图请求间隔时间（秒）
 
 # 阿里云 OSS 配置
-OSS_ACCESS_KEY = os.getenv("OSS_ACCESS_KEY", "LTAI5tKWtdeZxinauXmxk3E4")
-OSS_SECRET_KEY = os.getenv("OSS_SECRET_KEY", "Rsfl8Hkyc2qIcEGEnHbX1D5Mt1N3iV")
+OSS_ACCESS_KEY = os.getenv("OSS_ACCESS_KEY", "")
+OSS_SECRET_KEY = os.getenv("OSS_SECRET_KEY", "")
 OSS_ENDPOINT = os.getenv("OSS_ENDPOINT", "http://oss-cn-guangzhou.aliyuncs.com")
 OSS_REGION = os.getenv("OSS_REGION", "cn-guangzhou")
-OSS_BUCKET = os.getenv("OSS_BUCKET", "ragflow-annto-2")
+OSS_BUCKET = os.getenv("OSS_BUCKET", "")
 
 
 # 视频参数默认值

@@ -50,4 +50,4 @@ def parse_json_response(response_text: str, default: Any = None) -> dict:
     # 解析失败
     if default is not None:
         return default
-    raise ValueError(f"无法解析JSON响应: {text[:200]}...")
+    raise ValueError(f"无法解析JSON响应: {text}...")

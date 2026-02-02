@@ -137,12 +137,22 @@ class VideoCreationWorkflowV2:
             return {"success": False, "error": f"脚本优化失败: {str(e)}"}
 
     # ==================== 步骤 3: 生成素材图 ====================
-    async def step_generate_material_images(self, session_id: str, extra_prompt: str = "") -> dict:
+    async def step_generate_material_images(
+        self,
+        session_id: str,
+        extra_prompt: str = "",
+        reference_images: list[str] | None = None
+    ) -> dict:
         """步骤3：生成素材图（设定稿风格：角色设定图、物品设定图、场景设定图）
+
+        支持两种模式：
+        1. 纯文生图：不提供参考图，使用默认模型生成
+        2. 图生图：提供参考图，使用 gemini-3-pro-image-preview 模型，基于参考图生成
 
         Args:
             session_id: 会话ID
             extra_prompt: 自定义提示词，用于增加控制力（如：更鲜艳的颜色、卡通风格等）
+            reference_images: 用户上传的参考图路径列表（可选，支持本地路径和URL）
 
         Returns:
             执行结果
@@ -150,6 +160,8 @@ class VideoCreationWorkflowV2:
         logger.info(f"[步骤3] 生成素材图（设定稿）- 会话: {session_id[:8]}...")
         if extra_prompt:
             logger.info(f"[步骤3] 使用自定义提示词: {extra_prompt[:100]}...")
+        if reference_images:
+            logger.info(f"[步骤3] 使用 {len(reference_images)} 张用户参考图")
 
         # 检查前置步骤
         can_execute, reason = self.session_manager.can_execute_step(session_id, "generate_material_images")
@@ -175,8 +187,10 @@ class VideoCreationWorkflowV2:
             for i, p in enumerate(prompts_data):
                 logger.info(f"  - {i+1}. [{p.get('type', 'general')}] {p.get('description', '')[:50]}...")
 
-            # 生成素材图（内部会处理 type 字段）
-            images = await self.image_service.generate_material_images(prompts_data, video_params)
+            # 生成素材图（如果有参考图，将使用 gemini-3-pro-image-preview 模型）
+            images = await self.image_service.generate_material_images(
+                prompts_data, video_params, reference_images=reference_images
+            )
 
             # 统计结果
             completed_count = sum(1 for img in images if img.task_status == 'completed')
@@ -1018,3 +1032,99 @@ class VideoCreationWorkflowV2:
                 "next_first_frame": {"path": "", "exists": False},
                 "total_segments": 0
             }
+
+    # ==================== 素材图编辑方法 ====================
+
+    async def edit_material_image(
+        self,
+        session_id: str,
+        image_index: int,
+        edit_prompt: str,
+        reference_images: list[str] | None = None,
+        original_image_path: str | None = None
+    ) -> dict:
+        """编辑单个素材图
+
+        使用 gemini-3-pro-image-preview 模型基于参考图进行编辑。
+        支持用户完全控制参考图列表，包括是否使用原素材图。
+
+        Args:
+            session_id: 会话ID
+            image_index: 素材图索引（在 material_images 列表中的位置）
+            edit_prompt: 编辑提示词，描述想要做的修改
+            reference_images: 用户选择的参考图路径列表（可选），用于图生图编辑
+            original_image_path: 原素材图路径（可选），当reference_images为空时作为保底使用
+
+        Returns:
+            执行结果
+        """
+        logger.info(f"[编辑] 编辑素材图 {image_index} - 会话: {session_id[:8]}...")
+        logger.info(f"[编辑] 编辑提示词: {edit_prompt[:100]}...")
+        if reference_images:
+            logger.info(f"[编辑] 使用 {len(reference_images)} 张用户选择的参考图")
+
+        try:
+            # 获取素材图数据和视频参数
+            material_result = self.session_manager.get_step_result(session_id, "generate_material_images")
+            script_result = self.session_manager.get_step_result(session_id, "optimize_script")
+
+            if not material_result or not script_result:
+                return {"success": False, "error": "缺少必要的步骤数据"}
+
+            material_images = material_result['result_data'].get('material_images', [])
+            params = script_result['result_data']['video_params']
+
+            if image_index < 0 or image_index >= len(material_images):
+                return {"success": False, "error": f"无效的图片索引: {image_index}"}
+
+            # 获取原素材图信息（用于更新数据库）
+            original_image = material_images[image_index]
+            db_original_path = original_image.get('image_path', '')
+            
+            # 确定最终使用的原图路径
+            # 优先使用传入的original_image_path，否则使用数据库中的路径
+            final_original_path = original_image_path or db_original_path
+
+            if not final_original_path:
+                return {"success": False, "error": "原始图片路径不存在"}
+
+            video_params = VideoParams(**params)
+
+            # 使用 ImageService 编辑图片
+            # reference_images: 用户选择的参考图（可能包含也可能不包含原图）
+            # original_image_path: 保底用的原图路径，当reference_images为空时使用
+            result = await self.image_service.edit_material_image(
+                original_image_path=final_original_path,
+                edit_prompt=edit_prompt,
+                video_params=video_params,
+                reference_images=reference_images
+            )
+
+            if not result.get("success"):
+                return {"success": False, "error": result.get("error", "编辑失败")}
+
+            new_image_url = result.get("image_url", "")
+
+            # 更新数据库中的素材图信息
+            update_data = {
+                "image_path": new_image_url,
+                "prompt": f"{original_image.get('prompt', '')} | 编辑: {edit_prompt}",
+                "task_status": "completed"
+            }
+
+            success = self.session_manager.update_material_image(
+                session_id, image_index, update_data
+            )
+
+            if success:
+                return {
+                    "success": True,
+                    "message": f"素材图 {image_index + 1} 已编辑完成",
+                    "image_path": new_image_url
+                }
+            else:
+                return {"success": False, "error": "更新素材图信息失败"}
+
+        except Exception as e:
+            logger.error(f"编辑素材图失败: {e}")
+            return {"success": False, "error": f"编辑素材图失败: {str(e)}"}

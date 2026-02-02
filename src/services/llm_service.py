@@ -22,13 +22,14 @@ class LLMService:
         self.max_retries = 2
         self.retry_delay = 2  # 秒
 
-    def _call_with_retry(self, prompt: str, temperature: float, operation_name: str) -> str:
+    def _call_with_retry(self, prompt: str, temperature: float, operation_name: str, max_tokens: int = 16384) -> str:
         """带重试机制的API调用
 
         Args:
             prompt: 提示词
             temperature: 温度参数
             operation_name: 操作名称（用于日志）
+            max_tokens: 最大输出 token 数，默认 16384
 
         Returns:
             响应文本
@@ -48,6 +49,7 @@ class LLMService:
                     messages=[{"role": "user", "content": prompt}],
                     temperature=temperature,
                     top_p=0.7,
+                    max_tokens=max_tokens,
                     stream=True,
                 )
 
@@ -187,7 +189,8 @@ class LLMService:
 - 仅返回JSON，不要包含其他内容"""
 
         logger.info("调用 LLM 生成分片脚本...")
-        response_text = self._call_with_retry(prompt, temperature=0.6, operation_name="生成分片脚本")
+        # 分片脚本生成需要较大的输出空间，使用 16384 tokens
+        response_text = self._call_with_retry(prompt, temperature=0.6, operation_name="生成分片脚本", max_tokens=16384)
 
         result = parse_json_response(response_text)
         segments = [ScriptSegment(**seg) for seg in result.get("segments", [])]
@@ -252,57 +255,85 @@ class LLMService:
 {optimized_script}{extra_instruction}
 
 ## 任务说明
-分析脚本中出现的所有视觉元素，生成2-3张"设定稿"风格的素材图提示词：
+分析脚本中出现的所有视觉元素，生成2-5张"设定稿/参考图"风格的素材图提示词。
 
-### 第1张：角色设定图（Character Design Sheet）
-- 展示脚本中所有角色/人物/动物
-- 每个角色需要多角度展示（正面、侧面、背面或3/4视角）
-- 必须包含身高比例尺（如1.7m的刻度标尺）或人物之间的比例对照
-- 展示角色的服装、发型、表情等细节
-- 白色或浅灰色简洁背景，突出角色本身
-- 角色之间留有间距，便于对比
+⚠️ **重要提示**：如果用户提供了参考图，生成的提示词应该侧重于描述**内容和风格**，避免过多的设计稿元素（如标尺、标注、多角度展示等），因为这些元素在图生图模式下可能会干扰生成效果。
 
-### 第2张：物品/道具设定图（Props Design Sheet）
-- 展示脚本中出现的重要物品、道具、工具
-- 每个物品带尺寸标注（如"30cm"、"手掌大小"等）
-- 多角度展示重要物品
-- 可以包含物品的使用说明或细节放大图
-- 整齐排列，白色背景
+### 素材图类型及要求：
 
-### 第3张：场景设定图（Environment Design）（如需要）
-- 展示主要场景的全景概览
-- 包含光线、氛围、色调
-- 可标注关键位置或区域
+**1. 主要角色设定图（type: "character_main"）**
+- 展示脚本中所有**主要角色**（主角、重要配角）
+- 描述：外貌特征、服装、发型、表情、姿态
+- 风格统一，突出角色个性
+- 如有参考图：侧重描述角色特点和动作，减少"model sheet"等设计稿术语
 
-返回JSON格式:
+**2. 边缘角色设定图（type: "character_minor"）** *(如需要)*
+- 展示脚本中的**次要角色**（龙套、背景人物、群众）
+- 简化描述，可以群组展示
+- 如果次要角色很少或不重要，可省略此项
+
+**3. 物品/道具设定图（type: "props"）** *(如需要)*
+- 展示脚本中出现的**重要物品、道具、工具**
+- 描述：外观、材质、特征、功能
+- 如有参考图：侧重描述物品外观和用途，避免"size annotations"等标注术语
+- 如果物品很少或不重要，可省略此项
+
+**4. 主场景设定图（type: "environment_main"）** *(如需要)*
+- 展示脚本中**最主要的场景**（核心场景、主场地）
+- 描述：空间布局、光线、氛围、色调、关键元素
+- 如有参考图：侧重场景氛围和视觉风格
+
+**5. 副场景设定图（type: "environment_minor"）** *(如需要)*
+- 展示脚本中的**次要场景**（过渡场景、背景场景）
+- 简化描述
+- 如果副场景不重要，可省略此项
+
+### 返回JSON格式示例:
 {{
     "prompts": [
         {{
-            "type": "character",
-            "prompt": "Character design sheet, model sheet style, [详细描述所有角色]..., multiple angles (front view, side view, back view), height scale ruler on the side showing measurements, white background, clean layout, professional concept art, {video_params.style} style",
-            "description": "角色设定图：包含XXX等角色，附身高比例尺"
+            "type": "character_main",
+            "prompt": "A detailed character design of [主角名称], [外貌描述], [服装描述], [姿态和表情], [风格特征], {video_params.style} style, high quality illustration",
+            "description": "主要角色：[角色名称]，[简短描述]"
+        }},
+        {{
+            "type": "character_minor",
+            "prompt": "Minor characters from the scene, [配角描述], simple design, {video_params.style} style",
+            "description": "边缘角色：[角色列表]"
         }},
         {{
             "type": "props",
-            "prompt": "Props and items design sheet, [详细描述所有物品]..., with size annotations, multiple views, organized layout, white background, detailed illustration, {video_params.style} style",
-            "description": "物品设定图：包含XXX等道具，附尺寸标注"
+            "prompt": "Important props and items: [物品描述], [材质和外观], detailed illustration, {video_params.style} style",
+            "description": "重要道具：[物品列表]"
         }},
         {{
-            "type": "environment",
-            "prompt": "Environment concept art, [场景描述]..., establishing shot, atmosphere and lighting, {video_params.style} style",
-            "description": "场景设定图：XXX场景全景"
+            "type": "environment_main",
+            "prompt": "Main environment concept: [场景描述], [光线和氛围], establishing shot, {video_params.style} style",
+            "description": "主场景：[场景名称]"
+        }},
+        {{
+            "type": "environment_minor",
+            "prompt": "Secondary environment: [副场景描述], background setting, {video_params.style} style",
+            "description": "副场景：[场景名称]"
         }}
     ]
 }}
 
-重要要求:
-- prompt必须使用英文
-- 角色设定图必须包含"height scale ruler"或"size comparison"
-- 物品设定图必须包含"size annotations"或"measurements"
-- 如果脚本中物品很少，可以省略物品设定图
-- 如果场景单一或不重要，可以省略场景设定图
-- 确保所有在视频中会出现的角色、物品都被包含
-- 仅返回JSON"""
+### 重要要求:
+1. **prompt必须使用英文**，description使用中文
+2. **根据脚本实际情况选择类型**：
+   - 至少包含1张（通常是主要角色或主场景）
+   - 最多5张（覆盖所有类型）
+   - 如果某类型元素不存在或不重要，直接省略
+3. **如果用户提供了参考图（图生图模式）**：
+   - 避免使用 "model sheet", "design sheet", "height scale ruler", "size annotations", "multiple angles" 等设计稿术语
+   - 侧重描述**视觉特征、风格、氛围**
+   - 使用 "detailed illustration", "concept art", "high quality" 等通用术语
+4. **如果没有参考图（文生图模式）**：
+   - 可以使用 "character design sheet", "model sheet style" 等术语
+   - 可以包含 "multiple views", "height comparison" 等要求
+5. **确保描述清晰具体**：包含足够的细节让AI理解要生成什么
+6. **仅返回JSON**，不要有其他文字"""
 
         logger.info("调用 LLM 生成素材图提示词...")
         response_text = self._call_with_retry(prompt, temperature=0.7, operation_name="生成素材图提示词")
@@ -323,7 +354,8 @@ class LLMService:
         prompts = [
             {
                 "prompt": p.get("prompt", "").strip(),
-                "description": p.get("description", "").strip()
+                "description": p.get("description", "").strip(),
+                "type": p.get("type", "general").strip()  # 保留 type 字段
             }
             for p in prompts_data
             if p.get("prompt", "").strip()  # 只保留有有效 prompt 的项
@@ -333,7 +365,8 @@ class LLMService:
         if not prompts:
             prompts = [{
                 "prompt": f"A high quality {video_params.style} style scene, detailed, professional",
-                "description": "默认素材图"
+                "description": "默认素材图",
+                "type": "general"
             }]
 
         logger.info(f"生成 {len(prompts)} 个素材图提示词")

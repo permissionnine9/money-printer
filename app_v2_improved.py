@@ -200,27 +200,32 @@ def load_session_data(session_id: str) -> tuple:
 def get_step_component_visibility(step_id: int) -> dict:
     """根据步骤ID返回各组件的可见性
 
-    | 步骤 | script_output | images_gallery | videos_output | fetch_btn |
-    |------|---------------|----------------|---------------|-----------|
-    | 1    | 隐藏          | 隐藏           | 隐藏          | 隐藏      |
-    | 2    | **显示**      | 隐藏           | 隐藏          | 隐藏      |
-    | 3    | 隐藏          | **显示**       | 隐藏          | **显示**  |
-    | 4    | 隐藏          | 隐藏           | 隐藏          | 隐藏      |
-    | 5    | 隐藏          | **显示**       | 隐藏          | 隐藏      |
-    | 6    | 隐藏          | 隐藏           | **显示**      | 隐藏      |
+    | 步骤 | script_output | images_gallery | videos_output | segment_edit | frame_manage |
+    |------|---------------|----------------|---------------|--------------|--------------|
+    | 1    | 隐藏          | 隐藏           | 隐藏          | 隐藏         | 隐藏         |
+    | 2    | **显示**      | 隐藏           | 隐藏          | 隐藏         | 隐藏         |
+    | 3    | 隐藏          | **显示**       | 隐藏          | 隐藏         | 隐藏         |
+    | 4    | 隐藏          | 隐藏           | 隐藏          | **显示**     | 隐藏         |
+    | 5    | 隐藏          | **显示**       | 隐藏          | 隐藏         | **显示**     |
+    | 6    | 隐藏          | 隐藏           | **显示**      | 隐藏         | 隐藏         |
     """
     visibility = {
         "script_visible": False,
         "images_visible": False,
         "videos_visible": False,
+        "segment_edit_visible": False,
+        "frame_manage_visible": False,
     }
 
     if step_id == 2:
         visibility["script_visible"] = True
     elif step_id == 3:
         visibility["images_visible"] = True
+    elif step_id == 4:
+        visibility["segment_edit_visible"] = True
     elif step_id == 5:
         visibility["images_visible"] = True
+        visibility["frame_manage_visible"] = True
     elif step_id == 6:
         visibility["videos_visible"] = True
 
@@ -507,34 +512,36 @@ def load_single_step_output(session_id: str, step_id: int) -> tuple:
     )
 
 
-def get_action_button_state(step_id: int, completed_steps: list[str]) -> tuple[str, bool, bool]:
-    """根据当前显示的步骤和完成状态，返回操作按钮的文字、可见性和是否显示提示词输入框
+def get_action_button_state(step_id: int, completed_steps: list[str]) -> tuple[str, bool, bool, bool]:
+    """根据当前显示的步骤和完成状态，返回操作按钮的文字、可见性、是否显示提示词输入框、是否显示参考图上传
 
     Returns:
-        (button_text, is_visible, show_prompt_input)
+        (button_text, is_visible, show_prompt_input, show_reference_upload)
     """
     step_info = STEPS[step_id - 1]
     step_name = step_info["name"]
 
     # 已完成的步骤：显示重新生成按钮和提示词输入框
     regenerate_config = {
-        3: ("🔄 重新生成素材图", True),
-        4: ("🔄 重新生成分片脚本", True),
-        5: ("🔄 全部重新生成首尾帧", True),
-        6: ("🔄 重新生成视频", True),
+        3: ("🔄 重新生成素材图", True, True),   # (btn_text, show_prompt, show_upload)
+        4: ("🔄 重新生成分片脚本", True, False),
+        5: ("🔄 全部重新生成首尾帧", True, False),
+        6: ("🔄 重新生成视频", True, False),
     }
 
     if step_id in regenerate_config and step_name in completed_steps:
-        btn_text, show_prompt = regenerate_config[step_id]
-        return btn_text, True, show_prompt
+        btn_text, show_prompt, show_upload = regenerate_config[step_id]
+        return btn_text, True, show_prompt, show_upload
 
     # 其他情况：如果该步骤是下一个待执行的步骤，显示正常按钮
     next_step = get_next_step_info(completed_steps)
     if next_step and next_step["id"] == step_id:
-        return f"{step_info['icon']} {step_info['title']}", True, False
+        # 步骤3首次执行时也显示参考图上传
+        show_upload = (step_id == 3)
+        return f"{step_info['icon']} {step_info['title']}", True, False, show_upload
 
     # 该步骤已完成或未到达，隐藏按钮
-    return "", False, False
+    return "", False, False, False
 
 
 def switch_step_view(step_id: int):
@@ -543,7 +550,9 @@ def switch_step_view(step_id: int):
 
     if not current_session_id:
         completed_steps = []
-        btn_text, btn_visible, show_prompt = get_action_button_state(step_id, completed_steps)
+        btn_text, btn_visible, show_prompt, show_upload = get_action_button_state(step_id, completed_steps)
+        # 判断是否显示素材图编辑区域（步骤3且已完成）
+        show_material_edit = False
         return (
             gr.update(value=get_step_button_label(1, completed_steps), variant=get_step_button_style(1, completed_steps, step_id)),
             gr.update(value=get_step_button_label(2, completed_steps), variant=get_step_button_style(2, completed_steps, step_id)),
@@ -558,7 +567,13 @@ def switch_step_view(step_id: int):
             step_id,
             gr.update(value=btn_text, visible=btn_visible),
             gr.update(visible=show_prompt, value=""),  # 自定义提示词输入框
+            gr.update(visible=show_upload, value=None),  # 参考图上传
             [],  # 首尾帧数据（无会话时为空）
+            [],  # 分片数据（无会话时为空）
+            [],  # 素材图数据（无会话时为空）
+            gr.update(visible=visibility["segment_edit_visible"]),  # 分片脚本编辑区域
+            gr.update(visible=visibility["frame_manage_visible"]),  # 首尾帧管理区域
+            gr.update(visible=show_material_edit),  # 素材图编辑区域
         )
 
     status = workflow.get_session_status(current_session_id)
@@ -567,10 +582,15 @@ def switch_step_view(step_id: int):
     output_text, script_output, images_output, videos_output = load_single_step_output(current_session_id, step_id)
 
     # 获取操作按钮状态
-    btn_text, btn_visible, show_prompt = get_action_button_state(step_id, completed_steps)
+    btn_text, btn_visible, show_prompt, show_upload = get_action_button_state(step_id, completed_steps)
 
-    # 加载首尾帧数据
+    # 加载首尾帧数据、分片数据和素材图数据
     frames_data = load_frames_data(current_session_id)
+    segments_data = load_segments_data(current_session_id)
+    material_images_data = load_material_images_data(current_session_id)
+
+    # 判断是否显示素材图编辑区域（步骤3且已完成）
+    show_material_edit = (step_id == 3 and "generate_material_images" in completed_steps)
 
     return (
         gr.update(value=get_step_button_label(1, completed_steps), variant=get_step_button_style(1, completed_steps, step_id)),
@@ -586,7 +606,13 @@ def switch_step_view(step_id: int):
         step_id,
         gr.update(value=btn_text, visible=btn_visible),
         gr.update(visible=show_prompt, value=""),  # 自定义提示词输入框
+        gr.update(visible=show_upload, value=None),  # 参考图上传
         frames_data,  # 首尾帧数据
+        segments_data,  # 分片数据
+        material_images_data,  # 素材图数据
+        gr.update(visible=visibility["segment_edit_visible"]),  # 分片脚本编辑区域
+        gr.update(visible=visibility["frame_manage_visible"]),  # 首尾帧管理区域
+        gr.update(visible=show_material_edit),  # 素材图编辑区域
     )
 
 
@@ -668,15 +694,19 @@ def load_latest_session():
         # 加载当前步骤的输出内容
         output_text, script_output, images_output, videos_output = load_single_step_output(session_id, current_step_id)
 
-        # 加载分片和帧数据
+        # 加载分片、帧数据和素材图数据
         segments_data = load_segments_data(session_id)
         frames_data = load_frames_data(session_id)
+        material_images_data = load_material_images_data(session_id)
 
         # 获取当前步骤的组件可见性
         visibility = get_step_component_visibility(current_step_id)
 
         # 获取当前步骤的按钮状态
-        btn_text, btn_visible, show_prompt = get_action_button_state(current_step_id, completed_steps)
+        btn_text, btn_visible, show_prompt, show_upload = get_action_button_state(current_step_id, completed_steps)
+
+        # 判断是否显示素材图编辑区域（步骤3且已完成）
+        show_material_edit = (current_step_id == 3 and "generate_material_images" in completed_steps)
 
         return (
             # 6个步骤按钮的更新
@@ -692,6 +722,7 @@ def load_latest_session():
             gr.update(interactive=state["new_session_enabled"]),
             gr.update(value=btn_text, visible=btn_visible),
             gr.update(visible=show_prompt, value=""),  # 自定义提示词输入框
+            gr.update(visible=show_upload, value=None),  # 参考图上传
             gr.update(interactive=state["script_interactive"], value=script),
             gr.update(interactive=state["params_interactive"], value=resolution),
             gr.update(interactive=state["params_interactive"], value=aspect_ratio),
@@ -704,8 +735,12 @@ def load_latest_session():
             gr.update(value=videos_output, visible=visibility["videos_visible"]),
             segments_data,
             frames_data,
+            material_images_data,  # 素材图数据
             current_step_id,  # 当前选中的步骤
             get_logs(),  # 日志内容
+            gr.update(visible=visibility["segment_edit_visible"]),  # 分片脚本编辑区域
+            gr.update(visible=visibility["frame_manage_visible"]),  # 首尾帧管理区域
+            gr.update(visible=show_material_edit),  # 素材图编辑区域
         )
     else:
         logger.info("没有找到活动会话")
@@ -713,7 +748,11 @@ def load_latest_session():
         completed_steps = []
 
         # 无会话时按钮不显示
-        btn_text, btn_visible, show_prompt = "", False, False
+        btn_text, btn_visible, show_prompt, show_upload = "", False, False, False
+
+        # 步骤1时隐藏分片编辑、首尾帧管理和素材图编辑
+        visibility = get_step_component_visibility(1)
+        show_material_edit = False
 
         return (
             # 6个步骤按钮的更新
@@ -729,6 +768,7 @@ def load_latest_session():
             gr.update(interactive=state["new_session_enabled"]),
             gr.update(value=btn_text, visible=btn_visible),
             gr.update(visible=show_prompt, value=""),  # 自定义提示词输入框
+            gr.update(visible=show_upload, value=None),  # 参考图上传
             gr.update(interactive=state["script_interactive"], value=""),
             gr.update(interactive=state["params_interactive"]),
             gr.update(interactive=state["params_interactive"]),
@@ -741,8 +781,12 @@ def load_latest_session():
             gr.update(value=None, visible=False),  # 视频 - 步骤1时隐藏
             [],
             [],
+            [],  # 空素材图数据
             1,  # 默认选中步骤1
             "",  # 空日志
+            gr.update(visible=visibility["segment_edit_visible"]),  # 分片脚本编辑区域 - 步骤1时隐藏
+            gr.update(visible=visibility["frame_manage_visible"]),  # 首尾帧管理区域 - 步骤1时隐藏
+            gr.update(visible=show_material_edit),  # 素材图编辑区域 - 步骤1时隐藏
         )
 
 
@@ -761,7 +805,11 @@ def create_new_session():
     completed_steps = []
 
     # 获取步骤1的按钮状态
-    btn_text, btn_visible, show_prompt = get_action_button_state(1, completed_steps)
+    btn_text, btn_visible, show_prompt, show_upload = get_action_button_state(1, completed_steps)
+
+    # 步骤1时隐藏分片编辑、首尾帧管理和素材图编辑
+    visibility = get_step_component_visibility(1)
+    show_material_edit = False
 
     return (
         # 6个步骤按钮的更新
@@ -777,6 +825,7 @@ def create_new_session():
         gr.update(interactive=state["new_session_enabled"]),
         gr.update(value=btn_text, visible=btn_visible),
         gr.update(visible=show_prompt, value=""),  # 自定义提示词输入框
+        gr.update(visible=show_upload, value=None),  # 参考图上传
         gr.update(interactive=state["script_interactive"], value=""),
         gr.update(interactive=state["params_interactive"], value="1080p"),
         gr.update(interactive=state["params_interactive"], value="16:9"),
@@ -789,8 +838,12 @@ def create_new_session():
         gr.update(value=None, visible=False),  # 视频 - 步骤1时隐藏
         [],  # 分片状态
         [],  # 帧状态
+        [],  # 素材图状态
         1,  # 当前选中步骤1
         get_logs(),  # 日志内容
+        gr.update(visible=visibility["segment_edit_visible"]),  # 分片脚本编辑区域 - 步骤1时隐藏
+        gr.update(visible=visibility["frame_manage_visible"]),  # 首尾帧管理区域 - 步骤1时隐藏
+        gr.update(visible=show_material_edit),  # 素材图编辑区域 - 步骤1时隐藏
     )
 
 
@@ -814,18 +867,22 @@ async def execute_next_step(
     style: str,
     perspective: str,
     current_display_step: int = 0,
-    custom_prompt: str = ""
+    custom_prompt: str = "",
+    reference_images = None
 ):
     """执行下一步或重新生成
 
     Args:
         current_display_step: 当前显示的步骤ID，用于判断是否是重新生成操作
         custom_prompt: 自定义提示词，用于重新生成时增加控制力
+        reference_images: 用户上传的参考图（仅步骤3使用）
     """
     if not current_session_id:
         logger.error("没有活动会话")
         state = get_current_state()
         completed_steps = []
+        visibility = get_step_component_visibility(1)
+        show_material_edit = False
         return (
             *_generate_step_button_updates(completed_steps, 1),
             state["session_info"],
@@ -834,6 +891,7 @@ async def execute_next_step(
             gr.update(interactive=state["new_session_enabled"]),
             gr.update(value="", visible=False),  # 操作按钮
             gr.update(visible=False, value=""),  # 自定义提示词
+            gr.update(visible=False, value=None),  # 参考图上传
             gr.update(interactive=state["script_interactive"]),
             gr.update(interactive=state["params_interactive"]),
             gr.update(interactive=state["params_interactive"]),
@@ -846,8 +904,12 @@ async def execute_next_step(
             gr.update(value=None, visible=False),
             [],
             [],
+            [],  # 素材图数据
             1,
             get_logs(),
+            gr.update(visible=visibility["segment_edit_visible"]),  # 分片脚本编辑区域
+            gr.update(visible=visibility["frame_manage_visible"]),  # 首尾帧管理区域
+            gr.update(visible=show_material_edit),  # 素材图编辑区域
         )
 
     status = workflow.get_session_status(current_session_id)
@@ -882,11 +944,13 @@ async def execute_next_step(
         state = get_current_state()
         segments_data = load_segments_data(current_session_id)
         frames_data = load_frames_data(current_session_id)
+        material_images_data = load_material_images_data(current_session_id)
         # 全部完成，显示最后一步的内容
         output_text, script_output, images_output, videos_output = load_single_step_output(current_session_id, 6)
         visibility = get_step_component_visibility(6)
         # 获取步骤6的按钮状态
-        btn_text, btn_visible, show_prompt = get_action_button_state(6, completed_steps)
+        btn_text, btn_visible, show_prompt, show_upload = get_action_button_state(6, completed_steps)
+        show_material_edit = False
         return (
             *_generate_step_button_updates(completed_steps, 6),
             state["session_info"],
@@ -895,6 +959,7 @@ async def execute_next_step(
             gr.update(interactive=state["new_session_enabled"]),
             gr.update(value=btn_text, visible=btn_visible),
             gr.update(visible=show_prompt, value=""),  # 自定义提示词
+            gr.update(visible=show_upload, value=None),  # 参考图上传
             gr.update(interactive=state["script_interactive"]),
             gr.update(interactive=state["params_interactive"]),
             gr.update(interactive=state["params_interactive"]),
@@ -907,8 +972,12 @@ async def execute_next_step(
             gr.update(value=videos_output, visible=visibility["videos_visible"]),
             segments_data,
             frames_data,
+            material_images_data,  # 素材图数据
             6,
             get_logs(),
+            gr.update(visible=visibility["segment_edit_visible"]),  # 分片脚本编辑区域
+            gr.update(visible=visibility["frame_manage_visible"]),  # 首尾帧管理区域
+            gr.update(visible=show_material_edit),  # 素材图编辑区域
         )
 
     executing_step_id = next_step["id"]
@@ -921,7 +990,9 @@ async def execute_next_step(
         # 步骤1：提交脚本和参数
         if not script.strip():
             state = get_current_state()
-            btn_text, btn_visible, show_prompt = get_action_button_state(1, completed_steps)
+            btn_text, btn_visible, show_prompt, show_upload = get_action_button_state(1, completed_steps)
+            visibility = get_step_component_visibility(1)
+            show_material_edit = False
             return (
                 *_generate_step_button_updates(completed_steps, 1),
                 state["session_info"],
@@ -930,6 +1001,7 @@ async def execute_next_step(
                 gr.update(interactive=state["new_session_enabled"]),
                 gr.update(value=btn_text, visible=btn_visible),
                 gr.update(visible=show_prompt, value=""),  # 自定义提示词
+                gr.update(visible=show_upload, value=None),  # 参考图上传
                 gr.update(interactive=state["script_interactive"]),
                 gr.update(interactive=state["params_interactive"]),
                 gr.update(interactive=state["params_interactive"]),
@@ -942,8 +1014,12 @@ async def execute_next_step(
                 gr.update(value=None, visible=False),
                 [],
                 [],
+                [],  # 素材图数据
                 1,
                 get_logs(),
+                gr.update(visible=visibility["segment_edit_visible"]),  # 分片脚本编辑区域
+                gr.update(visible=visibility["frame_manage_visible"]),  # 首尾帧管理区域
+                gr.update(visible=show_material_edit),  # 素材图编辑区域
             )
         video_params = {
             "resolution": resolution,
@@ -958,9 +1034,23 @@ async def execute_next_step(
         result = await workflow.step_optimize_script(current_session_id)
 
     elif next_step["id"] == 3:
-        # 传递自定义提示词（仅在重新生成时有效）
+        # 处理用户上传的参考图
+        ref_image_paths = []
+        if reference_images and hasattr(reference_images, '__iter__'):
+            # reference_images 可能是 list of NamedString/file objects
+            for img in reference_images:
+                if img:
+                    img_path = img.name if hasattr(img, 'name') else str(img)
+                    ref_image_paths.append(img_path)
+                    logger.info(f"[步骤3] 用户上传参考图: {img_path}")
+
+        # 传递自定义提示词和参考图
         extra_prompt = custom_prompt if is_regenerate else ""
-        result = await workflow.step_generate_material_images(current_session_id, extra_prompt=extra_prompt)
+        result = await workflow.step_generate_material_images(
+            current_session_id,
+            extra_prompt=extra_prompt,
+            reference_images=ref_image_paths if ref_image_paths else None
+        )
 
     elif next_step["id"] == 4:
         # 传递自定义提示词（仅在重新生成时有效）
@@ -990,9 +1080,10 @@ async def execute_next_step(
         # 执行成功后，加载该步骤的输出（显示当前步骤的结果，而不是下一步）
         output_text, script_output, images_output, videos_output = load_single_step_output(current_session_id, executing_step_id)
 
-    # 加载分片和帧状态
+    # 加载分片、帧状态和素材图数据
     segments_data = load_segments_data(current_session_id)
     frames_data = load_frames_data(current_session_id)
+    material_images_data = load_material_images_data(current_session_id)
 
     # 更新状态
     state = get_current_state()
@@ -1004,7 +1095,10 @@ async def execute_next_step(
     visibility = get_step_component_visibility(display_step_id)
 
     # 根据当前显示步骤获取按钮状态（关键修复：使用 display_step_id 而不是下一步）
-    btn_text, btn_visible, show_prompt = get_action_button_state(display_step_id, new_completed_steps)
+    btn_text, btn_visible, show_prompt, show_upload = get_action_button_state(display_step_id, new_completed_steps)
+
+    # 判断是否显示素材图编辑区域（步骤3且已完成）
+    show_material_edit = (display_step_id == 3 and "generate_material_images" in new_completed_steps)
 
     return (
         *_generate_step_button_updates(new_completed_steps, display_step_id),
@@ -1014,6 +1108,7 @@ async def execute_next_step(
         gr.update(interactive=state["new_session_enabled"]),
         gr.update(value=btn_text, visible=btn_visible),
         gr.update(visible=show_prompt, value=""),  # 自定义提示词
+        gr.update(visible=show_upload, value=None),  # 参考图上传
         gr.update(interactive=state["script_interactive"]),
         gr.update(interactive=state["params_interactive"]),
         gr.update(interactive=state["params_interactive"]),
@@ -1026,8 +1121,12 @@ async def execute_next_step(
         gr.update(value=videos_output, visible=visibility["videos_visible"]),
         segments_data,
         frames_data,
+        material_images_data,  # 素材图数据
         display_step_id,
         get_logs(),
+        gr.update(visible=visibility["segment_edit_visible"]),  # 分片脚本编辑区域
+        gr.update(visible=visibility["frame_manage_visible"]),  # 首尾帧管理区域
+        gr.update(visible=show_material_edit),  # 素材图编辑区域
     )
 
 
@@ -1140,6 +1239,21 @@ def load_frames_data(session_id: str) -> list[dict]:
     return frames_data.get('segment_frames', [])
 
 
+def load_material_images_data(session_id: str) -> list[dict]:
+    """加载素材图数据"""
+    if not session_id:
+        return []
+
+    status = workflow.get_session_status(session_id)
+    step_results = status.get('step_results', {})
+    material_data = step_results.get('generate_material_images', {})
+
+    if not material_data:
+        return []
+
+    return material_data.get('material_images', [])
+
+
 def upload_frame_action(segment_index: int, frame_type: str, file):
     """上传替换帧"""
     if not current_session_id:
@@ -1213,6 +1327,63 @@ def reuse_adjacent_frame_action(segment_index: int, frame_type: str):
         return message, frames
     else:
         return f"复用失败: {result.get('error', '未知错误')}", frames
+
+
+# ==================== 素材图编辑相关函数 ====================
+
+async def edit_material_image_action(image_index: int, edit_prompt: str, reference_files: list | None = None, original_image_path: str = None):
+    """编辑单个素材图
+
+    Args:
+        image_index: 图片索引
+        edit_prompt: 编辑提示词
+        reference_files: 用户选择的参考图文件列表或URL列表（可选），用于图生图编辑
+                      可以是文件对象、文件路径字符串或图片URL
+        original_image_path: 原素材图路径，当参考图为空时作为保底使用
+    """
+    if not current_session_id:
+        logger.info("请先创建会话!")
+        return "请先创建会话", []
+
+    if not edit_prompt or not edit_prompt.strip():
+        logger.info("请输入编辑提示词!")
+        return "请输入编辑提示词", load_material_images_data(current_session_id)
+
+    # 处理参考图：支持文件对象、本地路径和URL
+    reference_image_paths = []
+    if reference_files:
+        for item in reference_files:
+            if not item:
+                continue
+            
+            # 处理文件对象（Gradio File 组件返回的对象）
+            if hasattr(item, 'name'):
+                file_path = item.name
+                reference_image_paths.append(file_path)
+                logger.info(f"[素材图编辑] 使用上传文件: {file_path}")
+            # 处理URL字符串
+            elif isinstance(item, str) and item.startswith(('http://', 'https://')):
+                reference_image_paths.append(item)
+                logger.info(f"[素材图编辑] 使用URL参考图: {item[:80]}...")
+            # 处理本地路径字符串
+            elif isinstance(item, str):
+                reference_image_paths.append(item)
+                logger.info(f"[素材图编辑] 使用本地路径: {item}")
+
+    result = await workflow.edit_material_image(
+        current_session_id, 
+        image_index, 
+        edit_prompt.strip(),
+        reference_images=reference_image_paths if reference_image_paths else None,
+        original_image_path=original_image_path
+    )
+
+    material_images = load_material_images_data(current_session_id)
+
+    if result["success"]:
+        return f"✅ {result['message']}", material_images
+    else:
+        return f"❌ {result.get('error', '未知错误')}", material_images
 
 
 def create_ui():
@@ -1310,6 +1481,18 @@ def create_ui():
                     visible=False
                 )
 
+                # 参考图上传组件（步骤3时显示）
+                with gr.Group(visible=True):
+                    reference_images_upload = gr.File(
+                        label="📤 上传参考图（可选，支持多张）- 步骤3专用",
+                        file_types=["image"],
+                        file_count="multiple",
+                        visible=False
+                    )
+                    gr.Markdown("""
+<small>💡 **提示**: 上传您希望AI参考的主体图片（角色、物品、场景等），AI将基于这些图片使用 `gemini-3-pro-image-preview` 模型生成风格一致的素材图。支持JPG、PNG格式，建议1-3张高质量图片。</small>
+                    """)
+
                 next_step_btn = gr.Button(
                     "下一步",
                     variant="primary",
@@ -1355,7 +1538,7 @@ def create_ui():
                     refresh_log_btn = gr.Button("刷新日志", size="sm", variant="secondary")
 
         # ==================== 分片脚本编辑区域 ====================
-        with gr.Accordion("分片脚本编辑", open=False, visible=True) as segment_edit_accordion:
+        with gr.Accordion("分片脚本编辑", open=False, visible=False) as segment_edit_accordion:
             gr.Markdown("**提示**: 步骤4完成后可在此编辑分片脚本。修改后记得点击保存。")
 
             # 状态：存储当前分片数据
@@ -1446,8 +1629,231 @@ def create_ui():
                 outputs=[segment_edit_status, segments_state]
             )
 
+        # ==================== 素材图编辑区域 ====================
+        with gr.Accordion("素材图编辑", open=True, visible=False) as material_edit_accordion:
+            gr.Markdown("""**提示**: 步骤3完成后可在此编辑单个素材图。
+- **编辑提示词**：描述你想要的修改，例如："更鲜艳的颜色"、"添加笑容"、"卡通风格"、"更暗的背景"
+- **参考图管理**：原素材图默认作为参考图，你可以在下方预览区域删除它或添加其他参考图
+- 使用 `google/gemini-3-pro-image-preview` 模型进行图生图编辑，保持原图风格
+
+💡 **自由编辑技巧**：如果你想大幅改变原图风格，可以删除原素材图参考，只保留你想要的参考图""")
+
+            # 状态：存储当前素材图数据
+            material_images_state = gr.State([])
+
+            # 编辑提示信息
+            material_edit_status = gr.Markdown("")
+
+            # 使用@gr.render动态渲染素材图编辑表单
+            @gr.render(inputs=[material_images_state])
+            def render_material_image_editors(images_list):
+                if not images_list:
+                    gr.Markdown("*暂无素材图数据，请先执行步骤3*")
+                    return
+
+                for img_idx, img in enumerate(images_list):
+                    img_path = img.get('image_path', '')
+                    img_desc = img.get('description', f'素材图 {img_idx + 1}')
+                    img_type = img.get('image_type', 'general')
+                    task_status = img.get('task_status', 'completed')
+
+                    # 类型名称映射
+                    type_names = {
+                        "character": "角色设定图",
+                        "character_main": "主要角色设定图",
+                        "character_minor": "边缘角色设定图",
+                        "props": "物品/道具设定图",
+                        "environment": "场景设定图",
+                        "environment_main": "主场景设定图",
+                        "environment_minor": "副场景设定图",
+                        "general": "素材图"
+                    }
+                    type_name = type_names.get(img_type, "素材图")
+
+                    # 判断图片是否有效
+                    img_valid = img_path and (img_path.startswith(('http://', 'https://')) or Path(img_path).exists())
+
+                    with gr.Accordion(f"{type_name} {img_idx + 1} - {img_desc}", open=False):
+                        with gr.Group():
+                            if img_valid and task_status == 'completed':
+                                gr.Image(value=img_path, label=f"{type_name}", height=300)
+                            else:
+                                status_text = "生成失败" if task_status == 'failed' else "图片不可用"
+                                gr.Markdown(f"*{status_text}*")
+
+                            # 编辑提示词输入框
+                            edit_prompt_input = gr.Textbox(
+                                label="编辑提示词",
+                                placeholder="描述你想要的修改，例如：更鲜艳的颜色、添加笑容、卡通风格等",
+                                lines=2
+                            )
+
+                            # === 参考图管理区域 ===
+                            gr.Markdown("**📷 参考图管理**：默认包含原素材图，你可以删除它或添加其他参考图")
+                            
+                            # 状态：存储当前参考图列表和选中的索引
+                            initial_ref_list = [img_path] if img_path else []  # 默认包含原素材图
+                            ref_list_state = gr.State(initial_ref_list)
+                            selected_ref_index = gr.State(None)
+                            
+                            with gr.Row():
+                                with gr.Column(scale=2):
+                                    # 参考图预览区域 - 显示当前参考图列表，支持选择
+                                    # 初始值设置为包含原素材图
+                                    reference_preview = gr.Gallery(
+                                        label="参考图列表（点击选中，可删除）",
+                                        value=initial_ref_list,
+                                        columns=6,
+                                        rows=1,
+                                        height=120,
+                                        object_fit="cover",
+                                        preview=True,
+                                        allow_preview=True,
+                                        visible=True
+                                    )
+                                with gr.Column(scale=1):
+                                    # 参考图管理按钮
+                                    with gr.Row():
+                                        add_original_btn = gr.Button("➕ 添加原图", size="sm", variant="secondary")
+                                        delete_selected_btn = gr.Button("🗑️ 删除选中", size="sm", variant="stop")
+                                    gr.Markdown("<small>💡 选中图片后点击删除可移除</small>")
+                            
+                            # 新增参考图上传区域
+                            reference_upload = gr.File(
+                                label="📤 上传新参考图",
+                                file_types=["image"],
+                                file_count="multiple",
+                                value=None
+                            )
+                            
+                            # Gallery选择事件处理 - 记录选中的索引
+                            def on_ref_selected(evt: gr.SelectData, current_list):
+                                """当用户点击Gallery中的图片时记录索引"""
+                                if evt.index is not None and evt.index < len(current_list):
+                                    return evt.index
+                                return None
+                            
+                            reference_preview.select(
+                                fn=on_ref_selected,
+                                inputs=[ref_list_state],
+                                outputs=[selected_ref_index]
+                            )
+                            
+                            # 添加原图按钮处理
+                            def add_original_image(current_list, original_path):
+                                """将原素材图添加到参考列表"""
+                                if not original_path:
+                                    return current_list, gr.update()
+                                # 避免重复添加
+                                if original_path not in current_list:
+                                    new_list = current_list + [original_path]
+                                    return new_list, gr.update(value=new_list)
+                                return current_list, gr.update()
+                            
+                            add_original_btn.click(
+                                fn=add_original_image,
+                                inputs=[ref_list_state, gr.State(img_path)],
+                                outputs=[ref_list_state, reference_preview]
+                            )
+                            
+                            # 删除选中图片处理
+                            def delete_selected_image(current_list, selected_idx):
+                                """从参考列表中删除选中的图片"""
+                                if selected_idx is None or selected_idx < 0 or selected_idx >= len(current_list):
+                                    return current_list, gr.update(), None
+                                new_list = current_list.copy()
+                                new_list.pop(selected_idx)
+                                return new_list, gr.update(value=new_list, visible=len(new_list) > 0), None
+                            
+                            delete_selected_btn.click(
+                                fn=delete_selected_image,
+                                inputs=[ref_list_state, selected_ref_index],
+                                outputs=[ref_list_state, reference_preview, selected_ref_index]
+                            )
+                            
+                            # 上传文件添加到参考列表
+                            def add_uploaded_files(current_list, upload_files):
+                                """将上传的文件添加到参考列表"""
+                                if not upload_files:
+                                    return current_list, gr.update()
+                                
+                                new_list = current_list.copy()
+                                if isinstance(upload_files, list):
+                                    for f in upload_files:
+                                        if f:
+                                            file_path = f.name if hasattr(f, 'name') else str(f)
+                                            if file_path not in new_list:
+                                                new_list.append(file_path)
+                                else:
+                                    file_path = upload_files.name if hasattr(upload_files, 'name') else str(upload_files)
+                                    if file_path not in new_list:
+                                        new_list.append(file_path)
+                                
+                                return new_list, gr.update(value=new_list, visible=True)
+                            
+                            reference_upload.change(
+                                fn=add_uploaded_files,
+                                inputs=[ref_list_state, reference_upload],
+                                outputs=[ref_list_state, reference_preview]
+                            )
+
+                            # 编辑按钮
+                            edit_btn = gr.Button("🎨 编辑素材图", variant="primary", size="sm")
+
+                            # 编辑按钮事件处理
+                            def make_edit_handler(idx, original_path):
+                                """创建编辑按钮的事件处理函数
+                                
+                                使用ref_list_state作为参考图列表
+                                """
+                                async def edit_handler(edit_prompt, ref_list):
+                                    try:
+                                        logger.info(f"[编辑按钮] 点击编辑素材图 {idx}, 提示词: {edit_prompt[:50] if edit_prompt else '空'}...")
+                                        logger.info(f"[编辑按钮] 参考图数量: {len(ref_list) if ref_list else 0}")
+                                        
+                                        result = await edit_material_image_action(
+                                            idx, 
+                                            edit_prompt, 
+                                            ref_list if ref_list else None,
+                                            original_image_path=original_path
+                                        )
+                                        # 返回结果 + 恢复按钮状态 + 清空状态
+                                        return (
+                                            result[0], result[1], 
+                                            gr.update(value="🎨 编辑素材图", interactive=True), 
+                                            [],  # 清空参考图列表
+                                            gr.update(value=[], visible=False),  # 清空预览
+                                            gr.update(value=None),  # 清空上传
+                                            None  # 清空选中索引
+                                        )
+                                    except Exception as e:
+                                        logger.error(f"[编辑按钮] 编辑失败: {str(e)}")
+                                        # 发生异常时也要恢复按钮状态
+                                        images = load_material_images_data(current_session_id) if current_session_id else []
+                                        return (
+                                            f"编辑失败: {str(e)}", images, 
+                                            gr.update(value="🎨 编辑素材图", interactive=True), 
+                                            [],
+                                            gr.update(value=[], visible=False),
+                                            gr.update(value=None),
+                                            None
+                                        )
+                                return edit_handler
+
+                            # 使用chain方式绑定事件：先显示loading，再执行编辑
+                            edit_btn.click(
+                                fn=lambda: (gr.update(value="⏳ 编辑中...", interactive=False), gr.update(visible=True)),
+                                outputs=[edit_btn, material_edit_status],
+                                show_progress=True
+                            ).then(
+                                fn=make_edit_handler(img_idx, img_path),
+                                inputs=[edit_prompt_input, ref_list_state],
+                                outputs=[material_edit_status, material_images_state, edit_btn, ref_list_state, reference_preview, reference_upload],
+                                show_progress=True
+                            )
+
         # ==================== 首尾帧管理区域 ====================
-        with gr.Accordion("首尾帧管理", open=False, visible=True) as frame_manage_accordion:
+        with gr.Accordion("首尾帧管理", open=False, visible=False) as frame_manage_accordion:
             gr.Markdown("""**提示**: 步骤5完成后可在此管理首尾帧。
 - **复用**: 直接使用相邻分片的帧，保持画面连贯
 - **重新生成**: 基于当前分片脚本和上下文重新生成
@@ -1647,11 +2053,12 @@ def create_ui():
         main_outputs = [
             step_btn_1, step_btn_2, step_btn_3, step_btn_4, step_btn_5, step_btn_6,
             session_info, status_text, guide_text,
-            new_session_btn, next_step_btn, custom_prompt_input,
+            new_session_btn, next_step_btn, custom_prompt_input, reference_images_upload,
             script_input, resolution, aspect_ratio, language, style, perspective,
             output_text, script_output, images_gallery, videos_output,
-            segments_state, frames_state,
-            current_step_state, log_output
+            segments_state, frames_state, material_images_state,
+            current_step_state, log_output,
+            segment_edit_accordion, frame_manage_accordion, material_edit_accordion  # 分片编辑、首尾帧管理和素材图编辑区域
         ]
 
         # 应用加载时自动恢复会话
@@ -1662,15 +2069,16 @@ def create_ui():
 
         next_step_btn.click(
             fn=execute_next_step,
-            inputs=[script_input, resolution, aspect_ratio, language, style, perspective, current_step_state, custom_prompt_input],
+            inputs=[script_input, resolution, aspect_ratio, language, style, perspective, current_step_state, custom_prompt_input, reference_images_upload],
             outputs=main_outputs
         )
 
-        # 步骤切换按钮事件 - 输出包括6个步骤按钮的更新、操作按钮、自定义提示词输入框和首尾帧状态
+        # 步骤切换按钮事件 - 输出包括6个步骤按钮的更新、操作按钮、自定义提示词输入框、参考图上传、首尾帧状态、分片状态、素材图状态和三个Accordion
         step_outputs = [
             step_btn_1, step_btn_2, step_btn_3, step_btn_4, step_btn_5, step_btn_6,
             output_text, script_output, images_gallery, videos_output, current_step_state,
-            next_step_btn, custom_prompt_input, frames_state
+            next_step_btn, custom_prompt_input, reference_images_upload, frames_state,
+            segments_state, material_images_state, segment_edit_accordion, frame_manage_accordion, material_edit_accordion
         ]
 
         step_btn_1.click(fn=lambda: switch_step_view(1), outputs=step_outputs)

@@ -1,18 +1,5 @@
 """视频创作相关的数据模型"""
-from typing import Optional
 from pydantic import BaseModel, Field
-from enum import Enum
-
-
-class WorkflowStatus(str, Enum):
-    """工作流状态"""
-    PENDING = "pending"
-    IN_PROGRESS = "in_progress"
-    WAITING_APPROVAL = "waiting_approval"
-    APPROVED = "approved"
-    REJECTED = "rejected"
-    COMPLETED = "completed"
-    FAILED = "failed"
 
 
 class VideoParams(BaseModel):
@@ -78,27 +65,6 @@ class ScriptSegment(BaseModel):
         return ", ".join(parts)
 
 
-class OptimizedScript(BaseModel):
-    """优化后的脚本"""
-    original_script: str = Field(description="原始脚本")
-    optimized_script: str = Field(description="优化后的完整脚本")
-    segments: list[ScriptSegment] = Field(default_factory=list, description="分片脚本列表")
-    summary: str = Field(default="", description="脚本摘要")
-
-    @property
-    def total_duration(self) -> float:
-        """计算总时长"""
-        return sum(seg.duration for seg in self.segments)
-
-
-class MaterialImageType(str, Enum):
-    """素材图类型"""
-    CHARACTER = "character"      # 角色设定图
-    PROPS = "props"              # 物品/道具设定图
-    ENVIRONMENT = "environment"  # 场景设定图
-    GENERAL = "general"          # 通用素材图
-
-
 class MaterialImage(BaseModel):
     """素材图片（设定稿风格）"""
     image_id: str = Field(description="图片ID")
@@ -128,35 +94,3 @@ class GeneratedVideo(BaseModel):
     video_path: str = Field(description="视频本地路径")
     duration: float = Field(description="视频时长（秒）")
     prompt: str = Field(default="", description="生成提示词")
-
-
-class WorkflowState(BaseModel):
-    """工作流状态"""
-    # 基本信息
-    session_id: str = Field(description="会话ID")
-    status: WorkflowStatus = Field(default=WorkflowStatus.PENDING, description="当前状态")
-    current_step: str = Field(default="", description="当前步骤")
-
-    # 输入数据
-    original_script: str = Field(default="", description="原始脚本")
-    video_params: Optional[VideoParams] = Field(default=None, description="视频参数")
-
-    # 处理结果
-    optimized_script: Optional[OptimizedScript] = Field(default=None, description="优化后的脚本")
-    material_images: list[MaterialImage] = Field(default_factory=list, description="素材图片")
-    segment_frames: list[SegmentFrame] = Field(default_factory=list, description="分镜头帧")
-    generated_videos: list[GeneratedVideo] = Field(default_factory=list, description="生成的视频")
-
-    # 人工交互
-    pending_approval: str = Field(default="", description="待审批内容类型")
-    approval_message: str = Field(default="", description="审批提示消息")
-    user_feedback: str = Field(default="", description="用户反馈")
-
-    # 错误处理
-    error_message: str = Field(default="", description="错误消息")
-
-    def get_approved_segments(self) -> list[ScriptSegment]:
-        """获取已审批的分片"""
-        if self.optimized_script:
-            return self.optimized_script.segments
-        return []
