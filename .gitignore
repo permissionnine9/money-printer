@@ -56,3 +56,5 @@ uv.lock
 # Claude
 .claude/*
 *.log
+node_modules/
+static/uploads/
