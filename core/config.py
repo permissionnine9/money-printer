@@ -3,10 +3,12 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
-
 # 项目根目录
 BASE_DIR = Path(__file__).parent.parent
+
+# 确保从项目根目录加载 .env 文件
+env_path = BASE_DIR / ".env"
+load_dotenv(dotenv_path=env_path, override=True)
 
 # 静态文件目录
 STATIC_DIR = BASE_DIR / "static"
@@ -35,7 +37,8 @@ SHENGSUANYUN_VIDEO_MODEL_WAN22 = "ali/wan2.2-kf2v-flash"  # 阿里wan2.2首尾�
 # 图片模型配置
 SHENGSUANYUN_IMAGE_MODEL = "openai/gpt-image-1.5"  # 文生图模型
 SHENGSUANYUN_IMAGE2IMAGE_MODEL = "google/gemini-2.5-flash-image"  # 图生图模型（支持参考图）
-SHENGSUANYUN_MATERIAL_IMAGE_MODEL = "google/gemini-3-pro-image-preview"  # 素材图模型（支持图生图，高质量）
+SHENGSUANYUN_MATERIAL_IMAGE_MODEL = "google/gemini-2.5-flash-image"  # 素材图模型（支持图生图）
+SHENGSUANYUN_MATERIAL_EDIT_MODEL = "bytedance/jimeng_v40"  # 素材图编辑模型（即梦v40图生图）
 
 SHENGSUANYUN_IMAGE2IMAGE_REQUEST_TIME_GAP = 4  # 图生图请求间隔时间（秒）
 

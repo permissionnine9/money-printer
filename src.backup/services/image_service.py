@@ -124,12 +124,24 @@ class ImageService:
                     }
 
                 result = response.json()
-                status = result.get("code", "").lower()
+                # API 返回格式：code 表示 API 调用状态，data.status 表示任务状态
+                api_code = result.get("code", "").lower()
+                data = result.get("data", {})
+                task_status = data.get("status", "").upper()
 
-                logger.info(f"任务 {task_id} 状态: {status}")
+                logger.info(f"任务 {task_id} API状态: {api_code}, 任务状态: {task_status}")
+
+                # 检查 API 调用是否失败
+                if api_code not in ("success", ""):
+                    error_msg = result.get("error", {}).get("message", result.get("message", "API调用失败"))
+                    return {
+                        "success": False,
+                        "status": "error",
+                        "error": error_msg
+                    }
 
                 # 检查任务状态
-                if status == "success":
+                if task_status == "COMPLETED":
                     image_url = self._extract_image_url(result)
                     if image_url:
                         return {
@@ -143,14 +155,14 @@ class ImageService:
                             "status": "completed",
                             "error": "图片URL提取失败"
                         }
-                elif status in ("failed", "error", "cancelled"):
-                    error_msg = result.get("error", result.get("message", "任务失败"))
+                elif task_status in ("FAILED", "CANCELLED"):
+                    error_msg = data.get("fail_reason") or result.get("message", "任务失败")
                     return {
                         "success": False,
                         "status": "failed",
                         "error": error_msg
                     }
-                elif status in ("pending", "processing", "running", "in_progress", "queued"):
+                elif task_status in ("PENDING", "SUBMITTING", "SUBMITTED", "IN_PROGRESS", "PROCESSING", "RUNNING", "QUEUED"):
                     return {
                         "success": False,
                         "status": "pending",
@@ -158,7 +170,7 @@ class ImageService:
                     }
                 else:
                     # 未知状态，尝试提取数据
-                    if "data" in result and result["data"]:
+                    if data:
                         image_url = self._extract_image_url(result)
                         if image_url:
                             return {
@@ -168,8 +180,8 @@ class ImageService:
                             }
                     return {
                         "success": False,
-                        "status": status,
-                        "error": f"未知状态: {status}"
+                        "status": task_status.lower() if task_status else "unknown",
+                        "error": f"未知任务状态: {task_status}"
                     }
 
         except Exception as e:
@@ -285,12 +297,18 @@ class ImageService:
                         logger.error(f"任务失败: {query_result.get('error')}")
                         return {"success": False, "error": query_result.get("error", "任务失败")}
 
+                    if status == "completed":
+                        # 已完成但提取图片失败
+                        logger.error(f"任务已完成但处理失败: {query_result.get('error')}")
+                        return {"success": False, "error": query_result.get("error", "图片URL提取失败")}
+
                     if status == "pending":
                         logger.info(f"任务处理中... ({elapsed}s/{timeout}s)")
                         continue
 
-                    # 未知状态，继续等待
-                    logger.warning(f"未知状态: {status}，继续等待...")
+                    # 未知状态，尝试返回错误
+                    logger.warning(f"未知状态: {status}，返回错误")
+                    return {"success": False, "error": f"未知状态: {status}"}
 
                 # 超时
                 logger.error(f"任务超时 ({timeout}s)")
@@ -407,11 +425,17 @@ class ImageService:
                 logger.error(f"任务失败 [{request_id}]: {query_result.get('error')}")
                 return {"success": False, "error": query_result.get("error", "任务失败")}
 
+            if status == "completed":
+                # 已完成但提取图片失败
+                logger.error(f"任务已完成但处理失败 [{request_id}]: {query_result.get('error')}")
+                return {"success": False, "error": query_result.get("error", "图片URL提取失败")}
+
             if status == "pending":
                 logger.info(f"任务处理中 [{request_id}]... ({elapsed}s/{timeout}s)")
                 continue
 
-            logger.warning(f"未知状态 [{request_id}]: {status}，继续等待...")
+            logger.warning(f"未知状态 [{request_id}]: {status}，尝试返回错误")
+            return {"success": False, "error": f"未知状态: {status}"}
 
         logger.error(f"任务超时 [{request_id}] ({timeout}s)")
         return {"success": False, "error": f"任务超时 ({timeout}s)"}
@@ -543,11 +567,17 @@ class ImageService:
                         logger.error(f"任务失败: {query_result.get('error')}")
                         return {"success": False, "error": query_result.get("error", "任务失败")}
 
+                    if status == "completed":
+                        # 已完成但提取图片失败
+                        logger.error(f"素材图已完成但处理失败: {query_result.get('error')}")
+                        return {"success": False, "error": query_result.get("error", "图片URL提取失败")}
+
                     if status == "pending":
                         logger.info(f"任务处理中... ({elapsed}s/{timeout}s)")
                         continue
 
-                    logger.warning(f"未知状态: {status}，继续等待...")
+                    logger.warning(f"未知状态: {status}，返回错误")
+                    return {"success": False, "error": f"未知状态: {status}"}
 
                 # 超时
                 logger.error(f"任务超时 ({timeout}s)")
@@ -922,11 +952,17 @@ class ImageService:
                         logger.error(f"任务失败: {query_result.get('error')}")
                         return {"success": False, "error": query_result.get("error", "任务失败")}
 
+                    if status == "completed":
+                        # 已完成但提取图片失败
+                        logger.error(f"图生图已完成但处理失败: {query_result.get('error')}")
+                        return {"success": False, "error": query_result.get("error", "图片URL提取失败")}
+
                     if status == "pending":
                         logger.info(f"任务处理中... ({elapsed}s/{timeout}s)")
                         continue
 
-                    logger.warning(f"未知状态: {status}，继续等待...")
+                    logger.warning(f"未知状态: {status}，返回错误")
+                    return {"success": False, "error": f"未知状态: {status}"}
 
                 # 超时
                 logger.error(f"任务超时 ({timeout}s)")
@@ -942,6 +978,7 @@ class ImageService:
         edit_prompt: str,
         video_params: VideoParams,
         reference_images: list[str] | None = None,
+        original_prompt: str | None = None,
         timeout: int = 180,
         poll_interval: int = 5
     ) -> dict:
@@ -956,6 +993,7 @@ class ImageService:
             edit_prompt: 编辑提示词，描述想要做的修改，例如："更鲜艳的颜色"、"添加笑容"、"卡通风格"等
             video_params: 视频参数
             reference_images: 用户选择的参考图路径列表（可选），用户可自由决定是否包含原素材图
+            original_prompt: 原始生成提示词（可选），用于保持原素材图的上下文
             timeout: 超时时间（秒），默认180秒
             poll_interval: 轮询间隔（秒），默认5秒
 
@@ -963,7 +1001,9 @@ class ImageService:
             {"success": bool, "image_url": str, "error": str}
         """
         logger.info(f"[素材图编辑] 开始编辑素材图: {edit_prompt[:50]}...")
-        
+        if original_prompt:
+            logger.info(f"[素材图编辑] 原始提示词: {original_prompt[:100]}...")
+
         # 确定最终使用的参考图列表
         # 如果用户提供了reference_images，使用用户提供的；否则使用原素材图作为保底
         if reference_images and len(reference_images) > 0:
@@ -972,14 +1012,29 @@ class ImageService:
         else:
             all_reference_images = [original_image_path]
             logger.info(f"[素材图编辑] 用户未选择参考图，使用原素材图作为保底")
-        
-        # 构建完整提示词：参考 generate_material_prompts 风格
-        # 素材图编辑应保持设定稿/角色设计表风格
-        full_prompt = f"""Edit this concept design reference image according to the following requirements: {edit_prompt}
+
+        # 构建完整提示词：结合原始提示词和编辑提示词
+        # 如果有原始提示词，则基于原始提示词进行修改；否则直接使用编辑提示词
+        if original_prompt:
+            full_prompt = f"""Based on the original concept: {original_prompt}
+
+Edit this concept design reference image according to the following requirements: {edit_prompt}
 
 Requirements:
 - Maintain the original character/object/scene design structure and key visual elements
 - Keep the consistent art style, color palette, and visual atmosphere
+- Ensure high quality, detailed illustration suitable for video production
+- Focus on visual clarity and professional concept art presentation
+- Avoid adding text annotations, labels, rulers, or measurement markings
+- The result should be a clean design reference image, not a annotated sheet
+
+Style: high quality illustration, detailed concept art, professional design reference, cinematic visual style."""
+        else:
+            # 没有原始提示词，直接使用编辑提示词
+            full_prompt = f"""Edit this concept design reference image according to the following requirements: {edit_prompt}
+
+Requirements:
+- Maintain the overall design structure and key visual elements
 - Ensure high quality, detailed illustration suitable for video production
 - Focus on visual clarity and professional concept art presentation
 - Avoid adding text annotations, labels, rulers, or measurement markings

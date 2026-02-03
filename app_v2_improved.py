@@ -7,21 +7,24 @@
 4. 生成分片脚本
 5. 生成首尾帧
 6. 生成视频
+
+支持URL参数：?session_id=xxx 用于恢复指定会话
 """
 import gradio as gr
 import logging
 from pathlib import Path
 from datetime import datetime
 from collections import deque
+import urllib.parse
 
-from src.config import (
+from core.config import (
     RESOLUTION_OPTIONS,
     ASPECT_RATIO_OPTIONS,
     LANGUAGE_OPTIONS,
     STYLE_OPTIONS,
     PERSPECTIVE_OPTIONS,
 )
-from src.agents.workflow_v2 import VideoCreationWorkflowV2
+from core.agents.workflow_v2 import VideoCreationWorkflowV2
 
 # 镜头运动选项
 CAMERA_MOVEMENT_OPTIONS = [
@@ -574,6 +577,7 @@ def switch_step_view(step_id: int):
             gr.update(visible=visibility["segment_edit_visible"]),  # 分片脚本编辑区域
             gr.update(visible=visibility["frame_manage_visible"]),  # 首尾帧管理区域
             gr.update(visible=show_material_edit),  # 素材图编辑区域
+            "",  # 隐藏的 session_id 存储 - 无会话时为空
         )
 
     status = workflow.get_session_status(current_session_id)
@@ -672,15 +676,114 @@ def get_current_state():
     }
 
 
-def load_latest_session():
-    """加载最近的活动会话"""
+def load_session_by_id(session_id: str) -> tuple:
+    """根据会话ID加载会话数据
+    
+    Returns:
+        与 load_latest_session 相同的返回格式
+    """
     global current_session_id
+    logger.info(f"尝试加载指定会话: {session_id}")
+    
+    # 检查会话是否存在
+    session = workflow.session_manager.get_session(session_id)
+    if not session:
+        logger.warning(f"会话不存在: {session_id}")
+        return None
+    
+    current_session_id = session_id
+    logger.info(f"已加载会话: {current_session_id}")
+    
+    state = get_current_state()
+    script, resolution, aspect_ratio, language, style, perspective = load_session_data(session_id)
+    
+    # 获取当前步骤（显示当前/下一个待执行的步骤）
+    status = workflow.get_session_status(session_id)
+    completed_steps = status.get('completed_steps', [])
+    next_step = get_next_step_info(completed_steps)
+    current_step_id = next_step["id"] if next_step else 6  # 如果全部完成，显示最后一步
+    
+    # 加载当前步骤的输出内容
+    output_text, script_output, images_output, videos_output = load_single_step_output(session_id, current_step_id)
+    
+    # 加载分片、帧数据和素材图数据
+    segments_data = load_segments_data(session_id)
+    frames_data = load_frames_data(session_id)
+    material_images_data = load_material_images_data(session_id)
+    
+    # 获取当前步骤的组件可见性
+    visibility = get_step_component_visibility(current_step_id)
+    
+    # 获取当前步骤的按钮状态
+    btn_text, btn_visible, show_prompt, show_upload = get_action_button_state(current_step_id, completed_steps)
+    
+    # 判断是否显示素材图编辑区域（步骤3且已完成）
+    show_material_edit = (current_step_id == 3 and "generate_material_images" in completed_steps)
+    
+    return (
+        # 6个步骤按钮的更新
+        gr.update(value=get_step_button_label(1, completed_steps), variant=get_step_button_style(1, completed_steps, current_step_id)),
+        gr.update(value=get_step_button_label(2, completed_steps), variant=get_step_button_style(2, completed_steps, current_step_id)),
+        gr.update(value=get_step_button_label(3, completed_steps), variant=get_step_button_style(3, completed_steps, current_step_id)),
+        gr.update(value=get_step_button_label(4, completed_steps), variant=get_step_button_style(4, completed_steps, current_step_id)),
+        gr.update(value=get_step_button_label(5, completed_steps), variant=get_step_button_style(5, completed_steps, current_step_id)),
+        gr.update(value=get_step_button_label(6, completed_steps), variant=get_step_button_style(6, completed_steps, current_step_id)),
+        state["session_info"],
+        state["status_text"],
+        state["guide_text"],
+        gr.update(interactive=state["new_session_enabled"]),
+        gr.update(value=btn_text, visible=btn_visible),
+        gr.update(visible=show_prompt, value=""),  # 自定义提示词输入框
+        gr.update(visible=show_upload, value=None),  # 参考图上传
+        gr.update(interactive=state["script_interactive"], value=script),
+        gr.update(interactive=state["params_interactive"], value=resolution),
+        gr.update(interactive=state["params_interactive"], value=aspect_ratio),
+        gr.update(interactive=state["params_interactive"], value=language),
+        gr.update(interactive=state["params_interactive"], value=style),
+        gr.update(interactive=state["params_interactive"], value=perspective),
+        output_text,
+        gr.update(value=script_output, visible=visibility["script_visible"]),
+        gr.update(value=images_output, visible=visibility["images_visible"]),
+        gr.update(value=videos_output, visible=visibility["videos_visible"]),
+        segments_data,
+        frames_data,
+        material_images_data,  # 素材图数据
+        current_step_id,  # 当前选中的步骤
+        get_logs(),  # 日志内容
+        gr.update(visible=visibility["segment_edit_visible"]),  # 分片脚本编辑区域
+        gr.update(visible=visibility["frame_manage_visible"]),  # 首尾帧管理区域
+        gr.update(visible=show_material_edit),  # 素材图编辑区域
+        session_id,  # 隐藏的 session_id 存储
+    )
+
+
+def load_latest_session(request: gr.Request = None):
+    """加载会话 - 优先从URL参数获取session_id，否则加载最近的活动会话"""
+    global current_session_id
+    
+    # 首先尝试从URL参数获取session_id
+    if request is not None:
+        try:
+            # 解析URL参数
+            query_params = urllib.parse.parse_qs(request.query_params)
+            if 'session_id' in query_params:
+                url_session_id = query_params['session_id'][0]
+                logger.info(f"从URL参数获取到session_id: {url_session_id}")
+                result = load_session_by_id(url_session_id)
+                if result is not None:
+                    return result
+                else:
+                    logger.warning(f"URL中的session_id无效，尝试加载最近会话")
+        except Exception as e:
+            logger.warning(f"解析URL参数失败: {e}")
+    
+    # 如果没有URL参数或参数无效，加载最近的活动会话
     logger.info("尝试加载最近的活动会话...")
 
     session_id = workflow.session_manager.get_latest_session()
     if session_id:
         current_session_id = session_id
-        logger.info(f"已加载会话: {current_session_id}")
+        logger.info(f"已加载最近会话: {current_session_id}")
 
         state = get_current_state()
         script, resolution, aspect_ratio, language, style, perspective = load_session_data(session_id)
@@ -741,6 +844,7 @@ def load_latest_session():
             gr.update(visible=visibility["segment_edit_visible"]),  # 分片脚本编辑区域
             gr.update(visible=visibility["frame_manage_visible"]),  # 首尾帧管理区域
             gr.update(visible=show_material_edit),  # 素材图编辑区域
+            session_id,  # 隐藏的 session_id 存储
         )
     else:
         logger.info("没有找到活动会话")
@@ -787,7 +891,19 @@ def load_latest_session():
             gr.update(visible=visibility["segment_edit_visible"]),  # 分片脚本编辑区域 - 步骤1时隐藏
             gr.update(visible=visibility["frame_manage_visible"]),  # 首尾帧管理区域 - 步骤1时隐藏
             gr.update(visible=show_material_edit),  # 素材图编辑区域 - 步骤1时隐藏
+            "",  # URL更新JS - 无会话时不需要更新URL
         )
+
+
+UPDATE_URL_JS = """
+function(sessionId) {
+    if (sessionId && sessionId.trim()) {
+        const url = new URL(window.location.href);
+        url.searchParams.set('session_id', sessionId.trim());
+        window.history.replaceState({}, '', url.toString());
+    }
+}
+"""
 
 
 def create_new_session():
@@ -810,7 +926,7 @@ def create_new_session():
     # 步骤1时隐藏分片编辑、首尾帧管理和素材图编辑
     visibility = get_step_component_visibility(1)
     show_material_edit = False
-
+    
     return (
         # 6个步骤按钮的更新
         gr.update(value=get_step_button_label(1, completed_steps), variant=get_step_button_style(1, completed_steps, 1)),
@@ -844,6 +960,7 @@ def create_new_session():
         gr.update(visible=visibility["segment_edit_visible"]),  # 分片脚本编辑区域 - 步骤1时隐藏
         gr.update(visible=visibility["frame_manage_visible"]),  # 首尾帧管理区域 - 步骤1时隐藏
         gr.update(visible=show_material_edit),  # 素材图编辑区域 - 步骤1时隐藏
+        current_session_id,  # 隐藏的 session_id 存储 - 新建会话后更新
     )
 
 
@@ -978,6 +1095,7 @@ async def execute_next_step(
             gr.update(visible=visibility["segment_edit_visible"]),  # 分片脚本编辑区域
             gr.update(visible=visibility["frame_manage_visible"]),  # 首尾帧管理区域
             gr.update(visible=show_material_edit),  # 素材图编辑区域
+            current_session_id,  # 隐藏的 session_id 存储
         )
 
     executing_step_id = next_step["id"]
@@ -1020,6 +1138,7 @@ async def execute_next_step(
                 gr.update(visible=visibility["segment_edit_visible"]),  # 分片脚本编辑区域
                 gr.update(visible=visibility["frame_manage_visible"]),  # 首尾帧管理区域
                 gr.update(visible=show_material_edit),  # 素材图编辑区域
+                current_session_id if current_session_id else "",  # 隐藏的 session_id 存储
             )
         video_params = {
             "resolution": resolution,
@@ -1127,6 +1246,7 @@ async def execute_next_step(
         gr.update(visible=visibility["segment_edit_visible"]),  # 分片脚本编辑区域
         gr.update(visible=visibility["frame_manage_visible"]),  # 首尾帧管理区域
         gr.update(visible=show_material_edit),  # 素材图编辑区域
+        current_session_id,  # 隐藏的 session_id 存储
     )
 
 
@@ -2049,6 +2169,14 @@ def create_ui():
                             outputs=[frame_edit_status, frames_state, last_regen_btn]
                         )
 
+        # 隐藏的 session_id 存储组件（用于JS读取）
+        session_id_display = gr.Textbox(
+            label="session_id",
+            value="",
+            visible=False,
+            elem_id="session_id_display"
+        )
+        
         # 主输出列表（6个步骤按钮 + 其他组件）
         main_outputs = [
             step_btn_1, step_btn_2, step_btn_3, step_btn_4, step_btn_5, step_btn_6,
@@ -2058,19 +2186,28 @@ def create_ui():
             output_text, script_output, images_gallery, videos_output,
             segments_state, frames_state, material_images_state,
             current_step_state, log_output,
-            segment_edit_accordion, frame_manage_accordion, material_edit_accordion  # 分片编辑、首尾帧管理和素材图编辑区域
+            segment_edit_accordion, frame_manage_accordion, material_edit_accordion,  # 分片编辑、首尾帧管理和素材图编辑区域
+            session_id_display,  # 隐藏的 session_id 存储
         ]
 
-        # 应用加载时自动恢复会话
-        app.load(fn=load_latest_session, outputs=main_outputs)
+        # 应用加载时自动恢复会话 - 使用gr.Request获取URL参数
+        app.load(fn=load_latest_session, inputs=[gr.Request()], outputs=main_outputs)
 
         # 事件绑定
-        new_session_btn.click(fn=create_new_session, outputs=main_outputs)
+        new_session_btn.click(fn=create_new_session, outputs=main_outputs).then(
+            fn=None,
+            inputs=[session_id_display],
+            js=UPDATE_URL_JS
+        )
 
         next_step_btn.click(
             fn=execute_next_step,
             inputs=[script_input, resolution, aspect_ratio, language, style, perspective, current_step_state, custom_prompt_input, reference_images_upload],
             outputs=main_outputs
+        ).then(
+            fn=None,
+            inputs=[session_id_display],
+            js=UPDATE_URL_JS
         )
 
         # 步骤切换按钮事件 - 输出包括6个步骤按钮的更新、操作按钮、自定义提示词输入框、参考图上传、首尾帧状态、分片状态、素材图状态和三个Accordion

@@ -335,6 +335,93 @@ class SessionManager:
             logging.getLogger(__name__).error(f"清空后续步骤失败: {e}")
             return False
 
+    def reset_current_step(self, session_id: str, step_name: str) -> bool:
+        """重置当前步骤到指定步骤
+
+        用于重新编辑某个步骤时，将 current_step 重置为该步骤，
+        使用户可以重新执行该步骤。
+
+        Args:
+            session_id: 会话ID
+            step_name: 目标步骤名称
+
+        Returns:
+            是否成功
+        """
+        if step_name not in self.STEPS:
+            return False
+
+        try:
+            with sqlite3.connect(str(self.db_path)) as conn:
+                # 获取该步骤的下一步
+                next_step = self._get_next_step(step_name)
+
+                # 更新 current_step 为该步骤的下一步（即重新执行该步骤）
+                conn.execute(
+                    "UPDATE sessions SET current_step = ?, updated_at = ? WHERE session_id = ?",
+                    (step_name, datetime.now().isoformat(), session_id)
+                )
+                conn.commit()
+
+            return True
+
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"重置当前步骤失败: {e}")
+            return False
+
+    def update_step_result(self, session_id: str, step_name: str, result_data: dict) -> bool:
+        """更新指定步骤的结果数据（不推进 current_step）
+
+        用于重新编辑某个步骤时，更新该步骤的结果数据，
+        但不会推进 current_step。
+
+        Args:
+            session_id: 会话ID
+            step_name: 步骤名称
+            result_data: 新的结果数据
+
+        Returns:
+            是否成功
+        """
+        if step_name not in self.STEPS:
+            return False
+
+        now = datetime.now().isoformat()
+        # 保留原有的 _success 状态
+        existing_result = self.get_step_result(session_id, step_name)
+        if existing_result:
+            existing_data = existing_result.get('result_data', {})
+            success = existing_data.get('_success', True)
+        else:
+            success = True
+
+        result_data_with_status = {**result_data, "_success": success}
+        result_json = json.dumps(result_data_with_status, ensure_ascii=False)
+
+        try:
+            with sqlite3.connect(str(self.db_path)) as conn:
+                conn.execute("""
+                    INSERT INTO step_results (session_id, step_name, result_data, completed_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(session_id, step_name)
+                    DO UPDATE SET result_data = ?, completed_at = ?
+                """, (session_id, step_name, result_json, now, result_json, now))
+
+                # 只更新时间，不改变 current_step
+                conn.execute(
+                    "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+                    (now, session_id)
+                )
+                conn.commit()
+
+            return True
+
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"更新步骤结果失败: {e}")
+            return False
+
     def _get_next_step(self, current_step: str) -> Optional[str]:
         """获取下一个步骤
 
@@ -393,7 +480,7 @@ class SessionManager:
             row = cursor.fetchone()
             return row[0] if row else None
 
-    def list_all_sessions(self) -> list[dict]:
+    def list_sessions(self) -> list[dict]:
         """列出所有会话
 
         Returns:
@@ -406,6 +493,34 @@ class SessionManager:
             )
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
+
+    def delete_session(self, session_id: str) -> bool:
+        """删除会话
+
+        Args:
+            session_id: 会话ID
+
+        Returns:
+            是否删除成功
+        """
+        try:
+            with sqlite3.connect(str(self.db_path)) as conn:
+                # 先删除步骤结果
+                conn.execute(
+                    "DELETE FROM step_results WHERE session_id = ?",
+                    (session_id,)
+                )
+                # 再删除会话
+                conn.execute(
+                    "DELETE FROM sessions WHERE session_id = ?",
+                    (session_id,)
+                )
+                conn.commit()
+            return True
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"删除会话失败: {e}")
+            return False
 
     # ==================== 分片脚本编辑方法 ====================
 

@@ -1,0 +1,47 @@
+/* AI视频创作智能体 - 主样式 */
+
+#root {
+  width: 100%;
+  min-height: 100vh;
+}
+
+/* 自定义滚动条样式 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #a8a8a8;
+}
+
+/* 图片预览样式 */
+.ant-image-img {
+  border-radius: 4px;
+}
+
+/* 步骤卡片动画 */
+.ant-card {
+  transition: all 0.3s ease;
+}
+
+/* 响应式调整 */
+@media (max-width: 768px) {
+  .ant-steps {
+    font-size: 12px;
+  }
+  
+  .ant-steps-item-title {
+    font-size: 12px;
+  }
+}

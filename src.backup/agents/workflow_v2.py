@@ -28,12 +28,22 @@ logger = logging.getLogger(__name__)
 class VideoCreationWorkflowV2:
     """视频创作工作流 V2 - 符合PRD的6步流程"""
 
-    def __init__(self, db_path: str = "data/sessions.db"):
-        """初始化工作流"""
+    def __init__(
+        self,
+        db_path: str = "data/sessions.db",
+        session_manager: SessionManager | None = None
+    ):
+        """初始化工作流
+
+        Args:
+            db_path: 数据库路径（当 session_manager 为 None 时使用）
+            session_manager: 可选的 SessionManager 实例（用于依赖注入）
+        """
         self.llm_service = LLMService()
         self.image_service = ImageService()
         self.video_service = VideoService()
-        self.session_manager = SessionManager(db_path)
+        # 支持依赖注入，允许共享 SessionManager 实例
+        self.session_manager = session_manager or SessionManager(db_path)
         logger.info("VideoCreationWorkflowV2 初始化完成")
 
     def create_session(self) -> str:
@@ -86,16 +96,19 @@ class VideoCreationWorkflowV2:
         }
 
     # ==================== 步骤 2: 优化脚本 ====================
-    async def step_optimize_script(self, session_id: str) -> dict:
+    async def step_optimize_script(self, session_id: str, extra_prompt: str = "") -> dict:
         """步骤2：LLM优化视频长脚本
 
         Args:
             session_id: 会话ID
+            extra_prompt: 自定义提示词，用于增加控制力（如：更多动作细节、特定风格等）
 
         Returns:
             执行结果
         """
         logger.info(f"[步骤2] 优化脚本 - 会话: {session_id[:8]}...")
+        if extra_prompt:
+            logger.info(f"[步骤2] 使用自定义提示词: {extra_prompt[:100]}...")
 
         # 检查前置步骤
         can_execute, reason = self.session_manager.can_execute_step(session_id, "optimize_script")
@@ -113,7 +126,8 @@ class VideoCreationWorkflowV2:
             # LLM优化总脚本
             optimized_script = await self.llm_service.optimize_long_script(
                 original_script,
-                video_params
+                video_params,
+                extra_prompt=extra_prompt
             )
 
             # 保存结果
@@ -1080,7 +1094,8 @@ class VideoCreationWorkflowV2:
             # 获取原素材图信息（用于更新数据库）
             original_image = material_images[image_index]
             db_original_path = original_image.get('image_path', '')
-            
+            db_original_prompt = original_image.get('prompt', '')  # 获取原始提示词
+
             # 确定最终使用的原图路径
             # 优先使用传入的original_image_path，否则使用数据库中的路径
             final_original_path = original_image_path or db_original_path
@@ -1093,11 +1108,13 @@ class VideoCreationWorkflowV2:
             # 使用 ImageService 编辑图片
             # reference_images: 用户选择的参考图（可能包含也可能不包含原图）
             # original_image_path: 保底用的原图路径，当reference_images为空时使用
+            # original_prompt: 原始生成提示词，用于保持上下文
             result = await self.image_service.edit_material_image(
                 original_image_path=final_original_path,
                 edit_prompt=edit_prompt,
                 video_params=video_params,
-                reference_images=reference_images
+                reference_images=reference_images,
+                original_prompt=db_original_prompt  # 传递原始提示词
             )
 
             if not result.get("success"):

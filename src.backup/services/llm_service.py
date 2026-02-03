@@ -92,15 +92,26 @@ class LLMService:
     async def optimize_long_script(
         self,
         original_script: str,
-        video_params: VideoParams
+        video_params: VideoParams,
+        extra_prompt: str = ""
     ) -> str:
-        """优化视频长脚本（总脚本），不生成分片"""
+        """优化视频长脚本（总脚本），不生成分片
+
+        Args:
+            original_script: 原始脚本
+            video_params: 视频参数
+            extra_prompt: 额外的提示词，用于增加控制力（如：更多动作细节、特定风格等）
+        """
+        extra_instruction = ""
+        if extra_prompt:
+            extra_instruction = f"\n\n## 用户额外要求\n{extra_prompt}\n请在优化脚本时充分考虑以上要求。"
+
         prompt = f"""你是一个专业的视频脚本优化专家。请根据以下原始脚本和视频参数，优化并生成高质量的视频总脚本。
 
 {video_params.to_prompt_context()}
 
 原始脚本:
-{original_script}
+{original_script}{extra_instruction}
 
 请完成以下任务:
 1. 优化原始脚本，极大地丰富细节，使其更适合视频制作
