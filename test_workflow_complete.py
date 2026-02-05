@@ -1,6 +1,6 @@
 """完整工作流测试 - 测试所有6个步骤的串联"""
 import asyncio
-from core.agents.workflow_v2 import VideoCreationWorkflowV2
+from backend.core.agents.workflow_v2 import VideoCreationWorkflowV2
 
 
 async def test_complete_workflow():

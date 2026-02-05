@@ -12,7 +12,7 @@ import type {
 
 const client = axios.create({
   baseURL: '/api/v1',
-  timeout: 60000,
+  timeout: 300000,  // 5分钟
   headers: {
     'Content-Type': 'application/json',
   },
@@ -174,6 +174,24 @@ export const stepApi = {
     const { data } = await client.post(`/steps/${sessionId}/regenerate-videos`, {})
     return data
   },
+
+  // 步骤5：取消首尾帧生成
+  cancelFrames: async (sessionId: string): Promise<StepResponse> => {
+    const { data } = await client.post(`/steps/${sessionId}/cancel-frames`, {})
+    return data
+  },
+
+  // 步骤5：重置首尾帧状态为未开始
+  resetFrames: async (sessionId: string): Promise<StepResponse> => {
+    const { data } = await client.post(`/steps/${sessionId}/reset-frames`, {})
+    return data
+  },
+
+  // 步骤6：取消视频生成
+  cancelVideos: async (sessionId: string): Promise<StepResponse> => {
+    const { data } = await client.post(`/steps/${sessionId}/cancel-videos`, {})
+    return data
+  },
 }
 
 // 分片编辑 API
@@ -209,6 +227,19 @@ export const segmentApi = {
     })
     return data
   },
+
+  // 批量重新生成分片
+  batchRegenerate: async (
+    sessionId: string,
+    segmentIndices: number[],
+    extraPrompt?: string
+  ): Promise<{ success: boolean; message: string }> => {
+    const { data } = await client.post(`/segments/${sessionId}/batch-regenerate`, {
+      segment_indices: segmentIndices,
+      extra_prompt: extraPrompt,
+    })
+    return data
+  },
 }
 
 // 首尾帧管理 API
@@ -218,11 +249,16 @@ export const frameApi = {
     sessionId: string,
     segmentIndex: number,
     frameType: 'first' | 'last',
-    customPrompt?: string
+    customPrompt?: string,
+    referenceImages?: string[]
   ): Promise<{ success: boolean; message: string; frame_path?: string }> => {
     const { data } = await client.post(
       `/frames/${sessionId}/${segmentIndex}/regenerate`,
-      { frame_type: frameType, custom_prompt: customPrompt }
+      {
+        frame_type: frameType,
+        custom_prompt: customPrompt,
+        reference_images: referenceImages,
+      }
     )
     return data
   },
@@ -241,15 +277,21 @@ export const frameApi = {
     return data
   },
 
-  // 复用相邻分片的帧
+  // 复用帧（支持选择任意分片的帧）
   reuse: async (
     sessionId: string,
     segmentIndex: number,
-    frameType: 'first' | 'last'
+    frameType: 'first' | 'last',
+    sourceSegmentIndex?: number,
+    sourceFrameType?: 'first' | 'last'
   ): Promise<{ success: boolean; message: string; frame_path?: string }> => {
     const { data } = await client.post(
       `/frames/${sessionId}/${segmentIndex}/reuse`,
-      { frame_type: frameType }
+      {
+        frame_type: frameType,
+        source_segment_index: sourceSegmentIndex,
+        source_frame_type: sourceFrameType,
+      }
     )
     return data
   },
@@ -261,12 +303,14 @@ export const materialApi = {
   edit: async (
     sessionId: string,
     index: number,
-    editPrompt: string,
+    prompt: string,
+    description?: string,
     referenceImages?: string[],
     originalImagePath?: string
   ): Promise<{ success: boolean; message: string; image_path?: string }> => {
     const { data } = await client.post(`/materials/${sessionId}/${index}/edit`, {
-      edit_prompt: editPrompt,
+      prompt,
+      description,
       reference_images: referenceImages,
       original_image_path: originalImagePath,
     })
@@ -291,6 +335,18 @@ export const materialApi = {
     index: number
   ): Promise<{ success: boolean; message: string }> => {
     const { data } = await client.delete(`/materials/${sessionId}/${index}`)
+    return data
+  },
+
+  // 仅更新素材图描述（不重新生成图片）
+  updateDescription: async (
+    sessionId: string,
+    index: number,
+    description: string
+  ): Promise<{ success: boolean; message: string }> => {
+    const { data } = await client.put(`/materials/${sessionId}/${index}/description`, {
+      description,
+    })
     return data
   },
 

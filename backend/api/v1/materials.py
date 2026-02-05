@@ -1,16 +1,20 @@
 """
 素材图管理 API
 """
+import logging
 from fastapi import APIRouter, Depends, HTTPException
 
 from backend.schemas.materials import (
     MaterialEditRequest,
     MaterialRegenerateRequest,
     MaterialAddRequest,
+    MaterialUpdateDescriptionRequest,
     MaterialResponse,
 )
 from backend.deps import get_session_manager, get_workflow
-from core.persistence.session_manager import SessionManager
+from backend.core.persistence.session_manager import SessionManager
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -23,12 +27,8 @@ async def edit_material(
     session_manager: SessionManager = Depends(get_session_manager),
 ):
     """编辑素材图（使用图生图）"""
-    import logging
-    logger = logging.getLogger(__name__)
-
     logger.info(f"[API] 编辑素材图 - 会话: {session_id[:8]}... - 索引: {index}")
-    logger.info(f"[API] 编辑参数 - edit_prompt: {request.edit_prompt if request.edit_prompt else '(未设置)'}")
-    logger.info(f"[API] 编辑参数 - description: {request.description if request.description else '(未设置)'}")
+    logger.info(f"[API] 编辑参数 - prompt: {request.prompt[:100] if request.prompt else '(未设置)'}...")
     logger.info(f"[API] 编辑参数 - original_image_path: {request.original_image_path[:100] if request.original_image_path else '(未设置)'}...")
     if request.reference_images:
         logger.info(f"[API] 编辑参数 - reference_images: {len(request.reference_images)} 张参考图")
@@ -44,12 +44,15 @@ async def edit_material(
 
     workflow = get_workflow()
 
-    # 调用 workflow 的编辑素材图方法
     logger.info(f"[API] 调用 workflow.edit_material_image - 会话: {session_id[:8]}... - 索引: {index}")
+    if request.description:
+        logger.info(f"[API] 编辑参数 - description: {request.description[:100]}...")
+
     result = await workflow.edit_material_image(
         session_id=session_id,
         image_index=index,
-        edit_prompt=request.edit_prompt or request.description or "",
+        prompt=request.prompt,
+        description=request.description,
         reference_images=request.reference_images,
         original_image_path=request.original_image_path
     )
@@ -75,9 +78,6 @@ async def regenerate_material(
     session_manager: SessionManager = Depends(get_session_manager),
 ):
     """重新生成素材图"""
-    import logging
-    logger = logging.getLogger(__name__)
-
     logger.info(f"[API] 重新生成素材图 - 会话: {session_id[:8]}... - 索引: {index}")
     logger.info(f"[API] 重新生成参数 - custom_prompt: {request.custom_prompt if request.custom_prompt else '(未设置，使用原提示词)'}")
 
@@ -131,6 +131,49 @@ async def regenerate_material(
     )
 
 
+@router.put("/{session_id}/{index}/description", response_model=MaterialResponse)
+async def update_material_description(
+    session_id: str,
+    index: int,
+    request: MaterialUpdateDescriptionRequest,
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    """仅更新素材图描述（不重新生成图片）"""
+    logger.info(f"[API] 更新素材图描述 - 会话: {session_id[:8]}... - 索引: {index}")
+    logger.info(f"[API] 新描述: {request.description[:100] if request.description else '(空)'}...")
+
+    session_info = session_manager.get_session(session_id)
+    if not session_info:
+        logger.error(f"[API] 会话不存在: {session_id}")
+        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
+
+    # 获取当前素材图数据
+    step_result = session_manager.get_step_result(session_id, "generate_material_images")
+    if not step_result or "material_images" not in step_result.get("result_data", {}):
+        logger.error(f"[API] 素材图尚未生成")
+        raise HTTPException(status_code=400, detail="素材图尚未生成")
+
+    material_images = step_result["result_data"]["material_images"]
+    if index < 0 or index >= len(material_images):
+        logger.error(f"[API] 素材图索引 {index} 不存在（总数: {len(material_images)}）")
+        raise HTTPException(status_code=404, detail=f"素材图索引 {index} 不存在")
+
+    # 仅更新描述字段
+    material_images[index]["description"] = request.description
+
+    # 保存更新
+    session_manager.save_step_result(
+        session_id, "generate_material_images", step_result["result_data"], success=True
+    )
+
+    logger.info(f"[API] 素材图描述更新成功")
+
+    return MaterialResponse(
+        success=True,
+        message=f"素材图 {index + 1} 描述已更新"
+    )
+
+
 @router.delete("/{session_id}/{index}", response_model=MaterialResponse)
 async def delete_material(
     session_id: str,
@@ -138,9 +181,6 @@ async def delete_material(
     session_manager: SessionManager = Depends(get_session_manager),
 ):
     """删除素材图"""
-    import logging
-    logger = logging.getLogger(__name__)
-
     logger.info(f"[API] 删除素材图 - 会话: {session_id[:8]}... - 索引: {index}")
 
     session_info = session_manager.get_session(session_id)
@@ -182,9 +222,6 @@ async def add_material(
     session_manager: SessionManager = Depends(get_session_manager),
 ):
     """新增素材图（使用图生图）"""
-    import logging
-    logger = logging.getLogger(__name__)
-
     logger.info(f"[API] 新增素材图 - 会话: {session_id[:8]}...")
     logger.info(f"[API] 新增参数 - prompt: {request.prompt[:100] if request.prompt else '(未设置)'}...")
     logger.info(f"[API] 新增参数 - description: {request.description if request.description else '(未设置)'}")

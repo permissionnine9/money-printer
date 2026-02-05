@@ -1,6 +1,7 @@
 """
 FastAPI 主应用入口
 """
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,6 +11,13 @@ import uvicorn
 from backend.api.v1 import sessions, steps, segments, frames, materials, uploads
 from backend.config import override_src_config
 
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -17,9 +25,9 @@ async def lifespan(app: FastAPI):
     # 启动时初始化
     print("FastAPI 应用启动")
     
-    # 覆盖 src/config.py 中的配置
+    # 配置检查
     override_src_config()
-    print(f"素材图模型已配置为: google/gemini-2.5-flash-image")
+    print(f"所有图片生成已统一使用: google/gemini-3-pro-image-preview")
     
     yield
     # 关闭时清理

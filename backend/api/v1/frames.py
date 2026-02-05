@@ -10,7 +10,7 @@ from backend.schemas.frames import (
     FrameResponse,
 )
 from backend.deps import get_session_manager, get_workflow
-from core.persistence.session_manager import SessionManager
+from backend.core.persistence.session_manager import SessionManager
 
 router = APIRouter()
 
@@ -28,9 +28,15 @@ async def regenerate_frame(
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
     
     workflow = get_workflow()
-    
+
     # 重新生成指定分片的首尾帧
-    result = await workflow.regenerate_frame(session_id, segment_index, request.frame_type)
+    result = await workflow.regenerate_frame(
+        session_id,
+        segment_index,
+        request.frame_type,
+        custom_prompt=request.custom_prompt or "",
+        reference_images=request.reference_images
+    )
     
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "重新生成失败"))
@@ -76,19 +82,31 @@ async def reuse_frame(
     request: FrameReuseRequest,
     session_manager: SessionManager = Depends(get_session_manager),
 ):
-    """复用相邻分片的帧"""
+    """复用帧（支持从任意分片复制）"""
     session_info = session_manager.get_session(session_id)
     if not session_info:
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
-    
+
     workflow = get_workflow()
-    
-    # 复用相邻分片的帧
-    result = workflow.reuse_adjacent_frame(session_id, segment_index, request.frame_type)
-    
+
+    # 如果指定了源分片索引，使用 copy_frame_from 方法
+    if request.source_segment_index is not None:
+        # 确定源帧类型，如果未指定则默认与目标帧类型相同
+        source_frame_type = request.source_frame_type or request.frame_type
+        result = workflow.copy_frame_from(
+            session_id,
+            segment_index,
+            request.frame_type,
+            request.source_segment_index,
+            source_frame_type
+        )
+    else:
+        # 否则使用原有的相邻分片复用逻辑
+        result = workflow.reuse_adjacent_frame(session_id, segment_index, request.frame_type)
+
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "复用帧失败"))
-    
+
     return FrameResponse(
         success=True,
         message=result.get("message", "帧已复用"),

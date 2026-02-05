@@ -8,7 +8,7 @@ from typing import Optional, List
 class MaterialEditRequest(BaseModel):
     """编辑素材图请求"""
     description: Optional[str] = Field(None, description="素材图描述")
-    edit_prompt: Optional[str] = Field(None, description="编辑提示词（用于图生图）")
+    prompt: str = Field(..., description="完整提示词")
     image_path: Optional[str] = Field(None, description="新的图片路径")
     reference_images: Optional[List[str]] = Field(None, description="参考图路径列表")
     original_image_path: Optional[str] = Field(None, description="原始图片路径")
@@ -17,6 +17,11 @@ class MaterialEditRequest(BaseModel):
 class MaterialRegenerateRequest(BaseModel):
     """重新生成素材图请求"""
     custom_prompt: Optional[str] = Field(None, description="自定义提示词（可选）")
+
+
+class MaterialUpdateDescriptionRequest(BaseModel):
+    """仅更新素材图描述请求"""
+    description: str = Field(..., description="素材图描述")
 
 
 class MaterialAddRequest(BaseModel):

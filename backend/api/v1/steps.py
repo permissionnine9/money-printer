@@ -14,9 +14,9 @@ from backend.schemas.steps import (
     StepResponse,
 )
 from backend.deps import get_session_manager, get_workflow
-from core.persistence.session_manager import SessionManager
-from core.agents.workflow_v2 import VideoCreationWorkflowV2
-from core.models.video_models import VideoParams
+from backend.core.persistence.session_manager import SessionManager
+from backend.core.agents.workflow_v2 import VideoCreationWorkflowV2
+from backend.core.models.video_models import VideoParams
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +237,13 @@ async def step_5_generate_frames(
     background_tasks: BackgroundTasks,
     session_manager: SessionManager = Depends(get_session_manager),
 ):
-    """步骤5：生成首尾帧"""
+    """步骤5：生成首尾帧
+
+    采用异步轮询模式：
+    1. 先保存初始状态（带 _generating 标志）
+    2. 后台执行生成任务
+    3. 前端轮询获取最新状态
+    """
     logger.info(f"[API] 步骤5 - 生成首尾帧 - 会话: {session_id[:8]}...")
 
     session_info = session_manager.get_session(session_id)
@@ -250,6 +256,39 @@ async def step_5_generate_frames(
     if not can_execute:
         logger.error(f"[API] 前置步骤未完成: {reason}")
         raise HTTPException(status_code=400, detail=reason or "请先完成步骤4：生成分片脚本")
+
+    # 获取分片脚本信息，构建初始帧数据
+    segments_result = session_manager.get_step_result(session_id, "generate_segment_scripts")
+    segment_scripts = segments_result['result_data'].get('segment_scripts', [])
+
+    # 创建初始"生成中"状态（所有帧标记为pending）
+    initial_frames = []
+    for segment in segment_scripts:
+        initial_frames.append({
+            "segment_index": segment.get("index", 0),
+            "first_image_id": "",
+            "first_image_path": "",
+            "last_image_id": "",
+            "last_image_path": "",
+            "first_prompt": "",
+            "last_prompt": "",
+            "first_status": "pending",  # 首帧状态
+            "last_status": "pending",   # 尾帧状态
+        })
+
+    initial_data = {
+        "segment_frames": initial_frames,
+        "frame_count": len(initial_frames),
+        "generated_count": 0,
+        "reused_count": 0,
+        "error_count": 0,
+        "_generating": True,   # 标记为生成中
+        "_success": False      # 标记为未完成
+    }
+
+    # 先保存生成中状态，让前端知道正在处理
+    session_manager.save_step_result(session_id, "generate_segment_frames", initial_data, success=False)
+    logger.info(f"[API] 已保存生成中状态，开始后台生成首尾帧 - 会话: {session_id[:8]}...")
 
     # 在后台任务中执行
     async def execute_step():
@@ -266,8 +305,8 @@ async def step_5_generate_frames(
 
     return StepResponse(
         success=True,
-        message="首尾帧生成任务已启动，请稍后查询结果",
-        data=None,
+        message="首尾帧生成任务已启动",
+        data=initial_data,
     )
 
 
@@ -277,7 +316,13 @@ async def step_6_generate_videos(
     background_tasks: BackgroundTasks,
     session_manager: SessionManager = Depends(get_session_manager),
 ):
-    """步骤6：生成视频"""
+    """步骤6：生成视频
+
+    采用异步轮询模式：
+    1. 先保存初始状态（带 _generating 标志）
+    2. 后台执行生成任务
+    3. 前端轮询获取最新状态
+    """
     logger.info(f"[API] 步骤6 - 生成视频 - 会话: {session_id[:8]}...")
 
     session_info = session_manager.get_session(session_id)
@@ -290,6 +335,35 @@ async def step_6_generate_videos(
     if not can_execute:
         logger.error(f"[API] 前置步骤未完成: {reason}")
         raise HTTPException(status_code=400, detail=reason or "请先完成步骤5：生成首尾帧")
+
+    # 获取分片脚本信息，构建初始视频数据
+    segments_result = session_manager.get_step_result(session_id, "generate_segment_scripts")
+    segment_scripts = segments_result['result_data'].get('segment_scripts', [])
+
+    # 创建初始"生成中"状态（所有视频标记为pending）
+    initial_videos = []
+    for segment in segment_scripts:
+        initial_videos.append({
+            "segment_index": segment.get("index", 0),
+            "video_id": "",
+            "video_path": "",
+            "duration": 0.0,
+            "prompt": "",
+            "task_status": "pending"
+        })
+
+    initial_data = {
+        "generated_videos": initial_videos,
+        "video_count": len(initial_videos),
+        "success_count": 0,
+        "failed_count": 0,
+        "_generating": True,   # 标记为生成中
+        "_success": False      # 标记为未完成
+    }
+
+    # 先保存生成中状态，让前端知道正在处理
+    session_manager.save_step_result(session_id, "generate_videos", initial_data, success=False)
+    logger.info(f"[API] 已保存生成中状态，开始后台生成视频 - 会话: {session_id[:8]}...")
 
     # 在后台任务中执行
     async def execute_step():
@@ -306,8 +380,8 @@ async def step_6_generate_videos(
 
     return StepResponse(
         success=True,
-        message="视频生成任务已启动，请稍后查询结果",
-        data=None,
+        message="视频生成任务已启动，正在生成中...",
+        data=initial_data,
     )
 
 
@@ -575,9 +649,11 @@ async def step_5_regenerate_frames(
     session_manager: SessionManager = Depends(get_session_manager),
 ):
     """步骤5重新生成：重新生成首尾帧
-    
-    重新生成后，会清空步骤5之后的所有步骤数据（视频）。
+
+    采用异步轮询模式，重新生成后会清空步骤5之后的所有步骤数据（视频）。
     """
+    logger.info(f"[API] 步骤5 - 重新生成首尾帧 - 会话: {session_id[:8]}...")
+
     session_info = session_manager.get_session(session_id)
     if not session_info:
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
@@ -601,20 +677,182 @@ async def step_5_regenerate_frames(
     if not reset:
         raise HTTPException(status_code=500, detail="重置步骤状态失败")
 
+    # 获取分片脚本信息，构建初始帧数据
+    segments_result = session_manager.get_step_result(session_id, "generate_segment_scripts")
+    segment_scripts = segments_result['result_data'].get('segment_scripts', [])
+
+    # 创建初始"生成中"状态（所有帧标记为pending）
+    initial_frames = []
+    for segment in segment_scripts:
+        initial_frames.append({
+            "segment_index": segment.get("index", 0),
+            "first_image_id": "",
+            "first_image_path": "",
+            "last_image_id": "",
+            "last_image_path": "",
+            "first_prompt": "",
+            "last_prompt": "",
+            "first_status": "pending",
+            "last_status": "pending",
+        })
+
+    initial_data = {
+        "segment_frames": initial_frames,
+        "frame_count": len(initial_frames),
+        "generated_count": 0,
+        "reused_count": 0,
+        "error_count": 0,
+        "_generating": True,
+        "_success": False
+    }
+
+    # 先保存生成中状态
+    session_manager.save_step_result(session_id, "generate_segment_frames", initial_data, success=False)
+    logger.info(f"[API] 已清空旧数据并保存生成中状态 - 会话: {session_id[:8]}...")
+
     # 在后台任务中执行
     async def execute_step():
+        logger.info(f"[API] 后台任务启动 - 开始重新生成首尾帧 - 会话: {session_id[:8]}...")
         workflow = get_workflow()
         await workflow.step_generate_segment_frames(session_id)
+        logger.info(f"[API] 后台任务完成 - 首尾帧重新生成完成 - 会话: {session_id[:8]}...")
 
     def run_async_task():
         asyncio.run(execute_step())
 
     background_tasks.add_task(run_async_task)
+    logger.info(f"[API] 首尾帧重新生成任务已提交到后台队列 - 会话: {session_id[:8]}...")
 
     return StepResponse(
         success=True,
-        message="首尾帧重新生成任务已启动，后续步骤数据已重置，请稍后查询结果",
-        data=None,
+        message="首尾帧重新生成任务已启动，后续步骤数据已重置",
+        data=initial_data,
+    )
+
+
+@router.post("/{session_id}/cancel-frames", response_model=StepResponse)
+async def step_5_cancel_frames(
+    session_id: str,
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    """步骤5取消：取消正在进行的首尾帧生成任务
+
+    设置取消标志，后台任务会在下一次检查时停止。
+    """
+    logger.info(f"[API] 步骤5 - 取消首尾帧生成 - 会话: {session_id[:8]}...")
+
+    session_info = session_manager.get_session(session_id)
+    if not session_info:
+        logger.error(f"[API] 会话不存在: {session_id}")
+        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
+
+    # 检查是否正在生成
+    step_result = session_manager.get_step_result(session_id, "generate_segment_frames")
+    if not step_result:
+        raise HTTPException(status_code=400, detail="首尾帧生成任务尚未开始")
+
+    result_data = step_result['result_data']
+    if not result_data.get('_generating', False):
+        raise HTTPException(status_code=400, detail="当前没有正在进行的首尾帧生成任务")
+
+    # 设置取消标志
+    success = session_manager.set_step_cancelled(session_id, "generate_segment_frames", True)
+    if not success:
+        raise HTTPException(status_code=500, detail="设置取消标志失败")
+
+    logger.info(f"[API] 首尾帧生成取消标志已设置 - 会话: {session_id[:8]}...")
+
+    return StepResponse(
+        success=True,
+        message="取消请求已发送，正在停止生成任务...",
+        data={"cancelled": True},
+    )
+
+
+@router.post("/{session_id}/reset-frames", response_model=StepResponse)
+async def step_5_reset_frames(
+    session_id: str,
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    """步骤5重置：重置首尾帧生成状态为未开始
+
+    删除步骤5的所有数据，让用户可以重新开始生成。
+    适用于生成中、已取消、部分完成等任何状态。
+    """
+    logger.info(f"[API] 步骤5 - 重置首尾帧状态 - 会话: {session_id[:8]}...")
+
+    session_info = session_manager.get_session(session_id)
+    if not session_info:
+        logger.error(f"[API] 会话不存在: {session_id}")
+        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
+
+    # 检查前置步骤（步骤4）是否完成
+    if not session_manager.is_step_completed(session_id, "generate_segment_scripts"):
+        raise HTTPException(status_code=400, detail="请先完成步骤4：生成分片脚本")
+
+    # 清空步骤5及之后的所有步骤数据
+    logger.info(f"[API] 清空步骤5及后续步骤数据 - 会话: {session_id[:8]}...")
+
+    # 先删除步骤5的数据
+    success = session_manager.delete_step_result(session_id, "generate_segment_frames")
+    if not success:
+        logger.warning(f"[API] 步骤5数据不存在或删除失败 - 会话: {session_id[:8]}...")
+
+    # 清空步骤5之后的所有步骤数据（如视频）
+    cleared = session_manager.clear_steps_after(session_id, "generate_segment_frames")
+    if not cleared:
+        logger.warning(f"[API] 清空后续步骤数据失败 - 会话: {session_id[:8]}...")
+
+    # 重置 current_step 到步骤5
+    reset = session_manager.reset_current_step(session_id, "generate_segment_frames")
+    if not reset:
+        raise HTTPException(status_code=500, detail="重置步骤状态失败")
+
+    logger.info(f"[API] 步骤5状态已重置为未开始 - 会话: {session_id[:8]}...")
+
+    return StepResponse(
+        success=True,
+        message="首尾帧生成状态已重置，可以重新开始生成",
+        data={"reset": True},
+    )
+
+
+@router.post("/{session_id}/cancel-videos", response_model=StepResponse)
+async def step_6_cancel_videos(
+    session_id: str,
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    """步骤6取消：取消正在进行的视频生成任务
+
+    设置取消标志，后台任务会在下一次检查时停止。
+    """
+    logger.info(f"[API] 步骤6 - 取消视频生成 - 会话: {session_id[:8]}...")
+
+    session_info = session_manager.get_session(session_id)
+    if not session_info:
+        logger.error(f"[API] 会话不存在: {session_id}")
+        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
+
+    # 检查是否正在生成
+    step_result = session_manager.get_step_result(session_id, "generate_videos")
+    if not step_result:
+        raise HTTPException(status_code=400, detail="视频生成任务尚未开始")
+
+    result_data = step_result['result_data']
+    if not result_data.get('_generating', False):
+        raise HTTPException(status_code=400, detail="当前没有正在进行的视频生成任务")
+
+    # 设置取消标志
+    success = session_manager.set_step_cancelled(session_id, "generate_videos", True)
+    if not success:
+        raise HTTPException(status_code=500, detail="设置取消标志失败")
+
+    logger.info(f"[API] 视频生成取消标志已设置 - 会话: {session_id[:8]}...")
+
+    return StepResponse(
+        success=True,
+        message="取消请求已发送，正在停止生成任务...",
+        data={"cancelled": True},
     )
 
 
@@ -625,9 +863,11 @@ async def step_6_regenerate_videos(
     session_manager: SessionManager = Depends(get_session_manager),
 ):
     """步骤6重新生成：重新生成视频
-    
-    重新生成后，会清空之前的视频数据并重新生成。
+
+    采用异步轮询模式，重新生成后会清空之前的视频数据并重新生成。
     """
+    logger.info(f"[API] 步骤6 - 重新生成视频 - 会话: {session_id[:8]}...")
+
     session_info = session_manager.get_session(session_id)
     if not session_info:
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
@@ -651,18 +891,50 @@ async def step_6_regenerate_videos(
     if not reset:
         raise HTTPException(status_code=500, detail="重置步骤状态失败")
 
+    # 获取分片脚本信息，构建初始视频数据
+    segments_result = session_manager.get_step_result(session_id, "generate_segment_scripts")
+    segment_scripts = segments_result['result_data'].get('segment_scripts', [])
+
+    # 创建初始"生成中"状态（所有视频标记为pending）
+    initial_videos = []
+    for segment in segment_scripts:
+        initial_videos.append({
+            "segment_index": segment.get("index", 0),
+            "video_id": "",
+            "video_path": "",
+            "duration": 0.0,
+            "prompt": "",
+            "task_status": "pending"
+        })
+
+    initial_data = {
+        "generated_videos": initial_videos,
+        "video_count": len(initial_videos),
+        "success_count": 0,
+        "failed_count": 0,
+        "_generating": True,
+        "_success": False
+    }
+
+    # 先保存生成中状态
+    session_manager.save_step_result(session_id, "generate_videos", initial_data, success=False)
+    logger.info(f"[API] 已清空旧数据并保存生成中状态 - 会话: {session_id[:8]}...")
+
     # 在后台任务中执行
     async def execute_step():
+        logger.info(f"[API] 后台任务启动 - 开始重新生成视频 - 会话: {session_id[:8]}...")
         workflow = get_workflow()
         await workflow.step_generate_videos(session_id)
+        logger.info(f"[API] 后台任务完成 - 视频重新生成完成 - 会话: {session_id[:8]}...")
 
     def run_async_task():
         asyncio.run(execute_step())
 
     background_tasks.add_task(run_async_task)
+    logger.info(f"[API] 视频重新生成任务已提交到后台队列 - 会话: {session_id[:8]}...")
 
     return StepResponse(
         success=True,
-        message="视频重新生成任务已启动，请稍后查询结果",
-        data=None,
+        message="视频重新生成任务已启动，正在生成中...",
+        data=initial_data,
     )

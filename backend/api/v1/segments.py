@@ -7,10 +7,11 @@ from backend.schemas.segments import (
     SegmentUpdateRequest,
     SegmentResponse,
     SegmentAddRequest,
+    SegmentBatchRegenerateRequest,
 )
 from backend.deps import get_session_manager, get_workflow
-from core.persistence.session_manager import SessionManager
-from core.models.video_models import ScriptSegment
+from backend.core.persistence.session_manager import SessionManager
+from backend.core.models.video_models import ScriptSegment
 
 router = APIRouter()
 
@@ -95,8 +96,44 @@ async def add_segment(
     )
     
     result = workflow.add_segment(session_id, new_segment.model_dump(), request.insert_after)
-    
+
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "添加失败"))
-    
+
     return SegmentResponse(success=True, message=result.get("message", "添加成功"))
+
+
+@router.post("/{session_id}/batch-regenerate", response_model=SegmentResponse)
+async def batch_regenerate_segments(
+    session_id: str,
+    request: SegmentBatchRegenerateRequest,
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    """批量重新生成选中的分片
+
+    可以勾选多个分片，通过提示词让 LLM 重新生成这些分片。
+    生成的分片数量可能与原来不同（增加或减少）。
+    会清空后续步骤（步骤5、步骤6）。
+    """
+    session_info = session_manager.get_session(session_id)
+    if not session_info:
+        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
+
+    if not request.segment_indices:
+        raise HTTPException(status_code=400, detail="未选择任何分片")
+
+    workflow = get_workflow()
+
+    result = await workflow.batch_regenerate_segments(
+        session_id,
+        request.segment_indices,
+        request.extra_prompt or ""
+    )
+
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "批量重新生成失败"))
+
+    return SegmentResponse(
+        success=True,
+        message=result.get("message", "批量重新生成成功")
+    )

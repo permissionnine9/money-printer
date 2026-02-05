@@ -19,7 +19,7 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       </Header>
       <Content className={styles.content}>{children}</Content>
       <Footer className={styles.footer}>
-        AI视频创作智能体 ©2024 - 基于 LangGraph
+        AI视频创作智能体 ©2026 - 基于 LangGraph
       </Footer>
     </Layout>
   )

@@ -11,7 +11,7 @@ from backend.schemas.sessions import (
     SessionListResponse,
 )
 from backend.deps import get_session_manager
-from core.persistence.session_manager import SessionManager
+from backend.core.persistence.session_manager import SessionManager
 
 router = APIRouter()
 

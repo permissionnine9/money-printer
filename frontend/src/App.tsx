@@ -123,7 +123,7 @@ function App() {
                 <strong>会话ID:</strong> {currentSession.session_id}
               </p>
               <p>
-                <strong>当前步骤:</strong> {currentSession.current_step + 1} / 6
+                <strong>已完成步骤:</strong> {currentSession.current_step} / 6
               </p>
               <p>
                 <strong>状态:</strong> {currentSession.status}

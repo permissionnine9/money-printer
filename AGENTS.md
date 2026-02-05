@@ -18,9 +18,7 @@
 |------|------|
 | **Agent框架** | LangGraph |
 | **LLM** | 豆包 Seed 1.8 (`bytedance/doubao-seed-1.8`) |
-| **图片生成(文生图)** | GPT Image 1.5 (`openai/gpt-image-1.5`) |
-| **图片生成(图生图)** | Gemini 2.5 Flash Image (`google/gemini-2.5-flash-image`) |
-| **素材图生成** | Gemini 3 Pro Image Preview (`google/gemini-3-pro-image-preview`) |
+| **图片生成(所有)** | Gemini 3 Pro Image (`google/gemini-3-pro-image-preview`) - 统一使用，支持文生图和图生图 |
 | **视频生成** | 即梦首尾帧 (`bytedance/jimeng_i2v_first_tail_v30`) 或 阿里wan2.2 (`ali/wan2.2-kf2v-flash`) |
 | **前端界面** | Gradio 5.x / React 18 + TypeScript + Vite + Ant Design |
 | **后端API** | FastAPI |
@@ -206,7 +204,7 @@ OSS_BUCKET=your_bucket_name
 | 服务 | 职责 | 关键模型 |
 |------|------|----------|
 | LLMService | 脚本优化、分片切割、提示词生成 | `bytedance/doubao-seed-1.8` |
-| ImageService | 素材图生成（文生图/图生图） | `openai/gpt-image-1.5`, `google/gemini-2.5-flash-image` |
+| ImageService | 素材图生成（文生图/图生图） | `google/gemini-3-pro-image-preview` |
 | VideoService | 视频生成（即梦首尾帧） | `bytedance/jimeng_i2v_first_tail_v30` |
 | VideoServiceWan22 | 视频生成（wan2.2首尾帧） | `ali/wan2.2-kf2v-flash` |
 | OSSService | 阿里云OSS文件上传 | - |
@@ -247,8 +245,7 @@ VIDEO_SERVICE_TYPE = "jimeng"  # 或 "wan22"
 # 模型配置
 SHENGSUANYUN_VIDEO_MODEL = "bytedance/jimeng_i2v_first_tail_v30"
 SHENGSUANYUN_VIDEO_MODEL_WAN22 = "ali/wan2.2-kf2v-flash"
-SHENGSUANYUN_IMAGE_MODEL = "openai/gpt-image-1.5"
-SHENGSUANYUN_IMAGE2IMAGE_MODEL = "google/gemini-2.5-flash-image"
+SHENGSUANYUN_IMAGE_MODEL = "google/gemini-3-pro-image-preview"
 ```
 
 ## 开发规范
@@ -321,13 +318,13 @@ except Exception as e:
 
 ### 素材图生成模式
 
-1. **文生图模式**: 不提供参考图，使用 `gpt-image-1.5` 生成
+1. **文生图模式**: 不提供参考图，使用 `gemini-3-pro-image-preview` 生成
 2. **图生图模式**: 提供参考图，使用 `gemini-3-pro-image-preview` 基于参考图生成
 
 ### 首尾帧生成
 
 - 基于素材图作为参考（图生图）
-- 使用 `gemini-2.5-flash-image` 模型
+- 使用 `gemini-3-pro-image-preview` 模型
 - 确保角色/物品一致性
 - 支持首尾帧复用模式（`reuse_prev` / `reuse_next`）
 

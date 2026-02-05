@@ -7,7 +7,7 @@ import type { SessionDetail } from '@/types'
 import styles from './StepNavigator.module.css'
 
 const STEPS = [
-  { title: '提交脚本', description: '输入脚本和参数' },
+  { title: '提交脚本', description: '输入原始脚本和参数' },
   { title: '优化脚本', description: 'LLM 优化脚本' },
   { title: '生成素材图', description: '生成角色/场景设定稿' },
   { title: '生成分片', description: '切割分镜头脚本' },
@@ -22,7 +22,6 @@ interface StepNavigatorProps {
 }
 
 export const StepNavigator: React.FC<StepNavigatorProps> = ({
-  session: _session,
   currentStep,
   onStepChange,
 }) => {

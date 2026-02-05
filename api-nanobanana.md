@@ -4,7 +4,7 @@ curl --location --request POST 'https://router.shengsuanyun.com/api/v1/tasks/gen
 --header 'Authorization: Bearer <token>' \
 --header 'Content-Type: application/json' \
 --data-raw '{
-    "model": "google/gemini-2.5-flash-image",
+    "model": "google/gemini-3-pro-image-preview",
     "prompt": "第二张图中的女孩，带着第三张图中的眼镜，抱着第一张图中的小猫",
     "images": [
         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABoAAAAOgCAIAAACSr...",

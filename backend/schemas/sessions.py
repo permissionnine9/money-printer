@@ -2,13 +2,8 @@
 会话相关的请求和响应模型
 """
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datetime import datetime
-
-
-class SessionCreate(BaseModel):
-    """创建会话请求"""
-    pass  # 不需要参数，自动生成 session_id
 
 
 class SessionResponse(BaseModel):
@@ -16,7 +11,7 @@ class SessionResponse(BaseModel):
     session_id: str
     created_at: datetime
     updated_at: datetime
-    current_step: str
+    current_step: Optional[str] = None  # 完成所有步骤后可能为 None
     status: str
     completed_steps: List[str] = Field(default_factory=list)
 

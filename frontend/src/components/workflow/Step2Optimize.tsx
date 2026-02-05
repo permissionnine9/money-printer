@@ -2,7 +2,7 @@
  * 步骤2：优化脚本
  */
 import React, { useState } from 'react'
-import { Card, Button, message, Spin, Typography, Modal, Space, Input } from 'antd'
+import { Card, Button, message, Spin, Typography, Modal, Input } from 'antd'
 import { ThunderboltOutlined, CheckCircleOutlined, RedoOutlined, ExclamationCircleOutlined, EditOutlined } from '@ant-design/icons'
 import type { SessionDetail } from '@/types'
 import { stepApi } from '@/api/client'

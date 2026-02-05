@@ -64,6 +64,8 @@ export interface SegmentFrame {
   last_image_path: string
   first_prompt?: string
   last_prompt?: string
+  first_status?: string  // pending/completed/failed
+  last_status?: string  // pending/completed/failed
 }
 
 export interface GeneratedVideo {
@@ -72,7 +74,7 @@ export interface GeneratedVideo {
   video_path: string
   duration: number
   prompt?: string
-  status?: string  // 前端添加的状态字段
+  task_status?: string  // pending/completed/failed
 }
 
 export interface Session {

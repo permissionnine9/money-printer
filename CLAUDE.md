@@ -1,6 +1,8 @@
-# AI视频创作智能体 - 项目指南
+# CLAUDE.md
 
-本文件为AI编程助手提供项目背景、架构说明和开发指南。
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+# AI视频创作智能体 - 项目指南
 
 ## 项目架构说明
 - **/core** - 核心业务逻辑层（框架无关，可复用，包含 agents、models、services、persistence 等）
@@ -21,9 +23,7 @@
 |------|------|
 | **Agent框架** | LangGraph |
 | **LLM** | 豆包 Seed 1.8 (`bytedance/doubao-seed-1.8`) |
-| **图片生成(文生图)** | GPT Image 1.5 (`openai/gpt-image-1.5`) |
-| **图片生成(图生图)** | Gemini 2.5 Flash Image (`google/gemini-2.5-flash-image`) |
-| **素材图生成** | Gemini 3 Pro Image Preview (`google/gemini-3-pro-image-preview`) |
+| **图片生成(所有)** | Gemini 3 Pro Image (`google/gemini-3-pro-image-preview`) - 统一使用，支持文生图和图生图 |
 | **视频生成** | 即梦首尾帧 (`bytedance/jimeng_i2v_first_tail_v30`) 或 阿里wan2.2 (`ali/wan2.2-kf2v-flash`) |
 | **前端界面** | Gradio 5.x / React 18 + TypeScript + Vite + Ant Design |
 | **后端API** | FastAPI |
@@ -209,10 +209,10 @@ OSS_BUCKET=your_bucket_name
 | 服务 | 职责 | 关键模型 |
 |------|------|----------|
 | LLMService | 脚本优化、分片切割、提示词生成 | `bytedance/doubao-seed-1.8` |
-| ImageService | 素材图生成（文生图/图生图） | `openai/gpt-image-1.5`, `google/gemini-2.5-flash-image` |
+| ImageService | 所有图片生成/编辑（文生图/图生图/素材图/首尾帧） | `google/gemini-3-pro-image-preview` |
 | VideoService | 视频生成（即梦首尾帧） | `bytedance/jimeng_i2v_first_tail_v30` |
 | VideoServiceWan22 | 视频生成（wan2.2首尾帧） | `ali/wan2.2-kf2v-flash` |
-| OSSService | 阿里云OSS文件上传 | - |
+| OSSService | 阿里云OSS文件上传（wan2.2服务需要） | - |
 
 ### 4. 数据模型 (`core/models/video_models.py`)
 
@@ -250,8 +250,9 @@ VIDEO_SERVICE_TYPE = "jimeng"  # 或 "wan22"
 # 模型配置
 SHENGSUANYUN_VIDEO_MODEL = "bytedance/jimeng_i2v_first_tail_v30"
 SHENGSUANYUN_VIDEO_MODEL_WAN22 = "ali/wan2.2-kf2v-flash"
-SHENGSUANYUN_IMAGE_MODEL = "openai/gpt-image-1.5"
-SHENGSUANYUN_IMAGE2IMAGE_MODEL = "google/gemini-2.5-flash-image"
+
+# 图片生成 - 统一使用 gemini-3-pro-image-preview
+SHENGSUANYUN_IMAGE_MODEL = "google/gemini-3-pro-image-preview"
 ```
 
 ## 开发规范
@@ -322,15 +323,22 @@ except Exception as e:
 }
 ```
 
-### 素材图生成模式
+### 素材图生成和编辑
 
-1. **文生图模式**: 不提供参考图，使用 `gpt-image-1.5` 生成
+**统一使用 `gemini-3-pro-image-preview` 模型**，支持本地文件和URL（自动转base64）：
+
+1. **文生图模式**: 不提供参考图，使用 `gemini-3-pro-image-preview` 生成
 2. **图生图模式**: 提供参考图，使用 `gemini-3-pro-image-preview` 基于参考图生成
+3. **素材图编辑**: 使用 `ImageService.edit_material_image()` 方法
+
+**重要区别**：
+- **素材图**：设定稿风格，**应包含**身高比例尺、尺寸标注、多角度展示等设计稿元素
+- **首尾帧**：电影画面，**不能包含**任何标注、文字、比例尺等元素
 
 ### 首尾帧生成
 
 - 基于素材图作为参考（图生图）
-- 使用 `gemini-2.5-flash-image` 模型
+- 使用 `gemini-3-pro-image-preview` 模型
 - 确保角色/物品一致性
 - 支持首尾帧复用模式（`reuse_prev` / `reuse_next`）
 
@@ -385,6 +393,16 @@ A:
 2. 在 `backend/api/v1/` 中实现路由
 3. 在 `backend/main.py` 中注册路由
 4. 在 `frontend/src/api/client.ts` 中添加客户端方法
+
+## 备份和历史代码
+
+项目中包含一些备份文件，记录了已移除的功能：
+
+- `core/services/image_service_jimeng_v40_backup.py` - 已移除的即梦v40图生图功能
+- `api-jimeng图生图_backup.md` - 即梦v40 API文档备份
+- `src.backup/` - 旧版本代码备份
+
+这些文件仅供参考，当前代码已不使用这些功能。
 
 ## 参考文档
 

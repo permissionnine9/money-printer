@@ -3,7 +3,6 @@
 """
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
-from core.models.video_models import VideoParams, ScriptSegment, MaterialImage, SegmentFrame, GeneratedVideo
 
 
 class Step1Request(BaseModel):
@@ -30,16 +29,6 @@ class Step3Request(BaseModel):
 class Step4Request(BaseModel):
     """步骤4：生成分片脚本"""
     extra_prompt: Optional[str] = Field(None, description="额外提示词，用于增加控制力（如：更多动作细节、特定镜头运动、时长控制等）")
-
-
-class Step5Request(BaseModel):
-    """步骤5：生成首尾帧"""
-    pass
-
-
-class Step6Request(BaseModel):
-    """步骤6：生成视频"""
-    pass
 
 
 class StepResponse(BaseModel):

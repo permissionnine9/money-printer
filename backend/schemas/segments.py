@@ -2,7 +2,7 @@
 分片编辑相关的请求和响应模型
 """
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 
 
 class SegmentUpdateRequest(BaseModel):
@@ -26,9 +26,10 @@ class SegmentAddRequest(BaseModel):
     insert_after: int = Field(default=-1, description="插入位置（-1表示末尾）")
 
 
-class SegmentDeleteRequest(BaseModel):
-    """删除分片请求"""
-    pass  # 通过路径参数指定索引
+class SegmentBatchRegenerateRequest(BaseModel):
+    """批量重新生成分片请求"""
+    segment_indices: List[int] = Field(..., description="要重新生成的分片索引列表")
+    extra_prompt: Optional[str] = Field(None, description="额外的自定义提示词")
 
 
 class SegmentResponse(BaseModel):

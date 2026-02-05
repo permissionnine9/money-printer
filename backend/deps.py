@@ -2,8 +2,8 @@
 FastAPI 依赖注入
 """
 from functools import lru_cache
-from core.persistence.session_manager import SessionManager
-from core.agents.workflow_v2 import VideoCreationWorkflowV2
+from backend.core.persistence.session_manager import SessionManager
+from backend.core.agents.workflow_v2 import VideoCreationWorkflowV2
 
 
 @lru_cache()
