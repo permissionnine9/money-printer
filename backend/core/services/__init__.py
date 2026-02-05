@@ -1,7 +1,7 @@
 """服务模块"""
 from .llm_service import LLMService
 from .image_service import ImageService
-from .video_service import VideoService as VideoServiceJimeng
+from .video_service_jimeng import VideoService as VideoServiceJimeng
 from .video_service_wan22 import VideoServiceWan22
 
 from backend.core.config import VIDEO_SERVICE_TYPE

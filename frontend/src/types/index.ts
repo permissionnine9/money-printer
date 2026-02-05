@@ -74,7 +74,7 @@ export interface GeneratedVideo {
   video_path: string
   duration: number
   prompt?: string
-  task_status?: string  // pending/completed/failed
+  task_status?: string  // pending/completed/failed/cancelled
 }
 
 export interface Session {

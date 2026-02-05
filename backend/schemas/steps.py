@@ -31,6 +31,11 @@ class Step4Request(BaseModel):
     extra_prompt: Optional[str] = Field(None, description="额外提示词，用于增加控制力（如：更多动作细节、特定镜头运动、时长控制等）")
 
 
+class OptimizeSegmentPromptRequest(BaseModel):
+    """优化分片提示词请求"""
+    custom_requirement: Optional[str] = Field(None, description="用户自定义要求，用于指导 LLM 如何优化提示词")
+
+
 class StepResponse(BaseModel):
     """步骤响应"""
     success: bool

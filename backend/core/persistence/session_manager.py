@@ -565,6 +565,12 @@ class SessionManager:
         result_data = step_result['result_data']
         segment_scripts = result_data.get('segment_scripts', [])
 
+        # 如果 segment_data 是 Pydantic 对象，转换为字典
+        if hasattr(segment_data, 'model_dump'):
+            segment_data = segment_data.model_dump()
+        elif hasattr(segment_data, 'dict'):
+            segment_data = segment_data.dict()
+
         # 查找并更新对应索引的分片
         updated = False
         for i, seg in enumerate(segment_scripts):

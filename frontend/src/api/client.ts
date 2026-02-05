@@ -192,6 +192,30 @@ export const stepApi = {
     const { data } = await client.post(`/steps/${sessionId}/cancel-videos`, {})
     return data
   },
+
+  // 步骤6：恢复视频备份
+  restoreVideosBackup: async (sessionId: string): Promise<StepResponse> => {
+    const { data } = await client.post(`/steps/${sessionId}/restore-videos-backup`, {})
+    return data
+  },
+
+  // 步骤6：重新生成单个视频
+  regenerateSingleVideo: async (sessionId: string, segmentIndex: number): Promise<StepResponse> => {
+    const { data } = await client.post(`/steps/${sessionId}/regenerate-single-video/${segmentIndex}`, {})
+    return data
+  },
+
+  // 优化分片提示词（基于首尾帧图片和上下文）
+  optimizeSegmentPrompt: async (
+    sessionId: string,
+    segmentIndex: number,
+    customRequirement?: string
+  ): Promise<StepResponse> => {
+    const { data } = await client.post(`/steps/${sessionId}/optimize-segment-prompt/${segmentIndex}`, {
+      custom_requirement: customRequirement,
+    })
+    return data
+  },
 }
 
 // 分片编辑 API

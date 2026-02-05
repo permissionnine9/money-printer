@@ -446,77 +446,58 @@ class LLMService:
             next_segment: 后一个分片脚本（用于保持尾帧与后一分片首帧的连贯性）
             extra_prompt: 额外的提示词，用于增加控制力（如：黄昏光线、俯拍角度等）
         """
-        # 构建上下文信息
-        context_info = ""
-
+        # 构建连贯性提示（仅供LLM参考，不要求出现在最终提示词中）
+        continuity_hint = ""
         if prev_segment:
-            context_info += f"""
-## 前一分片（分片 {prev_segment.index}）的信息 - 用于确保当前首帧与前一分片尾帧的连贯性:
-- 内容: {prev_segment.content}
-- 动作: {prev_segment.action}
-- 氛围: {prev_segment.atmosphere}
-- 镜头运动: {prev_segment.camera_movement}
-【重要】当前分片的首帧应该承接前一分片的结束状态，保持画面的自然过渡。
-"""
-
+            continuity_hint += f"【参考-首帧连贯性】前一分片结束状态: {prev_segment.action}，氛围: {prev_segment.atmosphere}\n"
         if next_segment:
-            context_info += f"""
-## 后一分片（分片 {next_segment.index}）的信息 - 用于确保当前尾帧能自然过渡到后一分片:
-- 内容: {next_segment.content}
-- 动作: {next_segment.action}
-- 氛围: {next_segment.atmosphere}
-- 镜头运动: {next_segment.camera_movement}
-【重要】当前分片的尾帧应该为后一分片的开始做好铺垫，保持画面的自然过渡，或者故事递进。
-"""
+            continuity_hint += f"【参考-尾帧连贯性】后一分片开始状态: {next_segment.action}，氛围: {next_segment.atmosphere}\n"
 
         extra_instruction = ""
         if extra_prompt:
-            extra_instruction = f"\n\n## 用户额外要求\n{extra_prompt}\n请在生成首尾帧提示词时充分体现以上要求，将这些要求融入到提示词中。"
+            extra_instruction = f"\n用户额外要求: {extra_prompt}"
 
-        prompt = f"""你是一个专业的分镜头图片提示词专家。请为以下分片脚本生成首帧和尾帧的图片提示词。
+        prompt = f"""你是一个专业的图片生成提示词专家。请为视频分片生成首帧和尾帧的图片提示词。
 
-{video_params.to_prompt_context()}
+## 图片生成基础参数（必须包含在每个提示词中）
+- 风格: {video_params.style}
+- 画面比例: {video_params.aspect_ratio}
+- 画质要求: 电影级画质，8K超高清，细节丰富
+- 禁止元素: 绝对不能包含任何文字、标注、比例尺、尺寸标记、设计稿元素
 
-素材图描述（图片将作为参考图传入图生图模型）: {material_description}
-
-## 当前分片（分片 {segment.index}）内容:
-- 内容: {segment.content}
-- 动作: {segment.action}
-- 相机运动: {segment.camera_movement}
-- 构图: {segment.composition}
+## 当前分片信息
+- 分片内容: {segment.content}
+- 动作描述: {segment.action}
+- 构图方式: {segment.composition}
 - 氛围: {segment.atmosphere}
-{context_info}{extra_instruction}
 
-请生成首帧(first_frame)和尾帧(last_frame)的图片提示词，两帧之间要有明显的动作或状态变化。
+## 素材参考
+素材图描述: {material_description}
+（素材图用于保持角色/物品外观一致性，无需在提示词中重复描述角色外观细节）
+
+{continuity_hint}{extra_instruction}
+
+## 任务
+生成首帧和尾帧的图片提示词，两帧之间需要体现动作或状态明显的变化。
+
+## 提示词结构要求
+每个提示词应简洁聚焦，包含以下三部分：
+1. 【画面参数】风格、比例、画质要求（约20字）
+2. 【画面描述】当前帧的具体视觉内容：角色姿态、动作状态、场景环境、光线氛围（约50-80字）
+3. 【禁止项】明确禁止文字、标注等元素（约15字）
+
+## 示例格式
+"电影级画质，{video_params.style}风格，{video_params.aspect_ratio}画面。[具体的画面描述：谁在哪里做什么，什么姿态，什么光线氛围]。禁止出现任何文字、标注、比例尺。"
 
 返回JSON格式:
 {{
-    "first_frame": "首帧的详细中文提示词",
-    "last_frame": "尾帧的详细中文提示词"
+    "first_frame": "首帧提示词（动作起始状态）",
+    "last_frame": "尾帧提示词（动作结束状态）"
 }}
 
-提示词要求:
-- 使用中文
-- 首帧是动作开始时的状态{" - 必须与前一分片的结束状态保持视觉连贯" if prev_segment else ""}
-- 尾帧是动作结束时的状态{" - 必须为后一分片的开始做好视觉铺垫" if next_segment else ""}
-- 提示词会与素材图一起传入图生图模型，所以要描述如何基于素材图中的角色/物品进行变化
-- 描述角色/物品的动作、姿态、表情变化，而不需要重复描述角色外观（外观会从素材图继承）
-- 重点描述场景、动作、光线、构图等变化
+仅返回JSON，不要其他说明。"""
 
-【核心要求 - 在提示词中包含上下文信息】:
-- 首帧提示词中必须包含：当前分片的起始状态描述{f"，以及从前一分片（{prev_segment.content[:60]}...）承接过来的状态" if prev_segment else ""}
-- 尾帧提示词中必须包含：当前分片的结束状态描述{f"，以及为后一分片（{next_segment.content[:60]}...）做的铺垫" if next_segment else ""}
-- 提示词要明确描述画面中角色/物体的具体位置、姿态、表情，便于图生图模型理解
-
-【关键】确保相邻分片之间的画面连贯性：
-- 如果前一分片结束时角色在某个位置/姿态，当前首帧应延续这个状态
-- 如果后一分片开始时需要某个场景/状态，当前尾帧应为此做好铺垫
-
-【重要】素材图是"设定稿"风格，包含标注信息（身高比例尺、尺寸标注等），首尾帧是用于视频的电影画面，绝对不能包含任何标注、文字、比例尺、尺寸标记等元素
-- 在提示词中明确要求"这是一张电影片段的帧画面，要求电影画质，绝对不能包含任何标注、文字、比例尺、尺寸标记"
-- 仅返回JSON"""
-
-        logger.info(f"调用 LLM 生成分片 {segment.index} 首尾帧提示词（含上下文）...")
+        logger.info(f"调用 LLM 生成分片 {segment.index} 首尾帧提示词...")
         response_text = self._call_with_retry(prompt, temperature=0.7, operation_name=f"生成分片{segment.index}首尾帧提示词")
 
         result = parse_json_response(response_text)
@@ -649,3 +630,174 @@ class LLMService:
 
         logger.info(f"批量重新生成完成，原 {len(selected_segments)} 个分片变为 {len(new_segments)} 个分片")
         return new_segments
+
+    async def optimize_segment_prompt_with_images(
+        self,
+        first_frame_path: str,
+        last_frame_path: str,
+        optimized_script: str,
+        video_params: VideoParams,
+        current_segment: ScriptSegment,
+        custom_requirement: str = ""
+    ) -> str:
+        """基于首尾帧图片和上下文优化分片提示词
+
+        使用多模态能力分析首尾帧图片，结合脚本和参数，生成优化的分片文案。
+
+        Args:
+            first_frame_path: 首帧图片路径（本地路径或URL）
+            last_frame_path: 尾帧图片路径（本地路径或URL）
+            optimized_script: 优化后的总脚本（第二步产物）
+            video_params: 视频参数
+            current_segment: 当前分片脚本
+            custom_requirement: 用户自定义要求
+
+        Returns:
+            优化后的分片提示词文案
+        """
+        import base64
+        import os
+
+        def encode_image_to_base64(image_path: str) -> str | None:
+            """将图片转换为 base64 编码"""
+            if not image_path:
+                return None
+
+            # 如果是URL，直接返回URL
+            if image_path.startswith('http://') or image_path.startswith('https://'):
+                return None  # 返回None表示使用URL模式
+
+            # 处理相对路径
+            if not os.path.isabs(image_path):
+                # 尝试从项目根目录解析
+                project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+                image_path = os.path.join(project_root, image_path)
+
+            if not os.path.exists(image_path):
+                logger.warning(f"图片文件不存在: {image_path}")
+                return None
+
+            try:
+                with open(image_path, "rb") as f:
+                    return base64.b64encode(f.read()).decode("utf-8")
+            except Exception as e:
+                logger.error(f"读取图片失败: {e}")
+                return None
+
+        def get_image_url(image_path: str) -> str | None:
+            """获取图片URL（如果是网络图片）"""
+            if image_path and (image_path.startswith('http://') or image_path.startswith('https://')):
+                return image_path
+            return None
+
+        # 构建图片消息内容
+        content_parts = []
+
+        # 首帧图片
+        first_frame_base64 = encode_image_to_base64(first_frame_path)
+        first_frame_url = get_image_url(first_frame_path)
+        if first_frame_base64:
+            content_parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{first_frame_base64}"}
+            })
+        elif first_frame_url:
+            content_parts.append({
+                "type": "image_url",
+                "image_url": {"url": first_frame_url}
+            })
+
+        # 尾帧图片
+        last_frame_base64 = encode_image_to_base64(last_frame_path)
+        last_frame_url = get_image_url(last_frame_path)
+        if last_frame_base64:
+            content_parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{last_frame_base64}"}
+            })
+        elif last_frame_url:
+            content_parts.append({
+                "type": "image_url",
+                "image_url": {"url": last_frame_url}
+            })
+
+        # 构建自定义要求部分
+        custom_instruction = ""
+        if custom_requirement:
+            custom_instruction = f"\n\n## 用户特别要求\n{custom_requirement}\n请在生成分片文案时严格遵循以上要求。"
+
+        # 构建文本提示
+        text_prompt = f"""你是一个专业的视频分镜脚本优化专家。请仔细分析以下首帧和尾帧图片，结合视频脚本和参数，生成优化的分镜脚本文案。
+
+## 视频参数
+{video_params.to_prompt_context()}
+
+## 优化后的总脚本（上下文参考）
+{optimized_script[:2000]}{"..." if len(optimized_script) > 2000 else ""}
+
+## 当前分片信息
+- 分片索引：{current_segment.index + 1}
+- 时长：{current_segment.duration} 秒（重要！生成的内容必须能在这个时长内完成）
+- 当前原始视频脚本内容：{current_segment.content}
+- 动作：{current_segment.action or '未指定'}
+- 镜头运动：{current_segment.camera_movement or '未指定'}
+- 构图：{current_segment.composition or '未指定'}
+- 氛围：{current_segment.atmosphere or '未指定'}
+
+## 用户自定义要求
+{custom_instruction}
+
+## 任务
+请分析上面的两张图片：
+1. 第一张是首帧图片，代表这个分片的开始画面
+2. 第二张是尾帧图片，代表这个分片的结束画面
+
+基于图片内容和上下文，生成一个优化的分镜脚本文案，要求：
+1. **准确描述图片中的实际内容**（人物、场景、动作、氛围等）
+2. **确保动作/变化能在 {current_segment.duration} 秒内由首帧过渡到尾帧并完成**（这是关键！）
+3. **保持与总脚本风格一致**
+4. **提供详细的镜头参数建议**
+
+## 输出格式
+请直接输出优化后的分片文案，格式如下：
+
+**内容**：[描述这个镜头的具体内容，包括画面中的人物、场景、动作变化]
+
+**动作**：[角色/物体的具体动作]
+
+**镜头运动**：[推荐的镜头运动方式]
+
+**构图**：[推荐的构图方式]
+
+**氛围**：[画面的情感氛围]
+
+直接输出以上内容，不要有其他说明。"""
+
+        # 添加文本部分
+        content_parts.append({"type": "text", "text": text_prompt})
+
+        logger.info(f"调用 LLM 优化分片 {current_segment.index} 的提示词（含图片分析）...")
+
+        try:
+            # 使用多模态消息格式
+            completion = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": content_parts}],
+                temperature=0.7,
+                top_p=0.7,
+                max_tokens=2048,
+                stream=True,
+            )
+
+            response_text = ""
+            for chunk in completion:
+                if chunk.choices and chunk.choices[0].delta.content is not None:
+                    content = chunk.choices[0].delta.content
+                    response_text += content
+
+            logger.info(f"分片 {current_segment.index} 提示词优化完成")
+            return response_text.strip()
+
+        except Exception as e:
+            logger.error(f"优化分片提示词失败: {e}")
+            raise

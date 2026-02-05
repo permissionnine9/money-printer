@@ -765,33 +765,49 @@ class VideoCreationWorkflowV2:
         segment_scripts = [ScriptSegment(**seg) for seg in segments_result['result_data']['segment_scripts']]
         params = script_result['result_data']['video_params']
 
-        # 获取优化后的总脚本，作为视频生成的上下文
-        optimized_script = script_result['result_data'].get('optimized_script', '')
-
         try:
             video_params = VideoParams(**params)
             total_segments = len(segment_scripts)
 
-            videos = []
+            # 初始化完整的视频列表（包含所有分片，初始状态为 pending）
+            # 这样在更新进度时可以保留所有视频的状态
+            from backend.core.models import GeneratedVideo
+            all_videos = []
             for segment in segment_scripts:
+                all_videos.append(GeneratedVideo(
+                    segment_index=segment.index,
+                    video_id="",
+                    video_path="",
+                    duration=0.0,
+                    prompt="",
+                    task_status="pending"
+                ))
+
+            for i, segment in enumerate(segment_scripts):
                 # 检查是否被取消
                 if self.session_manager.is_step_cancelled(session_id, "generate_videos"):
                     logger.warning(f"[步骤6] 视频生成已被用户取消 - 会话: {session_id[:8]}...")
-                    # 保存当前进度（已生成的视频）
-                    success_count = sum(1 for v in videos if v.task_status == "completed")
-                    failed_count = sum(1 for v in videos if v.task_status == "failed")
+                    # 将未处理的视频标记为 cancelled 状态
+                    for j in range(i, total_segments):
+                        all_videos[j].task_status = "cancelled"
+
+                    # 保存完整列表（包含已生成、已取消的所有视频）
+                    success_count = sum(1 for v in all_videos if v.task_status == "completed")
+                    failed_count = sum(1 for v in all_videos if v.task_status == "failed")
+                    cancelled_count = sum(1 for v in all_videos if v.task_status == "cancelled")
 
                     result_data = {
-                        "generated_videos": [v.model_dump() for v in videos],
-                        "video_count": len(videos),
+                        "generated_videos": [v.model_dump() for v in all_videos],
+                        "video_count": total_segments,
                         "success_count": success_count,
                         "failed_count": failed_count,
+                        "cancelled_count": cancelled_count,
                         "_generating": False,
                         "_success": False,
                         "_cancelled": True
                     }
                     self.session_manager.save_step_result(session_id, "generate_videos", result_data, success=False)
-                    logger.info(f"[步骤6] 已停止 - 已生成 {success_count}/{total_segments} 个视频")
+                    logger.info(f"[步骤6] 已停止 - 已生成 {success_count}/{total_segments} 个视频，{cancelled_count} 个已取消")
 
                     return {
                         "success": False,
@@ -806,17 +822,26 @@ class VideoCreationWorkflowV2:
                 )
 
                 if not frame or not frame.first_image_path:
-                    return {"success": False, "error": f"分片 {segment.index} 缺少首尾帧"}
+                    # 标记为失败并继续处理下一个
+                    all_videos[i].task_status = "failed"
+                    all_videos[i].video_path = f"生成失败: 分片 {segment.index} 缺少首尾帧"
+                    logger.error(f"[步骤6] 分片 {segment.index} 缺少首尾帧，跳过")
+                    continue
 
-                # 生成视频，传递优化后的总脚本作为上下文
+                # 获取前后分片（用于上下文连贯）
+                prev_segment = segment_scripts[i - 1] if i > 0 else None
+                next_segment = segment_scripts[i + 1] if i < len(segment_scripts) - 1 else None
+
+                # 生成视频，传递前后分片作为上下文
                 video = await self.video_service.generate_video_from_frames(
                     segment,
                     frame.first_image_path,
                     frame.last_image_path,
                     video_params,
-                    optimized_script=optimized_script,
                     total_segments=total_segments,
                     extra_prompt=extra_prompt,
+                    prev_segment=prev_segment,
+                    next_segment=next_segment,
                 )
 
                 # 确保设置 task_status
@@ -829,32 +854,35 @@ class VideoCreationWorkflowV2:
                     else:
                         video.task_status = "pending"
 
-                videos.append(video)
+                # 更新对应索引的视频状态
+                all_videos[i] = video
 
-                # 每生成一个视频后，保存当前进度（这样前端可以看到实时进度）
-                success_count = sum(1 for v in videos if v.task_status == "completed")
-                failed_count = sum(1 for v in videos if v.task_status == "failed")
+                # 每生成一个视频后，保存当前进度（包含所有视频的完整列表）
+                success_count = sum(1 for v in all_videos if v.task_status == "completed")
+                failed_count = sum(1 for v in all_videos if v.task_status == "failed")
+                pending_count = sum(1 for v in all_videos if v.task_status == "pending")
 
                 intermediate_data = {
-                    "generated_videos": [v.model_dump() for v in videos],
-                    "video_count": len(videos),
+                    "generated_videos": [v.model_dump() for v in all_videos],
+                    "video_count": total_segments,
                     "success_count": success_count,
                     "failed_count": failed_count,
+                    "pending_count": pending_count,
                     "_generating": True,  # 仍在生成中
                     "_success": False
                 }
                 # 不推进 current_step，仅更新数据
                 self.session_manager.update_step_result(session_id, "generate_videos", intermediate_data)
-                logger.info(f"[步骤6] 进度更新: {len(videos)}/{total_segments} 个视频已处理")
+                logger.info(f"[步骤6] 进度更新: {success_count + failed_count}/{total_segments} 个视频已处理")
 
             # 统计成功和失败
-            success_count = sum(1 for v in videos if v.task_status == "completed")
-            failed_count = sum(1 for v in videos if v.task_status == "failed")
+            success_count = sum(1 for v in all_videos if v.task_status == "completed")
+            failed_count = sum(1 for v in all_videos if v.task_status == "failed")
 
-            # 保存结果
+            # 保存结果（使用完整的视频列表）
             result_data = {
-                "generated_videos": [v.model_dump() for v in videos],
-                "video_count": len(videos),
+                "generated_videos": [v.model_dump() for v in all_videos],
+                "video_count": total_segments,
                 "success_count": success_count,
                 "failed_count": failed_count,
                 "_generating": False,  # 标记生成完成
@@ -874,11 +902,11 @@ class VideoCreationWorkflowV2:
 
             # 更新会话状态为已完成
             self.session_manager.update_session_status(session_id, "completed")
-            logger.info(f"[步骤6] 完成 - 生成 {len(videos)} 个视频片段")
+            logger.info(f"[步骤6] 完成 - 生成 {success_count} 个视频片段")
 
             return {
                 "success": True,
-                "message": f"已生成 {len(videos)} 个视频片段",
+                "message": f"已生成 {success_count} 个视频片段",
                 "data": result_data
             }
 

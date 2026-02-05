@@ -44,6 +44,7 @@ interface Step4SegmentsProps {
 export const Step4Segments: React.FC<Step4SegmentsProps> = ({ session }) => {
   const [loading, setLoading] = useState(false)
   const [editingIndex, setEditingIndex] = useState<number | null>(null)
+  const [activeKeys, setActiveKeys] = useState<string[]>([])
   const [actionLoading, setActionLoading] = useState<number | null>(null)
   const [promptModalVisible, setPromptModalVisible] = useState(false)
   const [extraPrompt, setExtraPrompt] = useState('')
@@ -153,6 +154,8 @@ export const Step4Segments: React.FC<Step4SegmentsProps> = ({ session }) => {
   const handleEdit = (index: number, segment: ScriptSegment) => {
     setEditingIndex(index)
     form.setFieldsValue(segment)
+    // 自动展开当前编辑的分片
+    setActiveKeys([String(index)])
   }
 
   const handleCancelEdit = () => {
@@ -559,8 +562,17 @@ export const Step4Segments: React.FC<Step4SegmentsProps> = ({ session }) => {
 
                 {/* 分片折叠面板 */}
                 <Collapse
+                  activeKey={activeKeys}
+                  onChange={(keys) => {
+                    const newKeys = keys as string[]
+                    // 编辑状态下不能收起
+                    if (editingIndex === index && !newKeys.includes(String(index))) {
+                      return
+                    }
+                    setActiveKeys(newKeys)
+                  }}
                   items={[{
-                    key: index,
+                    key: String(index),
                     label: (
                       <Space>
                         <Checkbox

@@ -18,8 +18,20 @@ interface RawSessionData {
 }
 
 // 将后端返回的步骤名称转换为步骤索引
-const stepNameToIndex = (stepName: string): number => {
-  return STEP_NAME_TO_INDEX[stepName as StepName] ?? 0
+const stepNameToIndex = (stepName: string | null | undefined, completedSteps?: string[]): number => {
+  // 如果步骤名称有效，直接返回对应索引
+  if (stepName && STEP_NAME_TO_INDEX[stepName as StepName] !== undefined) {
+    return STEP_NAME_TO_INDEX[stepName as StepName]
+  }
+
+  // 如果 current_step 为空但已完成最后一步，显示最后一步
+  const lastStepName = 'generate_videos'
+  if (completedSteps?.includes(lastStepName)) {
+    return STEP_NAME_TO_INDEX[lastStepName]
+  }
+
+  // 默认返回第一步
+  return 0
 }
 
 // 转换原始会话数据为前端使用的格式
@@ -28,7 +40,7 @@ const transformSessionData = (raw: RawSessionData): SessionDetail => {
     session_id: raw.session_id,
     created_at: raw.created_at,
     updated_at: raw.updated_at,
-    current_step: stepNameToIndex(raw.current_step),
+    current_step: stepNameToIndex(raw.current_step, raw.completed_steps),
     status: raw.status,
     completed_steps: raw.completed_steps,
     step_results: raw.step_results || {},
@@ -84,10 +96,13 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     try {
       const { sessions } = await sessionApi.list()
       // 转换会话列表中的 current_step
-      const transformedSessions = sessions.map((s) => ({
-        ...s,
-        current_step: stepNameToIndex((s as unknown as RawSessionData).current_step),
-      }))
+      const transformedSessions = sessions.map((s) => {
+        const raw = s as unknown as RawSessionData
+        return {
+          ...s,
+          current_step: stepNameToIndex(raw.current_step, raw.completed_steps),
+        }
+      })
       set({ sessions: transformedSessions, loading: false })
     } catch (error) {
       set({ error: (error as Error).message, loading: false })
@@ -100,10 +115,13 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       await sessionApi.delete(sessionId)
       // 重新加载会话列表
       const { sessions } = await sessionApi.list()
-      const transformedSessions = sessions.map((s) => ({
-        ...s,
-        current_step: stepNameToIndex((s as unknown as RawSessionData).current_step),
-      }))
+      const transformedSessions = sessions.map((s) => {
+        const raw = s as unknown as RawSessionData
+        return {
+          ...s,
+          current_step: stepNameToIndex(raw.current_step, raw.completed_steps),
+        }
+      })
       set({ sessions: transformedSessions, loading: false })
       // 如果删除的是当前会话，清空当前会话
       if (get().currentSession?.session_id === sessionId) {

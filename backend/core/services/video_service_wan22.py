@@ -178,9 +178,10 @@ class VideoServiceWan22:
         first_image_url: str,
         last_image_url: str,
         video_params: VideoParams,
-        optimized_script: str = "",
         total_segments: int = 1,
         extra_prompt: str = "",
+        prev_segment: ScriptSegment | None = None,
+        next_segment: ScriptSegment | None = None,
     ) -> GeneratedVideo:
         """基于参考图片生成视频
 
@@ -189,13 +190,14 @@ class VideoServiceWan22:
             first_image_url: 首帧图片URL
             last_image_url: 尾帧图片URL
             video_params: 视频参数
-            optimized_script: 优化后的总脚本（作为上下文）
             total_segments: 总分片数
             extra_prompt: 额外的提示词，用于增加控制力
+            prev_segment: 上一个分片脚本（用于上下文连贯）
+            next_segment: 下一个分片脚本（用于上下文连贯）
         """
-        # 构建视频提示词
+        # 构建视频提示词（简化版：只包含视频参数、当前分片、前后分片上下文）
         video_prompt = self._build_video_prompt(
-            segment, video_params, optimized_script, total_segments, extra_prompt
+            segment, video_params, total_segments, extra_prompt, prev_segment, next_segment
         )
         duration = self._get_duration(segment.duration)
         resolution = self._get_resolution(video_params.resolution)
@@ -230,7 +232,8 @@ class VideoServiceWan22:
                 video_id=video_id,
                 video_path=local_path,
                 duration=duration,
-                prompt=video_prompt
+                prompt=video_prompt,
+                task_status="completed"  # 明确设置为完成状态
             )
 
         except Exception as e:
@@ -240,52 +243,56 @@ class VideoServiceWan22:
                 video_id=f"error_{segment.index}",
                 video_path="",
                 duration=0,
-                prompt=f"生成失败: {str(e)}"
+                prompt=f"生成失败: {str(e)}",
+                task_status="failed"  # 明确设置为失败状态
             )
 
     def _build_video_prompt(
         self,
         segment: ScriptSegment,
         video_params: VideoParams,
-        optimized_script: str = "",
         total_segments: int = 1,
         extra_prompt: str = "",
+        prev_segment: ScriptSegment | None = None,
+        next_segment: ScriptSegment | None = None,
     ) -> str:
-        """构建完整的视频提示词，包含总脚本上下文"""
+        """构建简化的视频提示词
+
+        只包含必要的信息：
+        1. 视频总参数（风格、比例等）
+        2. 当前分片的脚本内容
+        3. 上一个/下一个分片的简要描述（用于上下文连贯）
+
+        Args:
+            segment: 分片脚本
+            video_params: 视频参数
+            total_segments: 总分片数
+            extra_prompt: 额外的提示词
+            prev_segment: 上一个分片脚本（用于上下文连贯）
+            next_segment: 下一个分片脚本（用于上下文连贯）
+        """
         parts = []
 
-        # 1. 添加总脚本背景（如果有）
-        if optimized_script:
-            # 截取关键信息作为背景，避免过长
-            script_summary = optimized_script[:500] + "..." if len(optimized_script) > 500 else optimized_script
-            parts.append(f"[视频背景]: {script_summary}")
-
-        # 2. 添加分片位置信息
-        print(f"[当前分片镜头的顺序 {segment.index + 1}/{total_segments}]")
-
-        # 3. 添加分片核心内容
-        parts.append(f"[当前分片镜头的内容]: {segment.content}")
-
-        # 4. 添加动作描述
-        if segment.action:
-            parts.append(f"动作: {segment.action}")
-
-        # 5. 添加镜头运动
-        if segment.camera_movement:
-            parts.append(f"镜头: {segment.camera_movement}")
-
-        # 6. 添加镜头效果
-        if segment.focus:
-            parts.append(f"特效: {segment.focus}")
-
-        # 7. 添加氛围
-        if segment.atmosphere:
-            parts.append(f"氛围: {segment.atmosphere}")
-
-        # 8. 添加视频风格
+        # 1. 视频风格参数
         parts.append(f"风格: {video_params.style}")
 
-        # 9. 添加额外提示词（如果有）
+        # 2. 分片位置信息
+        parts.append(f"[分片 {segment.index + 1}/{total_segments}]")
+
+        # 3. 上一个分片的简要描述（用于过渡连贯）
+        if prev_segment:
+            prev_summary = prev_segment.content[:100] + "..." if len(prev_segment.content) > 100 else prev_segment.content
+            parts.append(f"[前一镜头]: {prev_summary}")
+
+        # 4. 当前分片核心内容（使用模型自带的方法）
+        parts.append(f"\n[当前镜头]{segment.to_video_prompt()}")
+
+        # 5. 下一个分片的简要描述（用于过渡连贯）
+        if next_segment:
+            next_summary = next_segment.content[:100] + "..." if len(next_segment.content) > 100 else next_segment.content
+            parts.append(f"[后一镜头]: {next_summary}")
+
+        # 6. 用户自定义提示词
         if extra_prompt:
             parts.append(extra_prompt)
 

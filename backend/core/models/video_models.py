@@ -102,4 +102,4 @@ class GeneratedVideo(BaseModel):
     video_path: str = Field(default="", description="视频本地路径")
     duration: float = Field(default=0.0, description="视频时长（秒）")
     prompt: str = Field(default="", description="生成提示词")
-    task_status: str = Field(default="pending", description="任务状态: pending/completed/failed")
+    task_status: str = Field(default="pending", description="任务状态: pending/completed/failed/cancelled")
