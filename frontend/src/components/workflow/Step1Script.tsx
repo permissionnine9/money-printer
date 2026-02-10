@@ -11,6 +11,16 @@ import { useSessionStore } from '@/stores/sessionStore'
 const { TextArea } = Input
 const { Option } = Select
 
+// 预设风格选项
+const PRESET_STYLES = [
+  { value: '现实主义', label: '现实主义' },
+  { value: '动画风格', label: '动画风格' },
+  { value: '赛博朋克', label: '赛博朋克' },
+  { value: '水彩风格', label: '水彩风格' },
+  { value: '油画风格', label: '油画风格' },
+  { value: 'custom', label: '✏️ 自定义...' },
+]
+
 interface Step1ScriptProps {
   session: SessionDetail
 }
@@ -19,6 +29,8 @@ export const Step1Script: React.FC<Step1ScriptProps> = ({ session }) => {
   const [form] = Form.useForm()
   const [loading, setLoading] = useState(false)
   const [isEditing, setIsEditing] = useState(false)
+  const [isCustomStyle, setIsCustomStyle] = useState(false)
+  const [customStyleValue, setCustomStyleValue] = useState('')
   const { refreshSession } = useSessionStore()
 
   // 检查是否已完成此步骤
@@ -26,16 +38,27 @@ export const Step1Script: React.FC<Step1ScriptProps> = ({ session }) => {
   const stepResult = session.step_results?.submit_script_and_params?.result_data
 
   // 获取已完成的后续步骤数量
-  const completedSubsequentSteps = session.completed_steps?.filter(step => 
-    ['optimize_script', 'generate_material_images', 'generate_segment_scripts', 
-     'generate_segment_frames', 'generate_videos'].includes(step)
+  const completedSubsequentSteps = session.completed_steps?.filter(step =>
+    ['optimize_script', 'generate_material_images', 'generate_segment_scripts',
+      'generate_segment_frames', 'generate_videos'].includes(step)
   ).length || 0
 
   const handleSubmit = async (values: { script: string } & VideoParams) => {
     setLoading(true)
     try {
       const { script, ...params } = values
-      const response = await stepApi.submitScript(session.session_id, script, params)
+      // 处理自定义风格
+      let finalStyle = params.style
+      if (isCustomStyle) {
+        finalStyle = customStyleValue.trim() || '自定义风格'
+      }
+      // 确保 max_segment_duration 有值，默认8秒
+      const finalParams = {
+        ...params,
+        style: finalStyle,
+        max_segment_duration: params.max_segment_duration || 8
+      }
+      const response = await stepApi.submitScript(session.session_id, script, finalParams)
       if (response.success) {
         message.success(response.message)
         await refreshSession()
@@ -81,7 +104,16 @@ export const Step1Script: React.FC<Step1ScriptProps> = ({ session }) => {
     setLoading(true)
     try {
       const { script, ...params } = values
-      const response = await stepApi.resubmitScript(session.session_id, script, params)
+      // 处理自定义风格
+      let finalStyle = params.style
+      if (isCustomStyle) {
+        finalStyle = customStyleValue.trim() || '自定义风格'
+      }
+      const finalParams = {
+        ...params,
+        style: finalStyle,
+      }
+      const response = await stepApi.resubmitScript(session.session_id, script, finalParams)
       if (response.success) {
         message.success(response.message)
         setIsEditing(false)
@@ -98,31 +130,55 @@ export const Step1Script: React.FC<Step1ScriptProps> = ({ session }) => {
 
   const startEditing = () => {
     setIsEditing(true)
+    // 获取当前风格值
+    const currentStyle = stepResult?.video_params?.style || '现实主义'
+    // 检查是否是预设风格
+    const isPresetStyle = PRESET_STYLES.some(s => s.value === currentStyle && s.value !== 'custom')
+    if (isPresetStyle) {
+      setIsCustomStyle(false)
+      setCustomStyleValue('')
+    } else {
+      setIsCustomStyle(true)
+      setCustomStyleValue(currentStyle)
+    }
     // 设置表单初始值为当前数据
     form.setFieldsValue({
       script: stepResult?.original_script || '',
       resolution: stepResult?.video_params?.resolution || '1080p',
       aspect_ratio: stepResult?.video_params?.aspect_ratio || '16:9',
       language: stepResult?.video_params?.language || '中文',
-      style: stepResult?.video_params?.style || '现实主义',
+      style: isPresetStyle ? currentStyle : 'custom',
       camera_view: stepResult?.video_params?.perspective || '第三人称',
+      max_segment_duration: stepResult?.video_params?.max_segment_duration || 8,
     })
   }
 
   const cancelEditing = () => {
     setIsEditing(false)
+    setIsCustomStyle(false)
+    setCustomStyleValue('')
     form.resetFields()
+  }
+
+  // 处理风格选择变化
+  const handleStyleChange = (value: string) => {
+    if (value === 'custom') {
+      setIsCustomStyle(true)
+    } else {
+      setIsCustomStyle(false)
+      setCustomStyleValue('')
+    }
   }
 
   // 已完成状态且不在编辑模式 - 显示结果和重新编辑按钮
   if (isCompleted && stepResult && !isEditing) {
     return (
-      <Card 
-        title="脚本已提交" 
+      <Card
+        title="脚本已提交"
         style={{ marginTop: 16 }}
         extra={
-          <Button 
-            type="primary" 
+          <Button
+            type="primary"
             icon={<EditOutlined />}
             onClick={startEditing}
           >
@@ -154,6 +210,7 @@ export const Step1Script: React.FC<Step1ScriptProps> = ({ session }) => {
               <span>语言: {stepResult.video_params?.language || '中文'}</span>
               <span>风格: {stepResult.video_params?.style || '现实主义'}</span>
               <span>视角: {stepResult.video_params?.perspective || '第三人称'}</span>
+              <span>分片最大时长: {stepResult.video_params?.max_segment_duration || 8}秒</span>
             </Space>
           </div>
         </div>
@@ -171,8 +228,8 @@ export const Step1Script: React.FC<Step1ScriptProps> = ({ session }) => {
 
   // 编辑模式或未完成状态 - 显示表单
   return (
-    <Card 
-      title={isEditing ? "重新编辑脚本和参数" : "提交脚本和参数"} 
+    <Card
+      title={isEditing ? "重新编辑脚本和参数" : "提交脚本和参数"}
       style={{ marginTop: 16 }}
     >
       <Form
@@ -182,20 +239,27 @@ export const Step1Script: React.FC<Step1ScriptProps> = ({ session }) => {
         initialValues={
           isEditing
             ? {
-                script: stepResult?.original_script || '',
-                resolution: stepResult?.video_params?.resolution || '1080p',
-                aspect_ratio: stepResult?.video_params?.aspect_ratio || '16:9',
-                language: stepResult?.video_params?.language || '中文',
-                style: stepResult?.video_params?.style || '现实主义',
-                camera_view: stepResult?.video_params?.perspective || '第三人称',
-              }
+              script: stepResult?.original_script || '',
+              resolution: stepResult?.video_params?.resolution || '1080p',
+              aspect_ratio: stepResult?.video_params?.aspect_ratio || '16:9',
+              language: stepResult?.video_params?.language || '中文',
+              style: stepResult?.video_params?.style || '现实主义',
+              camera_view: stepResult?.video_params?.perspective || '第三人称',
+            }
             : {
-                resolution: '1080p',
-                aspect_ratio: '16:9',
-                language: '中文',
-                style: '现实主义',
-                camera_view: '第三人称',
-              }
+              resolution: '720p',
+              aspect_ratio: '16:9',
+              language: '中文',
+              style: '现实主义',
+              camera_view: '第三人称',
+              max_segment_duration: 8,
+            }
+        }
+        onValuesChange={(changedValues) => {
+          if (changedValues.style !== undefined) {
+            handleStyleChange(changedValues.style)
+          }
+        }
         }
       >
         <Form.Item
@@ -236,14 +300,34 @@ export const Step1Script: React.FC<Step1ScriptProps> = ({ session }) => {
           </Form.Item>
 
           <Form.Item name="style" label="风格" style={{ marginBottom: 0 }}>
-            <Select style={{ width: 150 }}>
-              <Option value="现实主义">现实主义</Option>
-              <Option value="动画风格">动画风格</Option>
-              <Option value="赛博朋克">赛博朋克</Option>
-              <Option value="水彩风格">水彩风格</Option>
-              <Option value="油画风格">油画风格</Option>
+            <Select
+              style={{ width: 150 }}
+              onChange={handleStyleChange}
+            >
+              {PRESET_STYLES.map(style => (
+                <Option key={style.value} value={style.value}>
+                  {style.label}
+                </Option>
+              ))}
             </Select>
           </Form.Item>
+
+          {isCustomStyle && (
+            <Form.Item
+              label="自定义风格"
+              style={{ marginBottom: 0 }}
+              required
+            >
+              <Input
+                value={customStyleValue}
+                onChange={(e) => setCustomStyleValue(e.target.value)}
+                placeholder="请输入自定义风格，如：复古胶片、极简主义..."
+                style={{ width: 200 }}
+                maxLength={50}
+                showCount
+              />
+            </Form.Item>
+          )}
 
           <Form.Item name="camera_view" label="视角" style={{ marginBottom: 0 }}>
             <Select style={{ width: 150 }}>
@@ -251,6 +335,22 @@ export const Step1Script: React.FC<Step1ScriptProps> = ({ session }) => {
               <Option value="第三人称">第三人称</Option>
               <Option value="上帝视角">上帝视角</Option>
             </Select>
+          </Form.Item>
+
+          <Form.Item
+            name="max_segment_duration"
+            label="分片镜头最大时长"
+            style={{ marginBottom: 0 }}
+            rules={[{ required: true, message: '请输入分片时长' }]}
+          >
+            <Input
+              type="number"
+              min={5}
+              max={30}
+              style={{ width: 140 }}
+              suffix="秒"
+              placeholder="8"
+            />
           </Form.Item>
         </Space>
 

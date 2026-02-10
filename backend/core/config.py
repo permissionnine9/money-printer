@@ -27,12 +27,13 @@ SHENGSUANYUN_API_KEY = os.getenv(
 SHENGSUANYUN_BASE_URL = "https://router.shengsuanyun.com/api/v1"
 
 # 视频生成服务配置
-# 可选值: "jimeng" (即梦首尾帧) 或 "wan22" (阿里wan2.2首尾帧)
-VIDEO_SERVICE_TYPE = os.getenv("VIDEO_SERVICE_TYPE", "wan22")
+# 可选值: "jimeng" (即梦首尾帧) 或 "wan22" (阿里wan2.2首尾帧) 或 "doubao" (豆包-seedance-1.0-pro)
+VIDEO_SERVICE_TYPE = os.getenv("VIDEO_SERVICE_TYPE", "doubao")
 
 # 视频模型配置
 SHENGSUANYUN_VIDEO_MODEL = "bytedance/jimeng_i2v_first_tail_v30"  # 即梦首尾帧模型
 SHENGSUANYUN_VIDEO_MODEL_WAN22 = "ali/wan2.2-kf2v-flash"  # 阿里wan2.2首尾帧模型
+SHENGSUANYUN_VIDEO_MODEL_DOUBAO = "bytedance/doubao-seedance-1.0-pro"  # 豆包-seedance-1.0-pro模型
 
 # LLM模型配置
 SHENGSUANYUN_LLM_MODEL = "bytedance/doubao-seed-1.8"  # 脚本优化、分片切割等
@@ -53,7 +54,7 @@ OSS_BUCKET = os.getenv("OSS_BUCKET", "")
 
 # 视频参数默认值
 DEFAULT_VIDEO_PARAMS = {
-    "resolution": "1080p",
+    "resolution": "720p",
     "aspect_ratio": "16:9",
     "language": "zh-CN",
     "style": "cinematic",
@@ -91,4 +92,4 @@ PERSPECTIVE_OPTIONS = [
 ]
 
 # 每个分片的最大时长（秒）
-MAX_SEGMENT_DURATION = 6
+MAX_SEGMENT_DURATION = 12

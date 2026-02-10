@@ -9,6 +9,7 @@ class VideoParams(BaseModel):
     language: str = Field(default="zh-CN", description="语言")
     style: str = Field(default="cinematic", description="美学风格")
     perspective: str = Field(default="third_person", description="视角")
+    max_segment_duration: int = Field(default=8, description="最大分片时长（秒），注意：当前即梦和wan2.2模型仅支持5秒或10秒视频生成", ge=5, le=30)
 
     def to_prompt_context(self) -> str:
         """转换为提示词上下文"""
@@ -17,14 +18,15 @@ class VideoParams(BaseModel):
 - 宽高比: {self.aspect_ratio}
 - 语言: {self.language}
 - 美学风格: {self.style}
-- 视角: {self.perspective}"""
+- 视角: {self.perspective}
+- 最大分片时长: {self.max_segment_duration}秒"""
 
 
 class ScriptSegment(BaseModel):
     """分片脚本"""
     index: int = Field(description="分片索引")
     content: str = Field(description="分片内容")
-    duration: float = Field(default=8.0, description="时长（秒）", le=8.0)
+    duration: float = Field(default=8.0, description="时长（秒）")
     action: str = Field(default="", description="动作描述")
     camera_movement: str = Field(default="", description="相机运动")
     composition: str = Field(default="", description="构图")
@@ -37,7 +39,8 @@ class ScriptSegment(BaseModel):
         description="""首帧模式:
         - 'generate': 全新生成，与前一分片无关联
         - 'generate_continuous': 生成但需要与前一分片尾帧保持视觉连贯（会参考前一帧）
-        - 'reuse_prev': 100%复用前一分片的尾帧（同一张图）"""
+        - 'reuse_prev': 100%复用前一分片的尾帧（同一张图）
+        - 'use_video_snapshot': 使用上一个分片视频的结尾快照作为首帧（需等待前一个视频生成完成）"""
     )
     last_frame_mode: str = Field(
         default="generate",
@@ -45,6 +48,13 @@ class ScriptSegment(BaseModel):
         - 'generate': 全新生成
         - 'generate_continuous': 生成但需要与后一分片首帧保持视觉连贯（后一帧会参考此帧）
         - 'reuse_next': 此帧会被下一分片100%复用（标记用）"""
+    )
+    # 视频生成模式
+    video_generation_mode: str = Field(
+        default="first_last_frame",
+        description="""视频生成模式:
+        - 'first_last_frame': 首尾帧模式（使用首帧和尾帧控制视频生成）
+        - 'first_frame_reference': 首帧+参考图模式（使用豆包seedance-pro，首帧+素材参考图+提示词）"""
     )
 
     def to_image_prompt(self, style: str) -> str:

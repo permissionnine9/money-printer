@@ -48,6 +48,10 @@ export const Step4Segments: React.FC<Step4SegmentsProps> = ({ session }) => {
   const [actionLoading, setActionLoading] = useState<number | null>(null)
   const [promptModalVisible, setPromptModalVisible] = useState(false)
   const [extraPrompt, setExtraPrompt] = useState('')
+
+  // 获取步骤1的结果以显示分片时长
+  const step1Result = session.step_results?.submit_script_and_params?.result_data
+  const maxSegmentDuration = step1Result?.video_params?.max_segment_duration || 8
   const [isRegenerate, setIsRegenerate] = useState(false)
   const [addModalVisible, setAddModalVisible] = useState(false)
   const [insertAfterIndex, setInsertAfterIndex] = useState<number>(-1)
@@ -629,6 +633,14 @@ export const Step4Segments: React.FC<Step4SegmentsProps> = ({ session }) => {
                               <Input />
                             </Form.Item>
                           </Space>
+                          <Space style={{ width: '100%', marginTop: 16 }}>
+                            <Form.Item name="composition" label="构图" style={{ marginBottom: 0, flex: 1 }}>
+                              <Input placeholder="例如：中景、特写..." />
+                            </Form.Item>
+                            <Form.Item name="atmosphere" label="氛围" style={{ marginBottom: 0, flex: 1 }}>
+                              <Input placeholder="例如：紧张、欢快..." />
+                            </Form.Item>
+                          </Space>
                           <div style={{ marginTop: 16 }}>
                             <Space>
                               <Button
@@ -688,7 +700,7 @@ export const Step4Segments: React.FC<Step4SegmentsProps> = ({ session }) => {
     <>
       <Card title="生成分片脚本" style={{ marginTop: 16 }}>
         <div style={{ marginBottom: 16 }}>
-          <Text>LLM 将把优化后的脚本切割成多个分镜头片段，每个片段8秒以内。</Text>
+          <Text>LLM 将把优化后的脚本切割成多个分镜头片段，每个片段{maxSegmentDuration}秒以内。</Text>
         </div>
         <Spin spinning={loading}>
           <Button

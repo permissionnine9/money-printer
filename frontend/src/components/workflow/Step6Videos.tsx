@@ -6,7 +6,7 @@
  * 2. 前端轮询获取最新状态
  * 3. 显示每个视频的生成进度
  */
-import React, { useState } from 'react'
+import React, { useState, useMemo } from 'react'
 import {
   Card,
   Button,
@@ -76,8 +76,45 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
   const [optimizeRequirement, setOptimizeRequirement] = useState('')
   const [optimizedPrompt, setOptimizedPrompt] = useState('')
 
-  // 检查前置步骤是否完成
-  const canExecute = session.completed_steps?.includes('generate_segment_frames')
+  // 检查前置步骤是否完成（考虑步骤5的特殊模式）
+  const canExecute = useMemo(() => {
+    // 首先检查后端的完成标记
+    if (session.completed_steps?.includes('generate_segment_frames')) {
+      return true
+    }
+    
+    // 如果没有首尾帧数据或分片数据，视为未完成
+    const frames = session.step_results?.generate_segment_frames?.result_data?.segment_frames || []
+    const segments = session.step_results?.generate_segment_scripts?.result_data?.segment_scripts || []
+    
+    if (frames.length === 0 || segments.length === 0) {
+      return false
+    }
+    
+    // 检查每个分片是否都已配置完成（考虑特殊模式）
+    return frames.every((frame: SegmentFrame) => {
+      const segment = segments.find((s: ScriptSegment) => s.index === frame.segment_index)
+      if (!segment) return false
+      
+      const firstPath = frame.first_image_path
+      const lastPath = frame.last_image_path
+      const videoMode = segment.video_generation_mode
+      const firstFrameMode = segment.first_frame_mode
+      
+      // 首帧+参考图模式：只需要首帧
+      if (videoMode === 'first_frame_reference') {
+        return !!firstPath
+      }
+      
+      // 视频快照模式：首帧在视频生成阶段获取，只需要尾帧
+      if (firstFrameMode === 'use_video_snapshot') {
+        return !!lastPath
+      }
+      
+      // 普通模式：需要首尾帧都完成
+      return !!firstPath && !!lastPath
+    })
+  }, [session])
   const stepResult = session.step_results?.generate_videos?.result_data
   const videos = stepResult?.generated_videos || []
 
@@ -479,9 +516,53 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
   }
 
   if (!canExecute) {
+    // 计算步骤5的完成状态详情
+    const frames = session.step_results?.generate_segment_frames?.result_data?.segment_frames || []
+    const segmentScripts = session.step_results?.generate_segment_scripts?.result_data?.segment_scripts || []
+    
+    const incompleteSegments: number[] = []
+    frames.forEach((frame: SegmentFrame) => {
+      const segment = segmentScripts.find((s: ScriptSegment) => s.index === frame.segment_index)
+      if (!segment) {
+        incompleteSegments.push(frame.segment_index + 1)
+        return
+      }
+      
+      const firstPath = frame.first_image_path
+      const lastPath = frame.last_image_path
+      const videoMode = segment.video_generation_mode
+      const firstFrameMode = segment.first_frame_mode
+      
+      let isComplete = false
+      if (videoMode === 'first_frame_reference') {
+        isComplete = !!firstPath
+      } else if (firstFrameMode === 'use_video_snapshot') {
+        isComplete = !!lastPath
+      } else {
+        isComplete = !!firstPath && !!lastPath
+      }
+      
+      if (!isComplete) {
+        incompleteSegments.push(frame.segment_index + 1)
+      }
+    })
+    
     return (
       <Card title="生成视频" style={{ marginTop: 16 }}>
-        <Text type="secondary">请先完成步骤5：生成首尾帧</Text>
+        <div style={{ marginBottom: 16 }}>
+          <Text type="secondary">请先完成步骤5：配置首尾帧</Text>
+        </div>
+        {incompleteSegments.length > 0 && (
+          <div style={{ padding: 12, background: '#fff7e6', borderRadius: 4, marginBottom: 16 }}>
+            <ExclamationCircleOutlined style={{ color: '#fa8c16', marginRight: 8 }} />
+            <Text type="warning">
+              以下分片还需要配置帧：{incompleteSegments.join(', ')}
+            </Text>
+            <div style={{ marginTop: 8, fontSize: 12, color: '#666' }}>
+              💡 提示：您可以在步骤5中为这些分片生成首尾帧，或将它们设置为特殊模式（如"首帧+参考图"、"使用视频快照"）
+            </div>
+          </div>
+        )}
       </Card>
     )
   }

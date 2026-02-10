@@ -13,6 +13,8 @@ class SegmentUpdateRequest(BaseModel):
     camera_movement: Optional[str] = Field(None, description="镜头运动")
     composition: Optional[str] = Field(None, description="构图")
     atmosphere: Optional[str] = Field(None, description="氛围")
+    video_generation_mode: Optional[str] = Field(None, description="视频生成模式：first_last_frame 或 first_frame_reference")
+    first_frame_mode: Optional[str] = Field(None, description="首帧模式：generate、reuse_prev、use_video_snapshot 等")
 
 
 class SegmentAddRequest(BaseModel):

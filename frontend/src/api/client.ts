@@ -319,6 +319,27 @@ export const frameApi = {
     )
     return data
   },
+
+  // 使用上一个分片视频的结尾快照作为首帧
+  useVideoSnapshot: async (
+    sessionId: string,
+    segmentIndex: number
+  ): Promise<{ success: boolean; message: string; frame_path?: string; step_completed?: boolean }> => {
+    const { data } = await client.post(
+      `/frames/${sessionId}/${segmentIndex}/use-video-snapshot`
+    )
+    return data
+  },
+
+  // 检查步骤5是否已完成
+  checkCompletion: async (
+    sessionId: string
+  ): Promise<{ success: boolean; message: string; step_completed?: boolean }> => {
+    const { data } = await client.post(
+      `/frames/${sessionId}/check-completion`
+    )
+    return data
+  },
 }
 
 // 素材图管理 API

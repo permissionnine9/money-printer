@@ -116,7 +116,7 @@ class LLMService:
 
 请完成以下任务:
 1. 优化原始脚本，极大地丰富细节，使其更适合视频制作
-2. 设计{MAX_SEGMENT_DURATION}秒以内的转场，保障场景之间的连贯性
+2. 设计{video_params.max_segment_duration}秒以内的转场，保障场景之间的连贯性
 3. 增强视觉描述，包括场景、动作、氛围等
 4. 确保整体风格与指定的美学风格一致
 
@@ -149,28 +149,61 @@ class LLMService:
         if extra_prompt:
             extra_instruction = f"\n\n## 用户额外要求\n{extra_prompt}\n请在生成分片时充分考虑以上要求。"
 
-        prompt = f"""你是一个专业的视频分镜专家。请根据以下优化后的视频脚本，生成详细的分片脚本。
+        prompt = f"""你是一个专业的视频分镜专家。请根据以下优化后的视频脚本，生成专业详细的分片脚本。
 
 {video_params.to_prompt_context()}
 
 完整脚本:
 {optimized_script}{extra_instruction}
 
-基于"完整脚本"将脚本分割成多个分片，每个分片时长不超过{MAX_SEGMENT_DURATION}秒，不要过度分片，保障内容密度高，并为每个分片设计详细的拍摄参数。
+基于"完整脚本"将脚本分割成多个分片，每个分片时长不超过{video_params.max_segment_duration}秒，不要过度分片，保障内容密度高，并为每个分片设计详细的拍摄参数。
 
-请以JSON格式返回结果:
+## 分片内容要求
+每个分片必须包含以下五个核心要素，内容要具体、生动、专业：
+
+**内容**：[描述这个镜头的具体内容，包括画面中的人物、场景、动作变化]
+- 明确描述画面中的主体（人物/物体）
+- 具体说明场景环境（时间、地点、光线条件）
+- 详细阐述动作变化过程（从开始到结束的状态变化）
+
+**动作**：[角色/物体的具体动作]
+- 人物：具体动作姿态、移动轨迹、表情变化
+- 物体：运动方式、速度、轨迹、状态变化
+- 要体现动作的连贯性和目的性
+
+**镜头运动**：[推荐的镜头运动方式]
+- 推：缓慢推进/快速推进，突出细节或情绪
+- 拉：缓慢拉出/快速拉出，展示环境或关系
+- 摇：水平摇摄/垂直摇摄，跟随主体或展示空间
+- 移：横移/纵移/环绕移动，创造动态视角
+- 升降：升高/降低，改变观察角度
+- 综合：多种运动的组合，如推+摇、移+升等
+
+**构图**：[推荐的构图方式]
+- 基础：中心构图、三分法、对称构图、对角线构图
+- 进阶：框架构图、引导线构图、留白构图、层次构图
+- 特殊：俯视构图、仰视构图、鸟瞰构图、微距构图
+- 要考虑主体位置、背景层次、画面平衡
+
+**氛围**：[画面的情感氛围]
+- 情绪基调：温馨、紧张、神秘、欢快、悲伤、庄严等
+- 视觉感受：明亮、昏暗、朦胧、清晰、压抑、开阔等
+- 心理暗示：安全感、不确定感、期待感、危机感等
+
+## 输出格式要求
+请以JSON格式返回结果，确保每个分片包含以下字段:
 {{
     "segments": [
         {{
             "index": 0,
-            "content": "分片的具体内容描述",
-            "duration": {MAX_SEGMENT_DURATION},
-            "action": "角色或物体的动作描述",
-            "camera_movement": "相机运动方式(如: 缓慢推进、横移、俯拍等)",
-            "composition": "构图方式(如: 中心构图、三分法、对角线等)",
-            "focus": "对焦和镜头效果(如: 浅景深、全景深、柔焦等)",
-            "atmosphere": "氛围描述(如: 温馨、紧张、神秘等)",
-            "transition": "与下一分片的转场方式(如: 淡入淡出、切换、溶解等)",
+            "content": "内容：描述这个镜头的具体内容，包括画面中的人物、场景、动作变化。动作：角色/物体的具体动作描述。镜头运动：推荐的镜头运动方式。构图：推荐的构图方式。氛围：画面的情感氛围描述。",
+            "duration": {video_params.max_segment_duration},
+            "action": "从内容中提取的动作关键词",
+            "camera_movement": "从内容中提取的镜头运动方式",
+            "composition": "从内容中提取的构图方式",
+            "focus": "对焦和镜头效果建议",
+            "atmosphere": "从内容中提取的氛围描述",
+            "transition": "与下一分片的转场方式",
             "first_frame_mode": "generate 或 reuse_prev",
             "last_frame_mode": "generate 或 reuse_next"
         }}
@@ -189,7 +222,7 @@ class LLMService:
    - "generate_continuous": 需要生成，但后一分片首帧会参考此帧保持连贯（镜头即将切换但场景连续）
    - "reuse_next": 此帧会被下一分片100%复用（配合下一分片的 reuse_prev）
 
-选择指南:
+三种选择指南:
 - 同一镜头连续动作 → reuse_prev / reuse_next（100%相同的图）
 - 换镜头但同场景（如切换拍摄角度）→ generate_continuous（需要连贯但画面不同）
 - 完全切换场景 → generate（无需连贯）
@@ -202,13 +235,17 @@ class LLMService:
 其他注意事项:
 - 分片之间要保持故事连贯性
 - 转场要自然流畅
-- 每个分片的描述要足够详细
+- 每个分片的描述要足够详细，五个要素缺一不可
 - 所有参数要和总视频风格协调
+- content字段必须按顺序包含：内容、动作、镜头运动、构图、氛围
 - 仅返回JSON，不要包含其他内容"""
 
         logger.info("调用 LLM 生成分片脚本...")
         # 分片脚本生成需要较大的输出空间，使用 16384 tokens
         response_text = self._call_with_retry(prompt, temperature=0.6, operation_name="生成分片脚本", max_tokens=26384)
+
+        # 添加调试日志，查看LLM返回的内容
+        logger.debug(f"LLM原始响应: {response_text[:500]}...")
 
         result = parse_json_response(response_text)
         segments = [ScriptSegment(**seg) for seg in result.get("segments", [])]
@@ -223,13 +260,13 @@ class LLMService:
     def _validate_frame_modes(self, segments: list[ScriptSegment]) -> list[ScriptSegment]:
         """校验并修正首尾帧模式，确保边界条件正确
 
-        有效的 first_frame_mode: "generate", "generate_continuous", "reuse_prev"
+        有效的 first_frame_mode: "generate", "generate_continuous", "reuse_prev", "use_video_snapshot"
         有效的 last_frame_mode: "generate", "generate_continuous", "reuse_next"
         """
         if not segments:
             return segments
 
-        valid_first_modes = {"generate", "generate_continuous", "reuse_prev"}
+        valid_first_modes = {"generate", "generate_continuous", "reuse_prev", "use_video_snapshot"}
         valid_last_modes = {"generate", "generate_continuous", "reuse_next"}
 
         # 规范化无效值
@@ -239,8 +276,8 @@ class LLMService:
             if segment.last_frame_mode not in valid_last_modes:
                 segment.last_frame_mode = "generate"
 
-        # 第一个分片首帧必须是 generate（不能复用或连续）
-        if segments[0].first_frame_mode in ("reuse_prev", "generate_continuous"):
+        # 第一个分片首帧必须是 generate（不能复用、连续或使用视频快照）
+        if segments[0].first_frame_mode in ("reuse_prev", "generate_continuous", "use_video_snapshot"):
             segments[0].first_frame_mode = "generate"
 
         # 最后一个分片尾帧必须是 generate（不能被复用或标记连续）
@@ -304,7 +341,7 @@ class LLMService:
 分析脚本中出现的所有视觉元素，生成2-6张"设定稿/角色设定表"风格的素材图提示词。
 
 ⚠️ **重要提示**：素材图必须是"设定稿"风格！
-- 必须包含：身高比例尺、尺寸标注、多角度展示、设计说明等设计稿元素
+- 必须包含：身高比例尺、尺寸标注、多角度展示、设计说明等设计稿元素，标注语言必须为中文
 - 这些元素是素材图的核心特征，用于确保后续首尾帧生成时的角色/物品一致性
 - 无论是否有参考图（文生图或图生图），都必须保持设定稿风格
 
@@ -462,7 +499,7 @@ class LLMService:
 ## 图片生成基础参数（必须包含在每个提示词中）
 - 风格: {video_params.style}
 - 画面比例: {video_params.aspect_ratio}
-- 画质要求: 电影级画质，8K超高清，细节丰富
+- 画质要求: 电影级画质，2K高清，细节丰富
 - 禁止元素: 绝对不能包含任何文字、标注、比例尺、尺寸标记、设计稿元素
 
 ## 当前分片信息
@@ -569,7 +606,7 @@ class LLMService:
 
 请基于以上信息，重新生成这部分的分片脚本。注意：
 1. 你可以改变分片数量（增加或减少），以更好地表达内容
-2. 每个分片时长不超过{MAX_SEGMENT_DURATION}秒
+2. 每个分片时长不超过{video_params.max_segment_duration}秒
 3. 如果有上下文，确保新生成的分片能够自然承接前文和后文
 4. 保持与整体视频参数一致的风格和氛围
 5. 为每个分片设计详细的拍摄参数
@@ -579,7 +616,7 @@ class LLMService:
     "segments": [
         {{
             "content": "分片的具体内容描述",
-            "duration": {MAX_SEGMENT_DURATION},
+            "duration": {video_params.max_segment_duration},
             "action": "角色或物体的动作描述",
             "camera_movement": "相机运动方式(如: 缓慢推进、横移、俯拍等)",
             "composition": "构图方式(如: 中心构图、三分法、对角线等)",
@@ -616,7 +653,7 @@ class LLMService:
             segment = ScriptSegment(
                 index=0,  # 临时索引，后续会重新分配
                 content=seg_data.get("content", ""),
-                duration=seg_data.get("duration", MAX_SEGMENT_DURATION),
+                duration=seg_data.get("duration", video_params.max_segment_duration),
                 action=seg_data.get("action"),
                 camera_movement=seg_data.get("camera_movement"),
                 composition=seg_data.get("composition"),

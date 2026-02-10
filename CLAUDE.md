@@ -24,7 +24,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | **Agent框架** | LangGraph |
 | **LLM** | 豆包 Seed 1.8 (`bytedance/doubao-seed-1.8`) |
 | **图片生成(所有)** | Gemini 3 Pro Image (`google/gemini-3-pro-image-preview`) - 统一使用，支持文生图和图生图 |
-| **视频生成** | 即梦首尾帧 (`bytedance/jimeng_i2v_first_tail_v30`) 或 阿里wan2.2 (`ali/wan2.2-kf2v-flash`) |
+| **视频生成** | 即梦首尾帧 (`bytedance/jimeng_i2v_first_tail_v30`) 或 阿里wan2.2 (`ali/wan2.2-kf2v-flash`) 或 豆包-seedance (`bytedance/doubao-seedance-1.0-pro`) |
 | **前端界面** | Gradio 5.x / React 18 + TypeScript + Vite + Ant Design |
 | **后端API** | FastAPI |
 | **数据库** | SQLite（会话持久化） |

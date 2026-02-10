@@ -35,10 +35,12 @@ async def update_segment(
         index=index,
         content=request.content,
         duration=request.duration,
-        action=request.action,
-        camera_movement=request.camera_movement,
-        composition=request.composition,
-        atmosphere=request.atmosphere,
+        action=request.action or "",  # 如果为 None，使用空字符串
+        camera_movement=request.camera_movement or "",
+        composition=request.composition or "",
+        atmosphere=request.atmosphere or "",
+        video_generation_mode=request.video_generation_mode or "first_last_frame",  # 默认首尾帧模式
+        first_frame_mode=request.first_frame_mode or "generate",  # 默认生成模式
     )
     
     # 更新分片
@@ -89,10 +91,10 @@ async def add_segment(
         index=-1,  # 将由 add_segment 方法自动设置
         content=request.content,
         duration=request.duration,
-        action=request.action,
-        camera_movement=request.camera_movement,
-        composition=request.composition,
-        atmosphere=request.atmosphere,
+        action=request.action or "",  # 如果为 None，使用空字符串
+        camera_movement=request.camera_movement or "",
+        composition=request.composition or "",
+        atmosphere=request.atmosphere or "",
     )
     
     result = workflow.add_segment(session_id, new_segment.model_dump(), request.insert_after)

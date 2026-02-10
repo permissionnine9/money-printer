@@ -35,6 +35,7 @@ async def step_1_submit_script(
     logger.info(f"[API] 脚本长度: {len(request.script)} 字符")
     logger.info(f"[API] 视频参数 - resolution: {request.resolution}, aspect_ratio: {request.aspect_ratio}")
     logger.info(f"[API] 视频参数 - language: {request.language}, style: {request.style}, camera_view: {request.camera_view}")
+    logger.info(f"[API] 分片时长: {request.max_segment_duration}秒")
 
     # 检查会话是否存在
     session_info = session_manager.get_session(session_id)
@@ -52,6 +53,7 @@ async def step_1_submit_script(
         "language": request.language,
         "style": request.style,
         "perspective": request.camera_view,  # 映射 camera_view -> perspective
+        "max_segment_duration": request.max_segment_duration,
     }
 
     # 执行步骤1
@@ -1101,7 +1103,15 @@ async def step_6_regenerate_single_video(
 
             from backend.core.models import SegmentFrame, ScriptSegment, VideoParams
 
-            segment_frames = [SegmentFrame(**frame) for frame in frames_result['result_data']['segment_frames']]
+            # 处理 segment_frames 数据，将 None 值转换为 ""
+            raw_frames = frames_result['result_data']['segment_frames']
+            cleaned_frames = []
+            for frame in raw_frames:
+                cleaned_frame = {}
+                for key, value in frame.items():
+                    cleaned_frame[key] = "" if value is None else value
+                cleaned_frames.append(cleaned_frame)
+            segment_frames = [SegmentFrame(**frame) for frame in cleaned_frames]
             segment_scripts = [ScriptSegment(**seg) for seg in segments_result['result_data']['segment_scripts']]
             params = script_result['result_data']['video_params']
             video_params = VideoParams(**params)

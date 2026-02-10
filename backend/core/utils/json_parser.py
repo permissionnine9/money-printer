@@ -50,4 +50,10 @@ def parse_json_response(response_text: str, default: Any = None) -> dict:
     # 解析失败
     if default is not None:
         return default
-    raise ValueError(f"无法解析JSON响应: {text}...")
+    # 增强错误信息，显示更多上下文
+    error_msg = f"无法解析JSON响应。原始文本长度: {len(text)}"
+    if len(text) > 200:
+        error_msg += f"，前200字符: {text[:200]}"
+    else:
+        error_msg += f"，完整文本: {text}"
+    raise ValueError(error_msg)

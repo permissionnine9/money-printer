@@ -22,6 +22,10 @@ export const Step2Optimize: React.FC<Step2OptimizeProps> = ({ session }) => {
   const [isReoptimize, setIsReoptimize] = useState(false)
   const { refreshSession } = useSessionStore()
 
+  // 获取步骤1的结果以显示分片时长
+  const step1Result = session.step_results?.submit_script_and_params?.result_data
+  const maxSegmentDuration = step1Result?.video_params?.max_segment_duration || 8
+
   // 检查前置步骤是否完成
   const canExecute = session.completed_steps?.includes('submit_script_and_params')
   const isCompleted = session.completed_steps?.includes('optimize_script')
@@ -217,7 +221,7 @@ export const Step2Optimize: React.FC<Step2OptimizeProps> = ({ session }) => {
     <>
       <Card title="优化脚本" style={{ marginTop: 16 }}>
         <div style={{ marginBottom: 16 }}>
-          <Text>LLM 将优化您的脚本，丰富细节，设计8秒以内的转场分片。</Text>
+          <Text>LLM 将优化您的脚本，丰富细节，设计{maxSegmentDuration}秒以内的转场分片。</Text>
         </div>
         <Spin spinning={loading}>
           <Button

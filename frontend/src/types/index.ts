@@ -30,6 +30,7 @@ export interface VideoParams {
   language: string
   style: string
   perspective: string  // 与后端 VideoParams 保持一致
+  max_segment_duration?: number  // 新增：最大分片时长（秒）
 }
 
 export interface ScriptSegment {
@@ -44,6 +45,7 @@ export interface ScriptSegment {
   focus?: string
   first_frame_mode?: string  // 'generate' 或 'reuse_prev'
   last_frame_mode?: string   // 'generate' 或 'reuse_next'
+  video_generation_mode?: string  // 'first_last_frame' 或 'first_frame_reference'
 }
 
 export interface MaterialImage {

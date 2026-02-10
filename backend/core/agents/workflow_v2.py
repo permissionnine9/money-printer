@@ -738,7 +738,12 @@ class VideoCreationWorkflowV2:
 
     # ==================== 步骤 6: 生成视频 ====================
     async def step_generate_videos(self, session_id: str, extra_prompt: str = "") -> dict:
-        """步骤6：生成视频
+        """步骤6：生成视频（支持视频快照依赖链路）
+
+        支持两种生成模式：
+        1. 普通模式：直接生成视频
+        2. 视频快照模式：对于 first_frame_mode='use_video_snapshot' 的分片，
+           需要等待前一个分片的视频生成完成，然后截取最后一帧作为当前分片的首帧
 
         Args:
             session_id: 会话ID
@@ -761,7 +766,16 @@ class VideoCreationWorkflowV2:
         segments_result = self.session_manager.get_step_result(session_id, "generate_segment_scripts")
         script_result = self.session_manager.get_step_result(session_id, "optimize_script")
 
-        segment_frames = [SegmentFrame(**frame) for frame in frames_result['result_data']['segment_frames']]
+        # 处理 segment_frames 数据，将 None 值转换为 ""
+        raw_frames = frames_result['result_data']['segment_frames']
+        cleaned_frames = []
+        for frame in raw_frames:
+            cleaned_frame = {}
+            for key, value in frame.items():
+                # 将 None 转换为 ""，保持其他值不变
+                cleaned_frame[key] = "" if value is None else value
+            cleaned_frames.append(cleaned_frame)
+        segment_frames = [SegmentFrame(**frame) for frame in cleaned_frames]
         segment_scripts = [ScriptSegment(**seg) for seg in segments_result['result_data']['segment_scripts']]
         params = script_result['result_data']['video_params']
 
@@ -770,7 +784,6 @@ class VideoCreationWorkflowV2:
             total_segments = len(segment_scripts)
 
             # 初始化完整的视频列表（包含所有分片，初始状态为 pending）
-            # 这样在更新进度时可以保留所有视频的状态
             from backend.core.models import GeneratedVideo
             all_videos = []
             for segment in segment_scripts:
@@ -783,6 +796,16 @@ class VideoCreationWorkflowV2:
                     task_status="pending"
                 ))
 
+            # 识别使用视频快照模式的分片
+            snapshot_segments = set()
+            for seg in segment_scripts:
+                if seg.first_frame_mode == 'use_video_snapshot':
+                    snapshot_segments.add(seg.index)
+
+            if snapshot_segments:
+                logger.info(f"[步骤6] 发现 {len(snapshot_segments)} 个使用视频快照模式的分片: {sorted(snapshot_segments)}")
+
+            # 按顺序处理每个分片
             for i, segment in enumerate(segment_scripts):
                 # 检查是否被取消
                 if self.session_manager.is_step_cancelled(session_id, "generate_videos"):
@@ -821,28 +844,97 @@ class VideoCreationWorkflowV2:
                     None
                 )
 
+                # 检查是否是视频快照模式
+                is_snapshot_mode = segment.first_frame_mode == 'use_video_snapshot'
+
+                if is_snapshot_mode:
+                    # 视频快照模式：需要从前一个分片的视频中截取最后一帧
+                    if i == 0:
+                        logger.error(f"[步骤6] 分片 {segment.index} 是第一个分片，无法使用视频快照模式")
+                        all_videos[i].task_status = "failed"
+                        all_videos[i].video_path = "生成失败: 第一个分片无法使用视频快照"
+                        continue
+
+                    # 获取前一个分片的视频
+                    prev_video = all_videos[i - 1]
+                    if prev_video.task_status != "completed" or not prev_video.video_path:
+                        logger.error(f"[步骤6] 分片 {segment.index} 的前一个分片视频未生成成功")
+                        all_videos[i].task_status = "failed"
+                        all_videos[i].video_path = "生成失败: 前一个分片视频未生成成功"
+                        continue
+
+                    # 截取前一个视频的最后一帧
+                    from backend.core.utils.video_utils import extract_last_frame
+                    snapshot_path = extract_last_frame(prev_video.video_path)
+
+                    if not snapshot_path:
+                        logger.error(f"[步骤6] 无法从分片 {i-1} 的视频截取快照")
+                        all_videos[i].task_status = "failed"
+                        all_videos[i].video_path = "生成失败: 无法截取视频快照"
+                        continue
+
+                    logger.info(f"[步骤6] 已从分片 {i-1} 的视频截取快照: {snapshot_path}")
+
+                    # 更新当前分片的首帧为截取的快照
+                    frame.first_image_path = snapshot_path
+                    frame.first_status = "completed"
+
+                    # 更新数据库中的首尾帧数据
+                    self._update_frame_with_snapshot(session_id, segment.index, snapshot_path)
+
+                # 检查首帧是否存在（对于非快照模式，或者快照截取失败的情况）
                 if not frame or not frame.first_image_path:
                     # 标记为失败并继续处理下一个
                     all_videos[i].task_status = "failed"
-                    all_videos[i].video_path = f"生成失败: 分片 {segment.index} 缺少首尾帧"
-                    logger.error(f"[步骤6] 分片 {segment.index} 缺少首尾帧，跳过")
+                    all_videos[i].video_path = f"生成失败: 分片 {segment.index} 缺少首帧"
+                    logger.error(f"[步骤6] 分片 {segment.index} 缺少首帧，跳过")
                     continue
 
                 # 获取前后分片（用于上下文连贯）
                 prev_segment = segment_scripts[i - 1] if i > 0 else None
                 next_segment = segment_scripts[i + 1] if i < len(segment_scripts) - 1 else None
 
-                # 生成视频，传递前后分片作为上下文
-                video = await self.video_service.generate_video_from_frames(
-                    segment,
-                    frame.first_image_path,
-                    frame.last_image_path,
-                    video_params,
-                    total_segments=total_segments,
-                    extra_prompt=extra_prompt,
-                    prev_segment=prev_segment,
-                    next_segment=next_segment,
-                )
+                # 根据视频生成模式选择不同的生成方法
+                video_generation_mode = getattr(segment, 'video_generation_mode', 'first_last_frame')
+
+                if video_generation_mode == 'first_frame_reference':
+                    # 首帧+参考图模式：使用豆包seedance-pro，首帧+素材参考图+提示词
+                    logger.info(f"[步骤6] 分片 {segment.index} 使用首帧+参考图模式生成视频")
+
+                    # 获取素材图作为参考
+                    material_result = self.session_manager.get_step_result(session_id, "generate_material_images")
+                    reference_images = []
+                    if material_result and 'result_data' in material_result:
+                        raw_material_images = material_result['result_data'].get('material_images', [])
+                        reference_images = [
+                            img['image_path'] for img in raw_material_images
+                            if img.get('image_path') and img.get('task_status') == 'completed'
+                        ]
+
+                    # 使用首帧+参考图模式生成视频
+                    video = await self.video_service.generate_video_from_first_frame(
+                        segment,
+                        frame.first_image_path,
+                        video_params,
+                        reference_images=reference_images if reference_images else None,
+                        total_segments=total_segments,
+                        extra_prompt=extra_prompt,
+                        prev_segment=prev_segment,
+                        next_segment=next_segment,
+                    )
+                else:
+                    # 默认：首尾帧模式
+                    logger.info(f"[步骤6] 分片 {segment.index} 使用首尾帧模式生成视频")
+                    video = await self.video_service.generate_video_from_frames(
+                        segment,
+                        frame.first_image_path,
+                        frame.last_image_path,
+                        video_params,
+                        total_segments=total_segments,
+                        extra_prompt=extra_prompt,
+                        prev_segment=prev_segment,
+                        next_segment=next_segment,
+                    )
 
                 # 确保设置 task_status
                 if not hasattr(video, 'task_status') or not video.task_status:
@@ -913,6 +1005,40 @@ class VideoCreationWorkflowV2:
         except Exception as e:
             logger.error(f"[步骤6] 失败: {str(e)}")
             return {"success": False, "error": f"视频生成失败: {str(e)}"}
+
+    def _update_frame_with_snapshot(self, session_id: str, segment_index: int, snapshot_path: str) -> bool:
+        """更新分片的首帧为视频快照
+
+        Args:
+            session_id: 会话ID
+            segment_index: 分片索引
+            snapshot_path: 快照图片路径
+
+        Returns:
+            是否成功
+        """
+        try:
+            frames_result = self.session_manager.get_step_result(session_id, "generate_segment_frames")
+            if not frames_result:
+                return False
+
+            segment_frames = frames_result['result_data'].get('segment_frames', [])
+            for frame in segment_frames:
+                if frame.get('segment_index') == segment_index:
+                    frame['first_image_path'] = snapshot_path
+                    frame['first_status'] = 'completed'
+                    frame['first_prompt'] = '从上一视频快照获取'
+                    import uuid
+                    frame['first_image_id'] = str(uuid.uuid4())
+                    break
+
+            frames_result['result_data']['segment_frames'] = segment_frames
+            self.session_manager.update_step_result(session_id, "generate_segment_frames", frames_result['result_data'])
+            logger.info(f"[视频快照] 已更新分片 {segment_index} 的首帧为视频快照")
+            return True
+        except Exception as e:
+            logger.error(f"[视频快照] 更新分片 {segment_index} 首帧失败: {e}")
+            return False
 
     # ==================== 分片脚本编辑方法 ====================
 
@@ -1805,6 +1931,72 @@ class VideoCreationWorkflowV2:
         except Exception as e:
             logger.error(f"批量重新生成分片失败: {e}")
             return {"success": False, "error": f"批量重新生成分片失败: {str(e)}"}
+
+    def set_use_video_snapshot(self, session_id: str, segment_index: int) -> dict:
+        """设置分片使用上一个分片视频的结尾快照作为首帧
+
+        这会将分片的 first_frame_mode 设置为 'use_video_snapshot'，
+        并更新首尾帧状态为 waiting，表示等待视频生成后自动获取快照。
+
+        Args:
+            session_id: 会话ID
+            segment_index: 分片索引（必须大于0，因为需要上一个分片）
+
+        Returns:
+            执行结果
+        """
+        logger.info(f"[视频快照模式] 设置分片 {segment_index} 使用上一视频快照 - 会话: {session_id[:8]}...")
+
+        if segment_index <= 0:
+            return {"success": False, "error": "第一个分片无法使用上一视频快照"}
+
+        try:
+            # 获取分片脚本数据
+            segments_result = self.session_manager.get_step_result(session_id, "generate_segment_scripts")
+            if not segments_result:
+                return {"success": False, "error": "缺少分片脚本数据"}
+
+            segment_scripts = segments_result['result_data'].get('segment_scripts', [])
+            if segment_index >= len(segment_scripts):
+                return {"success": False, "error": f"无效的分片索引: {segment_index}"}
+
+            # 更新分片的 first_frame_mode
+            segment_scripts[segment_index]['first_frame_mode'] = 'use_video_snapshot'
+
+            # 保存更新后的分片脚本
+            segments_result['result_data']['segment_scripts'] = segment_scripts
+            self.session_manager.update_step_result(session_id, "generate_segment_scripts", segments_result['result_data'])
+
+            # 更新首尾帧状态为 waiting（等待视频生成后自动填充）
+            frames_result = self.session_manager.get_step_result(session_id, "generate_segment_frames")
+            if frames_result:
+                segment_frames = frames_result['result_data'].get('segment_frames', [])
+                for frame in segment_frames:
+                    if frame.get('segment_index') == segment_index:
+                        frame['first_status'] = 'waiting'
+                        frame['first_image_path'] = ''
+                        frame['first_prompt'] = '将从上一视频快照获取'
+                        break
+
+                frames_result['result_data']['segment_frames'] = segment_frames
+                self.session_manager.update_step_result(session_id, "generate_segment_frames", frames_result['result_data'])
+
+            logger.info(f"[视频快照模式] 分片 {segment_index} 已设置为使用上一视频快照模式")
+
+            # 检查步骤5是否已完成（可能所有分片都已配置好必要的帧）
+            step_completed = self.session_manager.check_and_update_frames_step_status(session_id)
+            if step_completed:
+                logger.info(f"[视频快照模式] 所有首尾帧已配置完成，步骤5状态已更新为成功")
+
+            return {
+                "success": True,
+                "message": f"分片 {segment_index + 1} 已设置为使用上一视频快照模式，将在视频生成阶段自动获取",
+                "step_completed": step_completed
+            }
+
+        except Exception as e:
+            logger.error(f"设置视频快照模式失败: {e}")
+            return {"success": False, "error": f"设置失败: {str(e)}"}
 
     # ==================== 私有辅助方法 ====================
 

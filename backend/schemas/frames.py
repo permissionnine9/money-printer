@@ -30,3 +30,4 @@ class FrameResponse(BaseModel):
     success: bool
     message: str
     frame_path: Optional[str] = None
+    step_completed: Optional[bool] = Field(None, description="步骤5是否已完成（仅在相关操作中返回）")

@@ -9,8 +9,8 @@ export interface MaterialImage {
 
 export interface FrameData {
   segment_index: number
-  first_status?: string
-  last_status?: string
+  first_status?: 'pending' | 'completed' | 'failed' | 'waiting'
+  last_status?: 'pending' | 'completed' | 'failed' | 'waiting'
   first_image_path?: string
   last_image_path?: string
   first_prompt?: string
@@ -19,13 +19,14 @@ export interface FrameData {
 }
 
 export interface SegmentInfo {
-  content?: string
+  content: string
   action?: string
   camera_movement?: string
   composition?: string
   atmosphere?: string
-  duration?: number
+  duration: number
   first_frame_mode?: string
+  video_generation_mode?: string  // 'first_last_frame' 或 'first_frame_reference'
   [key: string]: unknown
 }
 
@@ -62,4 +63,17 @@ export interface AvailableFrame {
   frameType: 'first' | 'last'
   imagePath: string
   label: string
+}
+
+export interface ReuseDetail {
+  segmentIndex: number
+  frameType: string
+  sourceSegment: number
+}
+
+export interface ReuseInfo {
+  generateCount: number
+  reuseCount: number
+  reuseDetails: ReuseDetail[]
+  totalSegments: number
 }

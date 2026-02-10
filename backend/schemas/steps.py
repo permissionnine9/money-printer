@@ -13,6 +13,7 @@ class Step1Request(BaseModel):
     language: str = Field(default="zh-CN", description="语言")
     style: str = Field(default="cinematic", description="风格")
     camera_view: str = Field(default="third_person", description="视角")
+    max_segment_duration: int = Field(default=8, ge=5, le=30, description="最大分片时长（秒），范围5-30秒。注意：当前即梦和wan2.2模型仅支持5秒或10秒视频生成，更长时长需要接入其他模型")
 
 
 class Step2Request(BaseModel):

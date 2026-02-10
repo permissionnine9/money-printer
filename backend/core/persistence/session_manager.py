@@ -1,9 +1,12 @@
 """会话状态管理 - 持久化每个步骤的结果"""
 import json
+import logging
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class SessionManager:
@@ -267,9 +270,83 @@ class SessionManager:
         for i in range(step_index):
             prev_step = self.STEPS[i]
             if not self.is_step_completed(session_id, prev_step):
+                # 特殊处理：执行步骤6时，如果步骤5未完成，检查是否满足特殊模式的完成条件
+                if step_name == "generate_videos" and prev_step == "generate_segment_frames":
+                    if self._check_frames_completion_with_special_modes(session_id):
+                        # 自动更新步骤5状态为完成
+                        self.check_and_update_frames_step_status(session_id)
+                        continue
                 return False, f"前置步骤 {prev_step} 尚未完成"
 
         return True, "可以执行"
+
+    def _check_frames_completion_with_special_modes(self, session_id: str) -> bool:
+        """检查步骤5是否已完成（考虑特殊模式）
+
+        支持的特殊模式：
+        - 首帧+参考图模式 (first_frame_reference)：只需要首帧，不需要尾帧
+        - 视频快照模式 (use_video_snapshot)：首帧在视频生成阶段获取，只需要尾帧
+
+        Args:
+            session_id: 会话ID
+
+        Returns:
+            是否所有分片的首尾帧都已配置完成
+        """
+        step_result = self.get_step_result(session_id, "generate_segment_frames")
+        if not step_result:
+            return False
+
+        result_data = step_result['result_data']
+        segment_frames = result_data.get('segment_frames', [])
+
+        if not segment_frames:
+            return False
+
+        # 获取分片脚本数据
+        segments_result = self.get_step_result(session_id, "generate_segment_scripts")
+        segment_scripts = segments_result.get('result_data', {}).get('segment_scripts', []) if segments_result else []
+
+        # 构建分片索引到模式的映射
+        segment_modes = {}
+        for seg in segment_scripts:
+            idx = seg.get('index', -1)
+            if idx >= 0:
+                segment_modes[idx] = {
+                    'first_frame_mode': seg.get('first_frame_mode', 'generate'),
+                    'video_generation_mode': seg.get('video_generation_mode', 'first_last_frame')
+                }
+
+        # 检查所有帧是否都已配置完成
+        for frame in segment_frames:
+            segment_index = frame.get('segment_index', -1)
+            first_path = frame.get('first_image_path', '')
+            last_path = frame.get('last_image_path', '')
+
+            # 获取该分片的模式
+            modes = segment_modes.get(segment_index, {})
+            first_frame_mode = modes.get('first_frame_mode', 'generate')
+            video_generation_mode = modes.get('video_generation_mode', 'first_last_frame')
+
+            # 判断该分片是否完成
+            if video_generation_mode == 'first_frame_reference':
+                # 首帧+参考图模式：只需要首帧
+                # 但如果首帧模式是 use_video_snapshot，则首帧会在第6步获取，也认为配置完成
+                if first_frame_mode == 'use_video_snapshot':
+                    # 首帧将从视频快照获取，配置已完成
+                    continue
+                if not first_path:
+                    return False
+            elif first_frame_mode == 'use_video_snapshot':
+                # 视频快照模式：首帧在视频生成阶段获取，只需要尾帧
+                if not last_path:
+                    return False
+            else:
+                # 普通模式：需要首尾帧都完成
+                if not first_path or not last_path:
+                    return False
+
+        return True
 
     def update_session_status(self, session_id: str, status: str):
         """更新会话状态
@@ -359,6 +436,28 @@ class SessionManager:
         except Exception as e:
             import logging
             logging.getLogger(__name__).error(f"清空后续步骤失败: {e}")
+            return False
+
+    def clear_step_result(self, session_id: str, step_name: str) -> bool:
+        """清空指定步骤的结果
+
+        Args:
+            session_id: 会话ID
+            step_name: 步骤名称
+
+        Returns:
+            是否成功
+        """
+        try:
+            with sqlite3.connect(str(self.db_path)) as conn:
+                conn.execute(
+                    "DELETE FROM step_results WHERE session_id = ? AND step_name = ?",
+                    (session_id, step_name)
+                )
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"清空步骤 {step_name} 失败: {e}")
             return False
 
     def reset_current_step(self, session_id: str, step_name: str) -> bool:
@@ -672,6 +771,8 @@ class SessionManager:
     def add_segment(self, session_id: str, segment_data: dict, insert_after: int = -1) -> bool:
         """新增分片脚本
 
+        修复：插入分片时不清空已有的首尾帧数据，而是智能调整帧数据索引
+
         Args:
             session_id: 会话ID
             segment_data: 分片数据字典
@@ -721,10 +822,78 @@ class SessionManager:
             )
             conn.commit()
 
-        # 清空后续步骤（步骤5和步骤6）
-        self.clear_steps_after(session_id, "generate_segment_scripts")
+        # 修复：不清空步骤5和步骤6，而是智能调整帧数据
+        self._adjust_frames_after_insert(session_id, insert_pos)
 
         return True
+
+    def _adjust_frames_after_insert(self, session_id: str, insert_pos: int) -> bool:
+        """插入分片后调整帧数据
+
+        保留已有的首尾帧数据，为新分片创建空的帧数据，调整后续分片的索引
+
+        Args:
+            session_id: 会话ID
+            insert_pos: 新分片插入的位置
+
+        Returns:
+            是否成功
+        """
+        try:
+            # 获取现有的帧数据
+            frames_result = self.get_step_result(session_id, "generate_segment_frames")
+            if not frames_result:
+                # 没有帧数据，无需调整
+                return True
+
+            result_data = frames_result['result_data']
+            segment_frames = result_data.get('segment_frames', [])
+
+            if not segment_frames:
+                return True
+
+            # 为新分片创建空的帧数据
+            new_frame = {
+                "segment_index": insert_pos,
+                "first_image_id": "",
+                "first_image_path": "",
+                "last_image_id": "",
+                "last_image_path": "",
+                "first_prompt": "",
+                "last_prompt": "",
+                "first_status": "waiting",
+                "last_status": "waiting"
+            }
+
+            # 插入新的空帧数据
+            segment_frames.insert(insert_pos, new_frame)
+
+            # 调整后续帧的 segment_index
+            for i, frame in enumerate(segment_frames):
+                frame['segment_index'] = i
+
+            # 更新数据库
+            result_data['segment_frames'] = segment_frames
+            now = datetime.now().isoformat()
+            result_json = json.dumps(result_data, ensure_ascii=False)
+
+            with sqlite3.connect(str(self.db_path)) as conn:
+                conn.execute("""
+                    UPDATE step_results
+                    SET result_data = ?, completed_at = ?
+                    WHERE session_id = ? AND step_name = ?
+                """, (result_json, now, session_id, "generate_segment_frames"))
+                conn.commit()
+
+            # 清空步骤6（视频数据），因为分片结构变化了
+            self.clear_step_result(session_id, "generate_videos")
+
+            logger.info(f"[插入分片] 已调整帧数据，新分片位置: {insert_pos}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[插入分片] 调整帧数据失败: {e}")
+            return False
 
     def update_material_image(self, session_id: str, image_index: int, update_data: dict) -> bool:
         """更新单个素材图信息
@@ -1002,6 +1171,10 @@ class SessionManager:
         """检查所有首尾帧是否都已生成完成，如果是则更新步骤状态为成功
 
         在单独重新生成帧后调用此方法，检查是否所有帧都已成功生成。
+        支持特殊模式：
+        - 首帧+参考图模式 (first_frame_reference)：只需要首帧，不需要尾帧
+        - 视频快照模式 (use_video_snapshot)：首帧在视频生成阶段获取，只需要尾帧
+
         如果所有帧都成功，则更新步骤的 _success 状态为 True，并将 current_step 前进到下一步。
 
         Args:
@@ -1020,13 +1193,52 @@ class SessionManager:
         if not segment_frames:
             return False
 
-        # 检查所有帧是否都有有效的路径
+        # 获取分片脚本数据，用于判断每个分片的模式
+        segments_result = self.get_step_result(session_id, "generate_segment_scripts")
+        segment_scripts = segments_result.get('result_data', {}).get('segment_scripts', []) if segments_result else []
+
+        # 构建分片索引到模式的映射
+        segment_modes = {}
+        for seg in segment_scripts:
+            idx = seg.get('index', -1)
+            if idx >= 0:
+                segment_modes[idx] = {
+                    'first_frame_mode': seg.get('first_frame_mode', 'generate'),
+                    'video_generation_mode': seg.get('video_generation_mode', 'first_last_frame')
+                }
+
+        # 检查所有帧是否都已生成完成（考虑特殊模式）
         all_complete = True
         error_count = 0
         for frame in segment_frames:
+            segment_index = frame.get('segment_index', -1)
             first_path = frame.get('first_image_path', '')
             last_path = frame.get('last_image_path', '')
-            if not first_path or not last_path:
+
+            # 获取该分片的模式
+            modes = segment_modes.get(segment_index, {})
+            first_frame_mode = modes.get('first_frame_mode', 'generate')
+            video_generation_mode = modes.get('video_generation_mode', 'first_last_frame')
+
+            # 判断该分片是否完成
+            segment_complete = False
+
+            if video_generation_mode == 'first_frame_reference':
+                # 首帧+参考图模式：只需要首帧
+                # 但如果首帧模式是 use_video_snapshot，则首帧会在第6步获取，也认为配置完成
+                if first_frame_mode == 'use_video_snapshot':
+                    # 首帧将从视频快照获取，配置已完成
+                    segment_complete = True
+                else:
+                    segment_complete = bool(first_path)
+            elif first_frame_mode == 'use_video_snapshot':
+                # 视频快照模式：首帧在视频生成阶段获取，只需要尾帧
+                segment_complete = bool(last_path)
+            else:
+                # 普通模式（首尾帧模式）：需要首尾帧都完成
+                segment_complete = bool(first_path) and bool(last_path)
+
+            if not segment_complete:
                 all_complete = False
                 error_count += 1
 
