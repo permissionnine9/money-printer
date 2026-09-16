@@ -33,7 +33,7 @@ uv run python app.py
 - **脚本优化**：使用 Gemini 2.0 Flash 自动优化视频脚本，丰富细节，设计分片
 - **素材图片生成**：使用 Nano Banana Pro 生成包含所有视觉要素的素材图
 - **分镜头帧生成**：为每个分片生成首尾帧图片
-- **视频生成**：使用 Veo 3.1 基于首尾帧生成视频片段
+- **视频生成**：支持多种视频模型（即梦、wan2.2、豆包-seedance）基于首尾帧生成视频片段
 - **人机交互**：每个步骤都支持人工审核确认
 
 ## 技术栈
@@ -41,7 +41,7 @@ uv run python app.py
 - **Agent框架**: LangGraph
 - **LLM**: Google Gemini 2.0 Flash (`gemini-2.5-flash`)
 - **图片生成**: Nano Banana Pro (`gemini-3-pro-image-preview`)
-- **视频生成**: Veo 3.1 (`veo-3.1-generate-preview`)
+- **视频生成**: 支持多种模型（即梦、wan2.2、豆包-seedance）
 - **前端界面**: Gradio
 - **包管理**: UV
 

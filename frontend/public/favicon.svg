@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#8b5cf6;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="grad2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f472b6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#c084fc;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+
+  <!-- 背景圆角矩形 -->
+  <rect x="4" y="4" width="56" height="56" rx="12" fill="url(#grad1)"/>
+
+  <!-- 电影胶片装饰 - 左侧 -->
+  <rect x="8" y="10" width="6" height="4" rx="1" fill="rgba(255,255,255,0.3)"/>
+  <rect x="8" y="18" width="6" height="4" rx="1" fill="rgba(255,255,255,0.3)"/>
+  <rect x="8" y="42" width="6" height="4" rx="1" fill="rgba(255,255,255,0.3)"/>
+  <rect x="8" y="50" width="6" height="4" rx="1" fill="rgba(255,255,255,0.3)"/>
+
+  <!-- 电影胶片装饰 - 右侧 -->
+  <rect x="50" y="10" width="6" height="4" rx="1" fill="rgba(255,255,255,0.3)"/>
+  <rect x="50" y="18" width="6" height="4" rx="1" fill="rgba(255,255,255,0.3)"/>
+  <rect x="50" y="42" width="6" height="4" rx="1" fill="rgba(255,255,255,0.3)"/>
+  <rect x="50" y="50" width="6" height="4" rx="1" fill="rgba(255,255,255,0.3)"/>
+
+  <!-- 播放按钮 -->
+  <polygon points="26,20 26,44 46,32" fill="white"/>
+
+  <!-- AI 星光装饰 -->
+  <circle cx="48" cy="14" r="2" fill="url(#grad2)"/>
+  <circle cx="52" cy="20" r="1.5" fill="#fbbf24"/>
+  <circle cx="16" cy="48" r="1.5" fill="#fbbf24"/>
+
+  <!-- 闪光效果 -->
+  <path d="M50 12 L51 14 L53 14 L51.5 15.5 L52 18 L50 16.5 L48 18 L48.5 15.5 L47 14 L49 14 Z" fill="white" opacity="0.9"/>
+</svg>

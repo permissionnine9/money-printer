@@ -1,6 +1,8 @@
 # AI视频创作智能体 - 项目指南
 
 本文件为AI编程助手提供项目背景、架构说明和开发指南。
+/src 是重构前的前后端耦合的代码
+/backend和/frontend是重构后的代码
 
 ## 项目概述
 
@@ -16,12 +18,12 @@
 |------|------|
 | **Agent框架** | LangGraph |
 | **LLM** | 豆包 Seed 1.8 (`bytedance/doubao-seed-1.8`) |
-| **图片生成(文生图)** | GPT Image 1.5 (`openai/gpt-image-1.5`) |
-| **图片生成(图生图)** | Gemini 2.5 Flash Image (`google/gemini-2.5-flash-image`) |
-| **素材图生成** | Gemini 3 Pro Image Preview (`google/gemini-3-pro-image-preview`) |
+| **图片生成(所有)** | Gemini 3 Pro Image (`google/gemini-3-pro-image-preview`) - 统一使用，支持文生图和图生图 |
 | **视频生成** | 即梦首尾帧 (`bytedance/jimeng_i2v_first_tail_v30`) 或 阿里wan2.2 (`ali/wan2.2-kf2v-flash`) |
-| **前端界面** | Gradio 5.x |
+| **前端界面** | Gradio 5.x / React 18 + TypeScript + Vite + Ant Design |
+| **后端API** | FastAPI |
 | **数据库** | SQLite（会话持久化） |
+| **对象存储** | 阿里云 OSS（可选，用于视频服务） |
 | **包管理** | UV |
 | **Python版本** | >= 3.11 |
 
@@ -35,7 +37,7 @@ money-print/
 ├── .env.example                # 环境变量模板
 ├── .env                        # 实际环境变量（需手动创建）
 │
-├── src/                        # 源代码目录
+├── src/                        # 重构前的源代码目录（前后端耦合在一起）
 │   ├── config.py               # 全局配置（API密钥、模型参数、选项等）
 │   │
 │   ├── models/                 # 数据模型（Pydantic）
@@ -45,7 +47,8 @@ money-print/
 │   │   ├── llm_service.py      # LLM服务（脚本优化、分片切割）
 │   │   ├── image_service.py    # 图片生成服务（文生图、图生图）
 │   │   ├── video_service.py    # 视频生成服务（即梦）
-│   │   └── video_service_wan22.py  # 视频生成服务（wan2.2）
+│   │   ├── video_service_wan22.py  # 视频生成服务（wan2.2）
+│   │   └── oss_service.py      # 阿里云OSS服务
 │   │
 │   ├── agents/                 # Agent模块
 │   │   └── workflow_v2.py      # 视频创作工作流V2（6步流程）
@@ -56,6 +59,29 @@ money-print/
 │   └── utils/                  # 工具模块
 │       └── json_parser.py      # JSON解析工具
 │
+├── backend/                    # FastAPI后端API（前后端分离架构）
+│   ├── main.py                 # FastAPI应用入口
+│   ├── deps.py                 # 依赖注入
+│   ├── api/v1/                 # API路由
+│   │   ├── sessions.py         # 会话管理API
+│   │   ├── steps.py            # 工作流步骤API
+│   │   ├── segments.py         # 分片编辑API
+│   │   ├── frames.py           # 首尾帧管理API
+│   │   ├── materials.py        # 素材图管理API
+│   │   └── uploads.py          # 文件上传API
+│   └── schemas/                # Pydantic请求/响应模型
+│
+├── frontend/                   # React前端（Vite + TypeScript + Ant Design）
+│   ├── src/
+│   │   ├── api/                # API客户端（Axios封装）
+│   │   ├── stores/             # Zustand状态管理
+│   │   ├── hooks/              # 自定义Hooks
+│   │   ├── components/         # UI组件
+│   │   ├── types/              # TypeScript类型定义
+│   │   └── App.tsx             # 主应用
+│   ├── package.json            # npm依赖
+│   └── vite.config.ts          # Vite配置
+│
 ├── static/                     # 静态文件存储
 │   ├── images/                 # 生成的图片
 │   └── videos/                 # 生成的视频
@@ -65,9 +91,15 @@ money-print/
 │
 ├── templates/                  # HTML模板（预留）
 │
+├── build/                      # 构建输出目录
+│
+├── start_backend.sh            # 后端启动脚本
+├── start_frontend.sh           # 前端启动脚本
+│
 └── 文档文件
     ├── readme.md               # 项目README
     ├── CLAUDE.md               # Claude Code指南
+    ├── FASTAPI_README.md       # FastAPI后端文档
     ├── prd.md                  # 产品需求文档
     ├── UPGRADE.md              # 架构升级说明
     ├── api-shengsuanyun.md     # 盛算云API文档
@@ -104,11 +136,25 @@ cp .env.example .env
 
 ### 启动应用
 
+**方式一：使用Gradio版本（单文件运行）**
 ```bash
-# 使用V2版本（强烈推荐）
 uv run python app_v2_improved.py
-
 # 应用将在 http://localhost:7860 启动
+```
+
+**方式二：使用前后端分离架构**
+```bash
+# 启动后端（FastAPI）
+./start_backend.sh
+# 或: uv run uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+
+# 启动前端（React）
+./start_frontend.sh
+# 或: cd frontend && npm run dev
+
+# 前端: http://localhost:5173
+# 后端API: http://localhost:8000
+# API文档: http://localhost:8000/docs
 ```
 
 ## 环境变量配置
@@ -158,9 +204,10 @@ OSS_BUCKET=your_bucket_name
 | 服务 | 职责 | 关键模型 |
 |------|------|----------|
 | LLMService | 脚本优化、分片切割、提示词生成 | `bytedance/doubao-seed-1.8` |
-| ImageService | 素材图生成（文生图/图生图） | `openai/gpt-image-1.5`, `google/gemini-2.5-flash-image` |
+| ImageService | 素材图生成（文生图/图生图） | `google/gemini-3-pro-image-preview` |
 | VideoService | 视频生成（即梦首尾帧） | `bytedance/jimeng_i2v_first_tail_v30` |
 | VideoServiceWan22 | 视频生成（wan2.2首尾帧） | `ali/wan2.2-kf2v-flash` |
+| OSSService | 阿里云OSS文件上传 | - |
 
 ### 4. 数据模型 (`src/models/video_models.py`)
 
@@ -171,6 +218,16 @@ OSS_BUCKET=your_bucket_name
 - `MaterialImage`: 素材图（图片路径、任务ID、状态）
 - `SegmentFrame`: 首尾帧（首帧/尾帧路径、提示词）
 - `GeneratedVideo`: 生成的视频（视频路径、任务ID、状态）
+
+### 5. FastAPI后端 (`backend/`)
+
+RESTful API设计，支持前后端分离：
+
+- **会话管理**: `POST /api/v1/sessions`, `GET /api/v1/sessions/{id}`
+- **工作流步骤**: `POST /api/v1/steps/{session_id}/optimize` 等
+- **分片编辑**: `PUT /api/v1/segments/{session_id}/{index}`
+- **首尾帧管理**: `POST /api/v1/frames/{session_id}/{index}/regenerate`
+- **文件上传**: `POST /api/v1/uploads/image`
 
 ## API配置说明
 
@@ -188,9 +245,7 @@ VIDEO_SERVICE_TYPE = "jimeng"  # 或 "wan22"
 # 模型配置
 SHENGSUANYUN_VIDEO_MODEL = "bytedance/jimeng_i2v_first_tail_v30"
 SHENGSUANYUN_VIDEO_MODEL_WAN22 = "ali/wan2.2-kf2v-flash"
-SHENGSUANYUN_IMAGE_MODEL = "openai/gpt-image-1.5"
-SHENGSUANYUN_IMAGE2IMAGE_MODEL = "google/gemini-2.5-flash-image"
-SHENGSUANYUN_MATERIAL_IMAGE_MODEL = "google/gemini-3-pro-image-preview"
+SHENGSUANYUN_IMAGE_MODEL = "google/gemini-3-pro-image-preview"
 ```
 
 ## 开发规范
@@ -231,6 +286,15 @@ except Exception as e:
     return {"success": False, "error": str(e)}
 ```
 
+## 测试
+
+项目目前没有自动化测试套件。建议的测试方式：
+
+1. **功能测试**: 通过Gradio界面逐步验证每个功能
+2. **API测试**: 使用 `api-*.md` 文档中的curl命令测试各API
+3. **会话恢复测试**: 在中断后重新启动应用，验证能否恢复会话
+4. **完整工作流测试**: `uv run python test_workflow_complete.py`
+
 ## 文件存储约定
 
 | 类型 | 存储路径 |
@@ -254,14 +318,15 @@ except Exception as e:
 
 ### 素材图生成模式
 
-1. **文生图模式**: 不提供参考图，使用 `gpt-image-1.5` 生成
+1. **文生图模式**: 不提供参考图，使用 `gemini-3-pro-image-preview` 生成
 2. **图生图模式**: 提供参考图，使用 `gemini-3-pro-image-preview` 基于参考图生成
 
 ### 首尾帧生成
 
 - 基于素材图作为参考（图生图）
-- 使用 `gemini-2.5-flash-image` 模型
+- 使用 `gemini-3-pro-image-preview` 模型
 - 确保角色/物品一致性
+- 支持首尾帧复用模式（`reuse_prev` / `reuse_next`）
 
 ## 架构特点
 
@@ -277,13 +342,18 @@ except Exception as e:
 | 灵活性 | 低（强耦合） | 高（完全解耦） |
 | 人机交互 | 连续模式 | 每步确认后持久化 |
 
-## 测试
+### 前后端分离架构
 
-项目目前没有自动化测试套件。建议的测试方式：
-
-1. **功能测试**: 通过Gradio界面逐步验证每个功能
-2. **API测试**: 使用 `api-*.md` 文档中的curl命令测试各API
-3. **会话恢复测试**: 在中断后重新启动应用，验证能否恢复会话
+```
+┌─────────────┐         HTTP/REST         ┌─────────────┐
+│   React     │ ◄────────────────────────► │   FastAPI   │
+│   前端      │     JSON 数据交换           │   后端      │
+│  (5173)     │                            │   (8000)    │
+└─────────────┘                            └─────────────┘
+      │                                           │
+   Zustand                                   SQLite DB
+   状态管理                                   会话持久化
+```
 
 ## 注意事项
 
@@ -303,6 +373,13 @@ A: 会话数据存储在 `data/sessions.db` SQLite数据库中，可安全删除
 ### Q: 如何修改默认视频参数？
 A: 修改 `src/config.py` 中的 `DEFAULT_VIDEO_PARAMS` 字典。
 
+### Q: 如何添加新的API端点？
+A: 
+1. 在 `backend/schemas/` 中定义请求/响应模型
+2. 在 `backend/api/v1/` 中实现路由
+3. 在 `backend/main.py` 中注册路由
+4. 在 `frontend/src/api/client.ts` 中添加客户端方法
+
 ## 参考文档
 
 - [盛算云API文档](api-shengsuanyun.md)
@@ -310,3 +387,4 @@ A: 修改 `src/config.py` 中的 `DEFAULT_VIDEO_PARAMS` 字典。
 - [wan2.2 API文档](api-wan2.2.md)
 - [产品需求文档](prd.md)
 - [架构升级说明](UPGRADE.md)
+- [FastAPI后端文档](FASTAPI_README.md)

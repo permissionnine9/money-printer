@@ -1,0 +1,115 @@
+"""视频创作相关的数据模型"""
+from pydantic import BaseModel, Field
+
+
+class VideoParams(BaseModel):
+    """视频参数"""
+    resolution: str = Field(default="1080p", description="分辨率")
+    aspect_ratio: str = Field(default="16:9", description="宽高比")
+    language: str = Field(default="zh-CN", description="语言")
+    style: str = Field(default="cinematic", description="美学风格")
+    perspective: str = Field(default="third_person", description="视角")
+    max_segment_duration: int = Field(default=8, description="最大分片时长（秒），注意：当前即梦和wan2.2模型仅支持5秒或10秒视频生成", ge=5, le=30)
+
+    def to_prompt_context(self) -> str:
+        """转换为提示词上下文"""
+        return f"""视频参数:
+- 分辨率: {self.resolution}
+- 宽高比: {self.aspect_ratio}
+- 语言: {self.language}
+- 美学风格: {self.style}
+- 视角: {self.perspective}
+- 最大分片时长: {self.max_segment_duration}秒"""
+
+
+class ScriptSegment(BaseModel):
+    """分片脚本"""
+    index: int = Field(description="分片索引")
+    content: str = Field(description="分片内容")
+    duration: float = Field(default=8.0, description="时长（秒）")
+    action: str = Field(default="", description="动作描述")
+    camera_movement: str = Field(default="", description="相机运动")
+    composition: str = Field(default="", description="构图")
+    focus: str = Field(default="", description="对焦和镜头效果")
+    atmosphere: str = Field(default="", description="氛围")
+    transition: str = Field(default="", description="转场方式")
+    # 首尾帧生成模式
+    first_frame_mode: str = Field(
+        default="generate",
+        description="""首帧模式:
+        - 'generate': 全新生成，与前一分片无关联
+        - 'generate_continuous': 生成但需要与前一分片尾帧保持视觉连贯（会参考前一帧）
+        - 'reuse_prev': 100%复用前一分片的尾帧（同一张图）
+        - 'use_video_snapshot': 使用上一个分片视频的结尾快照作为首帧（需等待前一个视频生成完成）"""
+    )
+    last_frame_mode: str = Field(
+        default="generate",
+        description="""尾帧模式:
+        - 'generate': 全新生成
+        - 'generate_continuous': 生成但需要与后一分片首帧保持视觉连贯（后一帧会参考此帧）
+        - 'reuse_next': 此帧会被下一分片100%复用（标记用）"""
+    )
+    # 视频生成模式
+    video_generation_mode: str = Field(
+        default="first_last_frame",
+        description="""视频生成模式:
+        - 'first_last_frame': 首尾帧模式（使用首帧和尾帧控制视频生成）
+        - 'first_frame_reference': 首帧+参考图模式（使用豆包seedance-pro，首帧+素材参考图+提示词）"""
+    )
+
+    def to_image_prompt(self, style: str) -> str:
+        """转换为图片生成提示词"""
+        parts = [self.content]
+        if self.action:
+            parts.append(f"动作: {self.action}")
+        if self.composition:
+            parts.append(f"构图: {self.composition}")
+        if self.atmosphere:
+            parts.append(f"氛围: {self.atmosphere}")
+        parts.append(f"风格: {style}")
+        return ", ".join(parts)
+
+    def to_video_prompt(self) -> str:
+        """转换为视频生成提示词"""
+        parts = [self.content]
+        if self.action:
+            parts.append(f"动作: {self.action}")
+        if self.camera_movement:
+            parts.append(f"镜头运动: {self.camera_movement}")
+        if self.focus:
+            parts.append(f"镜头效果: {self.focus}")
+        return ", ".join(parts)
+
+
+class MaterialImage(BaseModel):
+    """素材图片（设定稿风格）"""
+    image_id: str = Field(description="图片ID")
+    image_path: str = Field(description="图片本地路径或URL")
+    prompt: str = Field(description="生成提示词")
+    description: str = Field(default="", description="图片描述")
+    image_type: str = Field(default="general", description="素材图类型: character/props/environment/general")
+    task_id: str = Field(default="", description="异步任务ID（如有）")
+    task_status: str = Field(default="completed", description="任务状态: pending/completed/failed")
+
+
+class SegmentFrame(BaseModel):
+    """分镜头首尾帧"""
+    segment_index: int = Field(description="分片索引")
+    first_image_id: str = Field(default="", description="首帧图片ID")
+    first_image_path: str = Field(default="", description="首帧图片路径")
+    last_image_id: str = Field(default="", description="尾帧图片ID")
+    last_image_path: str = Field(default="", description="尾帧图片路径")
+    first_prompt: str = Field(default="", description="首帧提示词")
+    last_prompt: str = Field(default="", description="尾帧提示词")
+    first_status: str = Field(default="pending", description="首帧状态: pending/completed/failed")
+    last_status: str = Field(default="pending", description="尾帧状态: pending/completed/failed")
+
+
+class GeneratedVideo(BaseModel):
+    """生成的视频"""
+    segment_index: int = Field(description="分片索引")
+    video_id: str = Field(default="", description="视频ID")
+    video_path: str = Field(default="", description="视频本地路径")
+    duration: float = Field(default=0.0, description="视频时长（秒）")
+    prompt: str = Field(default="", description="生成提示词")
+    task_status: str = Field(default="pending", description="任务状态: pending/completed/failed/cancelled")
