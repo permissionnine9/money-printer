@@ -19,14 +19,15 @@ class SessionManager:
     4. 支持从任意步骤继续执行
     """
 
-    # 定义所有步骤（按顺序，符合PRD的6步流程）
+    # 定义所有步骤（按顺序，7步流程）
     STEPS = [
         "submit_script_and_params",  # 1. 提交脚本和参数
         "optimize_script",           # 2. 优化脚本
-        "generate_material_images",  # 3. 生成素材图
-        "generate_segment_scripts",  # 4. 生成分片脚本
-        "generate_segment_frames",   # 5. 生成首尾帧
-        "generate_videos",           # 6. 生成视频
+        "generate_mindmap",          # 3. 生成思维导图
+        "generate_material_images",  # 4. 生成素材图
+        "generate_segment_scripts",  # 5. 生成分片脚本
+        "generate_segment_frames",   # 6. 生成首尾帧
+        "generate_videos",           # 7. 生成视频
     ]
 
     def __init__(self, db_path: str = "data/sessions.db"):
@@ -61,6 +62,18 @@ class SessionManager:
                     completed_at TEXT NOT NULL,
                     FOREIGN KEY (session_id) REFERENCES sessions(session_id),
                     UNIQUE(session_id, step_name)
+                )
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS session_assets (
+                    asset_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    asset_type TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    meta TEXT DEFAULT '{}',
+                    created_at TEXT NOT NULL
                 )
             """)
 
@@ -632,6 +645,11 @@ class SessionManager:
                     "DELETE FROM step_results WHERE session_id = ?",
                     (session_id,)
                 )
+                # 删除会话资产记录
+                conn.execute(
+                    "DELETE FROM session_assets WHERE session_id = ?",
+                    (session_id,)
+                )
                 # 再删除会话
                 conn.execute(
                     "DELETE FROM sessions WHERE session_id = ?",
@@ -643,6 +661,118 @@ class SessionManager:
             import logging
             logging.getLogger(__name__).error(f"删除会话失败: {e}")
             return False
+
+    # ==================== 会话资产管理（音频/图片素材） ====================
+
+    def add_asset(self, session_id: str, asset_type: str, name: str, file_path: str, meta: dict | None = None) -> dict:
+        """添加会话资产（音频/图片素材）
+
+        Args:
+            session_id: 会话ID
+            asset_type: 资产类型 ('audio' 或 'image')
+            name: 资产显示名称（通常是原始文件名）
+            file_path: 文件相对路径
+            meta: 附加信息（如文件大小、时长等）
+
+        Returns:
+            新资产记录
+        """
+        import uuid as _uuid
+        asset_id = str(_uuid.uuid4())
+        now = datetime.now().isoformat()
+
+        with sqlite3.connect(str(self.db_path)) as conn:
+            conn.execute(
+                "INSERT INTO session_assets (asset_id, session_id, asset_type, name, file_path, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (asset_id, session_id, asset_type, name, file_path, json.dumps(meta or {}, ensure_ascii=False), now)
+            )
+            conn.commit()
+
+        return {
+            "asset_id": asset_id,
+            "session_id": session_id,
+            "asset_type": asset_type,
+            "name": name,
+            "file_path": file_path,
+            "meta": meta or {},
+            "created_at": now,
+        }
+
+    def list_assets(self, session_id: str, asset_type: str | None = None) -> list[dict]:
+        """列出会话资产
+
+        Args:
+            session_id: 会话ID
+            asset_type: 可选类型过滤 ('audio' 或 'image')
+
+        Returns:
+            资产列表（按创建时间倒序）
+        """
+        with sqlite3.connect(str(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            if asset_type:
+                cursor = conn.execute(
+                    "SELECT * FROM session_assets WHERE session_id = ? AND asset_type = ? ORDER BY created_at DESC",
+                    (session_id, asset_type)
+                )
+            else:
+                cursor = conn.execute(
+                    "SELECT * FROM session_assets WHERE session_id = ? ORDER BY created_at DESC",
+                    (session_id,)
+                )
+            rows = cursor.fetchall()
+            results = []
+            for row in rows:
+                asset = dict(row)
+                try:
+                    asset['meta'] = json.loads(asset.get('meta') or '{}')
+                except (ValueError, TypeError):
+                    asset['meta'] = {}
+                results.append(asset)
+            return results
+
+    def get_asset(self, asset_id: str) -> Optional[dict]:
+        """获取单个资产
+
+        Args:
+            asset_id: 资产ID
+
+        Returns:
+            资产记录，不存在则返回 None
+        """
+        with sqlite3.connect(str(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                "SELECT * FROM session_assets WHERE asset_id = ?",
+                (asset_id,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            asset = dict(row)
+            try:
+                asset['meta'] = json.loads(asset.get('meta') or '{}')
+            except (ValueError, TypeError):
+                asset['meta'] = {}
+            return asset
+
+    def delete_asset(self, session_id: str, asset_id: str) -> bool:
+        """删除会话资产记录（不删除磁盘文件）
+
+        Args:
+            session_id: 会话ID
+            asset_id: 资产ID
+
+        Returns:
+            是否删除成功
+        """
+        with sqlite3.connect(str(self.db_path)) as conn:
+            cursor = conn.execute(
+                "DELETE FROM session_assets WHERE asset_id = ? AND session_id = ?",
+                (asset_id, session_id)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
     # ==================== 分片脚本编辑方法 ====================
 
@@ -894,6 +1024,26 @@ class SessionManager:
         except Exception as e:
             logger.error(f"[插入分片] 调整帧数据失败: {e}")
             return False
+
+    def update_mindmap(self, session_id: str, mindmap_markdown: str) -> bool:
+        """更新思维导图内容（人工修改，不推进 current_step）
+
+        Args:
+            session_id: 会话ID
+            mindmap_markdown: 新的思维导图 markdown 文本
+
+        Returns:
+            是否更新成功
+        """
+        step_result = self.get_step_result(session_id, "generate_mindmap")
+        if not step_result:
+            return False
+
+        result_data = step_result['result_data']
+        result_data['mindmap'] = mindmap_markdown
+        result_data['edited'] = True
+
+        return self.update_step_result(session_id, "generate_mindmap", result_data)
 
     def update_material_image(self, session_id: str, image_index: int, update_data: dict) -> bool:
         """更新单个素材图信息

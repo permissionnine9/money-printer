@@ -1,11 +1,11 @@
 /**
- * 步骤3：生成素材图
+ * 步骤4：生成素材图（基于思维导图）+ 素材管理台（音频管理 / 图片素材）
  */
-import React, { useState } from 'react'
-import { Card, Button, message, Spin, Typography, Image, Row, Col, Popconfirm, Tag, Modal, Space, Input, Upload, Tooltip } from 'antd'
-import { PictureOutlined, CheckCircleOutlined, ReloadOutlined, DeleteOutlined, LoadingOutlined, ClockCircleOutlined, CloseCircleOutlined, ExclamationCircleOutlined, EditOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons'
-import type { SessionDetail, MaterialImage } from '@/types'
-import { stepApi, materialApi, uploadApi } from '@/api/client'
+import React, { useEffect, useState } from 'react'
+import { Card, Button, message, Spin, Typography, Image, Row, Col, Popconfirm, Tag, Modal, Space, Input, Upload, Tooltip, Tabs, Select, Empty } from 'antd'
+import { PictureOutlined, CheckCircleOutlined, ReloadOutlined, DeleteOutlined, LoadingOutlined, ClockCircleOutlined, CloseCircleOutlined, ExclamationCircleOutlined, EditOutlined, PlusOutlined, UploadOutlined, SoundOutlined, AppstoreOutlined } from '@ant-design/icons'
+import type { SessionDetail, MaterialImage, SessionAsset, ImageModelConfig } from '@/types'
+import { stepApi, materialApi, uploadApi, assetApi, modelApi } from '@/api/client'
 import { useSessionStore } from '@/stores/sessionStore'
 import { usePolling } from '@/hooks/usePolling'
 
@@ -44,6 +44,7 @@ interface GenerateConfigModalState {
   isRegenerate: boolean  // 是否为重新生成
   extraPrompt: string
   referenceImages: string[]
+  modelConfigId: string | undefined  // 生图模型配置（可选）
   loading: boolean
 }
 
@@ -56,9 +57,153 @@ interface AddMaterialModalState {
   loading: boolean
 }
 
+// 素材管理台面板（音频管理 / 图片素材）
+const AssetManagerPanel: React.FC<{
+  session: SessionDetail
+  assetType: 'audio' | 'image'
+}> = ({ session, assetType }) => {
+  const [assets, setAssets] = useState<SessionAsset[]>([])
+  const [loading, setLoading] = useState(false)
+  const [uploading, setUploading] = useState(false)
+
+  const isAudio = assetType === 'audio'
+
+  const loadAssets = async () => {
+    setLoading(true)
+    try {
+      const result = await assetApi.list(session.session_id, assetType)
+      setAssets(result.assets || [])
+    } catch (error) {
+      message.error((error as Error).message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    loadAssets()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.session_id, assetType])
+
+  const handleUpload = async (file: File) => {
+    setUploading(true)
+    try {
+      const result = await assetApi.upload(session.session_id, assetType, file)
+      message.success(result.message || '上传成功')
+      await loadAssets()
+    } catch (error) {
+      message.error('上传失败：' + (error as Error).message)
+    } finally {
+      setUploading(false)
+    }
+    return false
+  }
+
+  const handleDelete = async (assetId: string) => {
+    try {
+      const result = await assetApi.remove(session.session_id, assetId)
+      if (result.success) {
+        message.success(result.message)
+        await loadAssets()
+      } else {
+        message.error(result.message)
+      }
+    } catch (error) {
+      message.error((error as Error).message)
+    }
+  }
+
+  return (
+    <div>
+      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <Typography.Text type="secondary">
+          {isAudio
+            ? '上传参考音频（旁白/配音/音效），生成视频时会作为参考音频素材提交给 ComfyUI'
+            : '上传补充图片素材（截图/参考图），可作为素材图生成的额外参考'}
+        </Typography.Text>
+        <Upload
+          accept={isAudio ? 'audio/*' : 'image/*'}
+          showUploadList={false}
+          beforeUpload={handleUpload}
+          multiple
+        >
+          <Button icon={<UploadOutlined />} loading={uploading}>
+            上传{isAudio ? '音频' : '图片'}
+          </Button>
+        </Upload>
+      </div>
+
+      <Spin spinning={loading}>
+        {assets.length === 0 ? (
+          <Empty
+            description={`暂无${isAudio ? '音频' : '图片'}素材`}
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+          />
+        ) : (
+          <Row gutter={[16, 16]}>
+            {assets.map((asset) => (
+              <Col xs={24} sm={12} md={8} key={asset.asset_id}>
+                <Card
+                  size="small"
+                  cover={
+                    isAudio ? (
+                      <div style={{ padding: 16, background: '#f0f5ff' }}>
+                        <audio
+                          src={`/${asset.file_path}`}
+                          controls
+                          style={{ width: '100%' }}
+                        />
+                      </div>
+                    ) : (
+                      <Image
+                        src={`/${asset.file_path}`}
+                        alt={asset.name}
+                        style={{ objectFit: 'cover', height: 180 }}
+                      />
+                    )
+                  }
+                  actions={[
+                    <Popconfirm
+                      key="delete"
+                      title="确定删除此素材？"
+                      onConfirm={() => handleDelete(asset.asset_id)}
+                      okText="确定"
+                      cancelText="取消"
+                    >
+                      <Button type="text" danger icon={<DeleteOutlined />} />
+                    </Popconfirm>,
+                  ]}
+                >
+                  <Card.Meta
+                    title={
+                      <Tooltip title={asset.name}>
+                        <span style={{ fontSize: 13 }}>
+                          {isAudio ? <SoundOutlined style={{ marginRight: 6 }} /> : <AppstoreOutlined style={{ marginRight: 6 }} />}
+                          {asset.name}
+                        </span>
+                      </Tooltip>
+                    }
+                    description={
+                      <span>
+                        {asset.meta?.size_kb ? `${asset.meta.size_kb} KB` : ''}
+                        {asset.created_at ? ` · ${new Date(asset.created_at).toLocaleString()}` : ''}
+                      </span>
+                    }
+                  />
+                </Card>
+              </Col>
+            ))}
+          </Row>
+        )}
+      </Spin>
+    </div>
+  )
+}
+
 export const Step3Materials: React.FC<Step3MaterialsProps> = ({ session }) => {
   const [actionLoading, setActionLoading] = useState<number | null>(null)
   const [isStartingGenerate, setIsStartingGenerate] = useState(false)
+  const [modelConfigs, setModelConfigs] = useState<ImageModelConfig[]>([])
   const { refreshSession } = useSessionStore()
 
   // 编辑对话框状态
@@ -78,6 +223,7 @@ export const Step3Materials: React.FC<Step3MaterialsProps> = ({ session }) => {
     isRegenerate: false,
     extraPrompt: '',
     referenceImages: [],
+    modelConfigId: undefined,
     loading: false,
   })
 
@@ -90,8 +236,15 @@ export const Step3Materials: React.FC<Step3MaterialsProps> = ({ session }) => {
     loading: false,
   })
 
-  // 检查前置步骤是否完成
-  const canExecute = session.completed_steps?.includes('optimize_script')
+  // 加载生图模型配置列表（用于生成时选择模型）
+  useEffect(() => {
+    modelApi.list()
+      .then((result) => setModelConfigs(result.models || []))
+      .catch(() => setModelConfigs([]))
+  }, [])
+
+  // 检查前置步骤是否完成（依赖思维导图）
+  const canExecute = session.completed_steps?.includes('generate_mindmap')
   const stepResult = session.step_results?.generate_material_images?.result_data
   const materials: MaterialImage[] = stepResult?.material_images || []
 
@@ -127,6 +280,7 @@ export const Step3Materials: React.FC<Step3MaterialsProps> = ({ session }) => {
       isRegenerate: false,
       extraPrompt: '',
       referenceImages: [],
+      modelConfigId: undefined,
       loading: false,
     })
   }
@@ -138,11 +292,12 @@ export const Step3Materials: React.FC<Step3MaterialsProps> = ({ session }) => {
       const response = await stepApi.generateMaterials(
         session.session_id,
         generateConfigModal.extraPrompt || undefined,
-        generateConfigModal.referenceImages.length > 0 ? generateConfigModal.referenceImages : undefined
+        generateConfigModal.referenceImages.length > 0 ? generateConfigModal.referenceImages : undefined,
+        generateConfigModal.modelConfigId
       )
       if (response.success) {
         message.loading('素材图生成任务已启动，正在生成中...', 2)
-        setGenerateConfigModal({ visible: false, isRegenerate: false, extraPrompt: '', referenceImages: [], loading: false })
+        setGenerateConfigModal({ visible: false, isRegenerate: false, extraPrompt: '', referenceImages: [], modelConfigId: undefined, loading: false })
         // 立即刷新以获取pending状态，触发轮询
         await refreshSession()
       } else {
@@ -166,9 +321,9 @@ export const Step3Materials: React.FC<Step3MaterialsProps> = ({ session }) => {
           <div>
             <p>重新生成将清空后续 {completedSubsequentSteps} 个已完成的步骤数据：</p>
             <ul>
-              {session.completed_steps?.includes('generate_segment_scripts') && <li>步骤4：生成分片脚本</li>}
-              {session.completed_steps?.includes('generate_segment_frames') && <li>步骤5：生成首尾帧</li>}
-              {session.completed_steps?.includes('generate_videos') && <li>步骤6：生成视频</li>}
+              {session.completed_steps?.includes('generate_segment_scripts') && <li>步骤5：生成分片脚本</li>}
+              {session.completed_steps?.includes('generate_segment_frames') && <li>步骤6：生成首尾帧</li>}
+              {session.completed_steps?.includes('generate_videos') && <li>步骤7：生成视频</li>}
             </ul>
             <p>此操作不可撤销，是否继续？</p>
           </div>
@@ -189,6 +344,7 @@ export const Step3Materials: React.FC<Step3MaterialsProps> = ({ session }) => {
       isRegenerate: true,
       extraPrompt: '',
       referenceImages: [],
+      modelConfigId: undefined,
       loading: false,
     })
   }
@@ -200,11 +356,12 @@ export const Step3Materials: React.FC<Step3MaterialsProps> = ({ session }) => {
       const response = await stepApi.regenerateMaterials(
         session.session_id,
         generateConfigModal.extraPrompt || undefined,
-        generateConfigModal.referenceImages.length > 0 ? generateConfigModal.referenceImages : undefined
+        generateConfigModal.referenceImages.length > 0 ? generateConfigModal.referenceImages : undefined,
+        generateConfigModal.modelConfigId
       )
       if (response.success) {
         message.loading('素材图重新生成任务已启动，正在生成中...', 2)
-        setGenerateConfigModal({ visible: false, isRegenerate: false, extraPrompt: '', referenceImages: [], loading: false })
+        setGenerateConfigModal({ visible: false, isRegenerate: false, extraPrompt: '', referenceImages: [], modelConfigId: undefined, loading: false })
         // 立即刷新以获取pending状态，触发轮询
         await refreshSession()
       } else {
@@ -242,6 +399,7 @@ export const Step3Materials: React.FC<Step3MaterialsProps> = ({ session }) => {
       isRegenerate: false,
       extraPrompt: '',
       referenceImages: [],
+      modelConfigId: undefined,
       loading: false,
     })
   }
@@ -472,7 +630,7 @@ export const Step3Materials: React.FC<Step3MaterialsProps> = ({ session }) => {
   if (!canExecute) {
     return (
       <Card title="生成素材图" style={{ marginTop: 16 }}>
-        <Text type="secondary">请先完成步骤2：优化脚本</Text>
+        <Text type="secondary">请先完成步骤3：生成思维导图</Text>
       </Card>
     )
   }
@@ -610,7 +768,7 @@ export const Step3Materials: React.FC<Step3MaterialsProps> = ({ session }) => {
                           gap: 8,
                         }}
                       >
-                        <Spin tip="生成中..." />
+                        <Spin description="生成中..." />
                         <Text type="secondary">请稍候...</Text>
                       </div>
                     )
@@ -774,8 +932,27 @@ export const Step3Materials: React.FC<Step3MaterialsProps> = ({ session }) => {
       >
         <div style={{ marginBottom: 24 }}>
           <Text type="secondary">
-            可以上传参考图并添加自定义提示词，增强对素材图生成的控制能力。
+            素材图将基于步骤3的思维导图生成。可以上传参考图、选择生图模型并添加自定义提示词，增强控制能力。
           </Text>
+        </div>
+
+        {/* 生图模型选择 */}
+        <div style={{ marginBottom: 24 }}>
+          <Text strong>生图模型</Text>
+          <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+            （在「模型管理」页面可添加多个模型配置）
+          </Text>
+          <Select
+            value={generateConfigModal.modelConfigId}
+            onChange={(v) => setGenerateConfigModal(prev => ({ ...prev, modelConfigId: v }))}
+            placeholder="使用系统默认模型配置"
+            allowClear
+            style={{ width: '100%', marginTop: 8 }}
+            options={modelConfigs.map((m) => ({
+              value: m.id,
+              label: `${m.name}${m.is_default ? '（默认）' : ''} · ${m.model_id || '未指定模型ID'}`,
+            }))}
+          />
         </div>
 
         {/* 参考图管理 */}
@@ -1097,7 +1274,41 @@ export const Step3Materials: React.FC<Step3MaterialsProps> = ({ session }) => {
 
   return (
     <>
-      {renderMainContent()}
+      <Tabs
+        defaultActiveKey="materials"
+        items={[
+          {
+            key: 'materials',
+            label: (
+              <span>
+                <PictureOutlined style={{ marginRight: 6 }} />
+                素材图
+              </span>
+            ),
+            children: renderMainContent(),
+          },
+          {
+            key: 'audio',
+            label: (
+              <span>
+                <SoundOutlined style={{ marginRight: 6 }} />
+                音频管理
+              </span>
+            ),
+            children: <AssetManagerPanel session={session} assetType="audio" />,
+          },
+          {
+            key: 'images',
+            label: (
+              <span>
+                <AppstoreOutlined style={{ marginRight: 6 }} />
+                图片素材
+              </span>
+            ),
+            children: <AssetManagerPanel session={session} assetType="image" />,
+          },
+        ]}
+      />
       {modals}
     </>
   )

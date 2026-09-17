@@ -9,10 +9,31 @@ from backend.schemas.frames import (
     FrameReuseRequest,
     FrameResponse,
 )
+from backend.schemas.steps import OverlapUpdateRequest
 from backend.deps import get_session_manager, get_workflow
 from backend.core.persistence.session_manager import SessionManager
 
 router = APIRouter()
+
+
+@router.put("/{session_id}/overlap", response_model=FrameResponse)
+async def update_overlap(
+    session_id: str,
+    request: OverlapUpdateRequest,
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    """更新相邻分片之间的 overlap 参数（供视频生成时段间过渡衔接）"""
+    session_info = session_manager.get_session(session_id)
+    if not session_info:
+        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
+
+    workflow = get_workflow()
+    result = workflow.update_overlap(session_id, request.overlap_seconds)
+
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "更新失败"))
+
+    return FrameResponse(success=True, message=result.get("message", "overlap 已更新"))
 
 
 @router.post("/{session_id}/{segment_index}/regenerate", response_model=FrameResponse)

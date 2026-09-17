@@ -109,7 +109,7 @@ export const FrameContent: React.FC<FrameContentProps> = ({
                   background: 'rgba(255, 255, 255, 0.7)',
                 }}
               >
-                <Spin tip="重新生成中..." />
+                <Spin description="重新生成中..." />
               </div>
             )}
           </>
@@ -127,7 +127,7 @@ export const FrameContent: React.FC<FrameContentProps> = ({
             }}
           >
             {isRegenerating ? (
-              <Spin tip="重新生成中..." />
+              <Spin description="重新生成中..." />
             ) : (
               <>
                 <CloseCircleOutlined style={{ fontSize: 32, color: '#ff4d4f' }} />
@@ -147,7 +147,7 @@ export const FrameContent: React.FC<FrameContentProps> = ({
               gap: 8,
             }}
           >
-            <Spin tip="生成中..." />
+            <Spin description="生成中..." />
             <Text type="secondary">请稍候...</Text>
           </div>
         ) : isLastFrameInReferenceMode ? (

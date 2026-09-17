@@ -26,3 +26,26 @@
   text-align: center;
   background: #fff;
 }
+
+.sider {
+  border-right: 1px solid #f0f0f0;
+}
+
+.sessionList {
+  overflow-y: auto;
+  height: calc(100vh - 180px);
+}
+
+.sessionItem {
+  border-bottom: 1px solid #f5f5f5 !important;
+  transition: background 0.2s;
+}
+
+.sessionItem:hover {
+  background: #f5f7ff;
+}
+
+.sessionItemActive {
+  background: #e6f4ff;
+  border-left: 3px solid #1677ff;
+}

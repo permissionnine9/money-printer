@@ -11,8 +11,10 @@ from backend.schemas.steps import (
     Step2Request,
     Step3Request,
     Step4Request,
+    Step5Request,
     StepResponse,
     OptimizeSegmentPromptRequest,
+    MindmapUpdateRequest,
 )
 from backend.deps import get_session_manager, get_workflow
 from backend.core.persistence.session_manager import SessionManager
@@ -34,7 +36,6 @@ async def step_1_submit_script(
     logger.info(f"[API] 步骤1 - 提交脚本 - 会话: {session_id[:8]}...")
     logger.info(f"[API] 脚本长度: {len(request.script)} 字符")
     logger.info(f"[API] 视频参数 - resolution: {request.resolution}, aspect_ratio: {request.aspect_ratio}")
-    logger.info(f"[API] 视频参数 - language: {request.language}, style: {request.style}, camera_view: {request.camera_view}")
     logger.info(f"[API] 分片时长: {request.max_segment_duration}秒")
 
     # 检查会话是否存在
@@ -50,9 +51,6 @@ async def step_1_submit_script(
     video_params = {
         "resolution": request.resolution,
         "aspect_ratio": request.aspect_ratio,
-        "language": request.language,
-        "style": request.style,
-        "perspective": request.camera_view,  # 映射 camera_view -> perspective
         "max_segment_duration": request.max_segment_duration,
     }
 
@@ -84,9 +82,12 @@ async def step_2_optimize_script(
 ):
     """步骤2：优化脚本"""
     extra_prompt = request.extra_prompt if request else None
+    use_original = bool(request.use_original) if request else False
     logger.info(f"[API] 步骤2 - 优化脚本 - 会话: {session_id[:8]}...")
     if extra_prompt:
         logger.info(f"[API] 自定义提示词: {extra_prompt[:100]}...")
+    if use_original:
+        logger.info(f"[API] 直接采用原始脚本，跳过 LLM 优化")
 
     session_info = session_manager.get_session(session_id)
     if not session_info:
@@ -103,7 +104,7 @@ async def step_2_optimize_script(
 
     # 执行步骤2（异步方法）
     logger.info(f"[API] 执行 workflow.step_optimize_script - 会话: {session_id[:8]}...")
-    result = await workflow.step_optimize_script(session_id, extra_prompt=extra_prompt or "")
+    result = await workflow.step_optimize_script(session_id, extra_prompt=extra_prompt or "", use_original=use_original)
 
     if not result.get("success"):
         logger.error(f"[API] 优化失败 - 错误: {result.get('error', '未知错误')}")
@@ -120,10 +121,129 @@ async def step_2_optimize_script(
     )
 
 
-@router.post("/{session_id}/materials", response_model=StepResponse)
-async def step_3_generate_materials(
+@router.post("/{session_id}/mindmap", response_model=StepResponse)
+async def step_3_generate_mindmap(
     session_id: str,
-    request: Step3Request,
+    request: Step3Request = None,
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    """步骤3：生成思维导图（基于优化后的脚本展示剧本结构，支持人工修改）"""
+    extra_prompt = request.extra_prompt if request else None
+    logger.info(f"[API] 步骤3 - 生成思维导图 - 会话: {session_id[:8]}...")
+    if extra_prompt:
+        logger.info(f"[API] 自定义提示词: {extra_prompt[:100]}...")
+
+    session_info = session_manager.get_session(session_id)
+    if not session_info:
+        logger.error(f"[API] 会话不存在: {session_id}")
+        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
+
+    # 检查前置步骤
+    can_execute, reason = session_manager.can_execute_step(session_id, "generate_mindmap")
+    if not can_execute:
+        logger.error(f"[API] 前置步骤未完成: {reason}")
+        raise HTTPException(status_code=400, detail=reason or "请先完成步骤2：优化脚本")
+
+    workflow = get_workflow()
+
+    # 执行步骤3（异步方法，请求内等待）
+    logger.info(f"[API] 执行 workflow.step_generate_mindmap - 会话: {session_id[:8]}...")
+    result = await workflow.step_generate_mindmap(session_id, extra_prompt=extra_prompt or "")
+
+    if not result.get("success"):
+        logger.error(f"[API] 思维导图生成失败 - 错误: {result.get('error', '未知错误')}")
+        raise HTTPException(status_code=400, detail=result.get("error", "思维导图生成失败"))
+
+    logger.info(f"[API] 步骤3完成 - 思维导图生成完成")
+
+    result_data = session_manager.get_step_result(session_id, "generate_mindmap")
+
+    return StepResponse(
+        success=True,
+        message=result.get("message", "思维导图生成完成"),
+        data=result_data,
+    )
+
+
+@router.post("/{session_id}/regenerate-mindmap", response_model=StepResponse)
+async def step_3_regenerate_mindmap(
+    session_id: str,
+    request: Step3Request = None,
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    """步骤3重新生成：重新生成思维导图（清空后续所有步骤数据）"""
+    extra_prompt = request.extra_prompt if request else None
+    logger.info(f"[API] 步骤3 - 重新生成思维导图 - 会话: {session_id[:8]}...")
+
+    session_info = session_manager.get_session(session_id)
+    if not session_info:
+        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
+
+    # 检查步骤3是否已完成（只有已完成才需要重新生成）
+    if not session_manager.is_step_completed(session_id, "generate_mindmap"):
+        raise HTTPException(status_code=400, detail="步骤3尚未完成，请使用正常生成接口")
+
+    # 检查前置步骤（步骤2）是否完成
+    if not session_manager.is_step_completed(session_id, "optimize_script"):
+        raise HTTPException(status_code=400, detail="请先完成步骤2：优化脚本")
+
+    # 清空步骤3之后的所有步骤数据
+    cleared = session_manager.clear_steps_after(session_id, "generate_mindmap")
+    if not cleared:
+        raise HTTPException(status_code=500, detail="清空后续步骤数据失败")
+
+    # 重置 current_step 到步骤3
+    reset = session_manager.reset_current_step(session_id, "generate_mindmap")
+    if not reset:
+        raise HTTPException(status_code=500, detail="重置步骤状态失败")
+
+    workflow = get_workflow()
+    result = await workflow.step_generate_mindmap(session_id, extra_prompt=extra_prompt or "")
+
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "重新生成思维导图失败"))
+
+    result_data = session_manager.get_step_result(session_id, "generate_mindmap")
+
+    return StepResponse(
+        success=True,
+        message="思维导图已重新生成，后续步骤数据已重置",
+        data=result_data,
+    )
+
+
+@router.put("/{session_id}/mindmap", response_model=StepResponse)
+async def step_3_update_mindmap(
+    session_id: str,
+    request: MindmapUpdateRequest,
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    """步骤3：人工修改思维导图并保存（不重置后续步骤）"""
+    logger.info(f"[API] 步骤3 - 保存思维导图修改 - 会话: {session_id[:8]}...")
+
+    session_info = session_manager.get_session(session_id)
+    if not session_info:
+        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
+
+    workflow = get_workflow()
+    result = workflow.update_mindmap(session_id, request.mindmap)
+
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "保存失败"))
+
+    result_data = session_manager.get_step_result(session_id, "generate_mindmap")
+
+    return StepResponse(
+        success=True,
+        message=result.get("message", "思维导图已保存"),
+        data=result_data,
+    )
+
+
+@router.post("/{session_id}/materials", response_model=StepResponse)
+async def step_4_generate_materials(
+    session_id: str,
+    request: Step4Request,
     background_tasks: BackgroundTasks,
     session_manager: SessionManager = Depends(get_session_manager),
 ):
@@ -173,7 +293,8 @@ async def step_3_generate_materials(
         await workflow.step_generate_material_images(
             session_id,
             extra_prompt=request.extra_prompt or "",
-            reference_images=request.reference_images
+            reference_images=request.reference_images,
+            model_config_id=request.model_config_id
         )
         logger.info(f"[API] 后台任务完成 - 素材图生成完成 - 会话: {session_id[:8]}...")
 
@@ -191,9 +312,9 @@ async def step_3_generate_materials(
 
 
 @router.post("/{session_id}/segments", response_model=StepResponse)
-async def step_4_generate_segments(
+async def step_5_generate_segments(
     session_id: str,
-    request: Step4Request = None,
+    request: Step5Request = None,
     session_manager: SessionManager = Depends(get_session_manager),
 ):
     """步骤4：生成分片脚本"""
@@ -360,6 +481,7 @@ async def step_6_generate_videos(
         "video_count": len(initial_videos),
         "success_count": 0,
         "failed_count": 0,
+        "final_video": None,   # ComfyUI 整段生成的最终视频（完成后填充）
         "_generating": True,   # 标记为生成中
         "_success": False      # 标记为未完成
     }
@@ -427,9 +549,6 @@ async def step_1_resubmit_script(
     video_params = {
         "resolution": request.resolution,
         "aspect_ratio": request.aspect_ratio,
-        "language": request.language,
-        "style": request.style,
-        "perspective": request.camera_view,
     }
 
     # 重新执行步骤1
@@ -459,9 +578,12 @@ async def step_2_reoptimize_script(
     重新优化后，会清空步骤2之后的所有步骤数据。
     """
     extra_prompt = request.extra_prompt if request else None
+    use_original = bool(request.use_original) if request else False
     logger.info(f"[API] 步骤2重新优化 - 会话: {session_id[:8]}...")
     if extra_prompt:
         logger.info(f"[API] 自定义提示词: {extra_prompt[:100]}...")
+    if use_original:
+        logger.info(f"[API] 直接采用原始脚本，跳过 LLM 优化")
 
     session_info = session_manager.get_session(session_id)
     if not session_info:
@@ -490,7 +612,7 @@ async def step_2_reoptimize_script(
     workflow = get_workflow()
 
     # 重新执行步骤2（异步方法）
-    result = await workflow.step_optimize_script(session_id, extra_prompt=extra_prompt or "")
+    result = await workflow.step_optimize_script(session_id, extra_prompt=extra_prompt or "", use_original=use_original)
 
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "重新优化脚本失败"))
@@ -505,9 +627,9 @@ async def step_2_reoptimize_script(
 
 
 @router.post("/{session_id}/regenerate-materials", response_model=StepResponse)
-async def step_3_regenerate_materials(
+async def step_4_regenerate_materials(
     session_id: str,
-    request: Step3Request,
+    request: Step4Request,
     background_tasks: BackgroundTasks,
     session_manager: SessionManager = Depends(get_session_manager),
 ):
@@ -572,7 +694,8 @@ async def step_3_regenerate_materials(
         await workflow.step_generate_material_images(
             session_id,
             extra_prompt=request.extra_prompt or "",
-            reference_images=request.reference_images
+            reference_images=request.reference_images,
+            model_config_id=request.model_config_id
         )
         logger.info(f"[API] 后台任务完成 - 素材图重新生成完成 - 会话: {session_id[:8]}...")
 
@@ -590,9 +713,9 @@ async def step_3_regenerate_materials(
 
 
 @router.post("/{session_id}/regenerate-segments", response_model=StepResponse)
-async def step_4_regenerate_segments(
+async def step_5_regenerate_segments(
     session_id: str,
-    request: Step4Request = None,
+    request: Step5Request = None,
     session_manager: SessionManager = Depends(get_session_manager),
 ):
     """步骤4重新生成：重新生成分片脚本

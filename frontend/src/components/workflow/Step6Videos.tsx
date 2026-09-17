@@ -1,10 +1,10 @@
 /**
- * 步骤6：生成视频
+ * 步骤7：生成视频（远程 ComfyUI 整段生成，远程不可用时 mock）
  *
  * 采用异步轮询模式：
  * 1. 提交生成任务后立即返回
  * 2. 前端轮询获取最新状态
- * 3. 显示每个视频的生成进度
+ * 3. 完成后展示最终视频 + timeline_data
  */
 import React, { useState, useMemo } from 'react'
 import {
@@ -39,6 +39,7 @@ import {
   SaveOutlined,
   BulbOutlined,
   CopyOutlined,
+  DownloadOutlined,
 } from '@ant-design/icons'
 import type { SessionDetail, ScriptSegment, SegmentFrame, VideoParams } from '@/types'
 import { stepApi, segmentApi } from '@/api/client'
@@ -117,6 +118,9 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
   }, [session])
   const stepResult = session.step_results?.generate_videos?.result_data
   const videos = stepResult?.generated_videos || []
+  // ComfyUI 整段生成的最终视频与时间轴配置
+  const finalVideo = stepResult?.final_video
+  const timelineData = stepResult?.timeline_data
 
   // 获取分片脚本数据（用于预览视频生成信息）
   const segmentScriptsResult = session.step_results?.generate_segment_scripts?.result_data
@@ -220,10 +224,10 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
             </div>
           )}
 
-          <div style={{ marginTop: 16, padding: 12, background: '#fff7e6', borderRadius: 4 }}>
-            <ExclamationCircleOutlined style={{ color: '#fa8c16', marginRight: 8 }} />
+          <div style={{ marginTop: 16, padding: 12, background: '#e6f7ff', borderRadius: 4 }}>
             <Text type="secondary">
-              ⏱️ 提示：视频生成需要较长时间，每个视频片段约需 1-2 分钟。预计总耗时约 {Math.ceil(videoPreviewInfo.totalSegments * 1.5)} 分钟。
+              🔗 视频将通过远程 ComfyUI 服务整段生成：各分片首帧与音频素材会上传到 ComfyUI，
+              按 timeline_data 多段时间轴合成最终长视频（相邻段按 overlap 衔接）。远程服务不可用时将生成本地 mock 演示视频。
             </Text>
           </div>
 
@@ -649,6 +653,81 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
           }
           style={{ marginTop: 16 }}
         >
+          {/* ===== 最终视频（远程 ComfyUI 整段生成） ===== */}
+          {finalVideo?.video_path && !finalVideo.video_path.startsWith('生成失败') && (
+            <Card
+              size="small"
+              style={{ marginBottom: 16, background: '#f6ffed' }}
+              title={
+                <span>
+                  <CheckCircleOutlined style={{ color: '#52c41a', marginRight: 8 }} />
+                  最终视频（远程 ComfyUI 整段生成）
+                  {finalVideo.mock && (
+                    <Tag color="orange" style={{ marginLeft: 12 }}>
+                      Mock 演示视频（远程服务暂不可用）
+                    </Tag>
+                  )}
+                </span>
+              }
+              extra={
+                <Button
+                  size="small"
+                  icon={<DownloadOutlined />}
+                  href={getMediaSrc(finalVideo.video_path)}
+                  target="_blank"
+                >
+                  下载视频
+                </Button>
+              }
+            >
+              <Row gutter={[16, 16]}>
+                <Col xs={24} lg={14}>
+                  <LazyVideo
+                    src={getMediaSrc(finalVideo.video_path)}
+                    placeholderHeight={320}
+                  />
+                </Col>
+                <Col xs={24} lg={10}>
+                  <Descriptions bordered size="small" column={1}>
+                    <Descriptions.Item label="分段数量">{finalVideo.segment_count} 段</Descriptions.Item>
+                    <Descriptions.Item label="段间 overlap">
+                      {finalVideo.overlap_seconds} 秒
+                    </Descriptions.Item>
+                    <Descriptions.Item label="参考图">{timelineData?.images?.length || 0} 张</Descriptions.Item>
+                    <Descriptions.Item label="参考音频">{timelineData?.audios?.length || 0} 个</Descriptions.Item>
+                    <Descriptions.Item label="任务ID">
+                      <Text copyable style={{ fontSize: 12 }}>{finalVideo.prompt_id || '-'}</Text>
+                    </Descriptions.Item>
+                  </Descriptions>
+                </Col>
+              </Row>
+              {timelineData && (
+                <Collapse
+                  style={{ marginTop: 16 }}
+                  items={[
+                    {
+                      key: 'timeline',
+                      label: 'timeline_data（提交给 ComfyUI 的时间轴配置）',
+                      children: (
+                        <pre
+                          style={{
+                            maxHeight: 300,
+                            overflow: 'auto',
+                            fontSize: 12,
+                            background: '#fafafa',
+                            padding: 12,
+                            borderRadius: 4,
+                          }}
+                        >
+                          {JSON.stringify(timelineData, null, 2)}
+                        </pre>
+                      ),
+                    },
+                  ]}
+                />
+              )}
+            </Card>
+          )}
           <Row gutter={[16, 16]}>
             {videos.map((video: any, index: number) => (
               <Col xs={24} sm={12} key={index}>
@@ -783,7 +862,7 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
             </Button>,
           ]}
           width={900}
-          destroyOnClose
+          destroyOnHidden
         >
           {editingVideoIndex !== null && (
             <div>
@@ -834,9 +913,6 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
                       <Descriptions bordered size="small" column={1}>
                         <Descriptions.Item label="分辨率">{videoParams.resolution}</Descriptions.Item>
                         <Descriptions.Item label="宽高比">{videoParams.aspect_ratio}</Descriptions.Item>
-                        <Descriptions.Item label="语言">{videoParams.language}</Descriptions.Item>
-                        <Descriptions.Item label="风格">{videoParams.style}</Descriptions.Item>
-                        <Descriptions.Item label="视角">{videoParams.perspective}</Descriptions.Item>
                         <Descriptions.Item label="时长">{getCurrentEditSegment()?.duration || '-'} 秒</Descriptions.Item>
                       </Descriptions>
                     </div>

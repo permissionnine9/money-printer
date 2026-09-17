@@ -8,6 +8,9 @@ import type {
   StepResponse,
   VideoParams,
   ScriptSegment,
+  SessionAsset,
+  ImageModelConfig,
+  PromptTemplate,
 } from '@/types'
 
 const client = axios.create({
@@ -93,31 +96,57 @@ export const stepApi = {
     return data
   },
 
-  // 步骤2：优化脚本
-  optimizeScript: async (sessionId: string, extraPrompt?: string): Promise<StepResponse> => {
+  // 步骤2：优化脚本（useOriginal=true 直接采用原始脚本，跳过 LLM）
+  optimizeScript: async (sessionId: string, extraPrompt?: string, useOriginal?: boolean): Promise<StepResponse> => {
     const { data } = await client.post(`/steps/${sessionId}/optimize`, {
       extra_prompt: extraPrompt,
+      use_original: useOriginal,
     })
     return data
   },
 
-  // 步骤2：重新优化脚本（重置后续步骤）
-  reoptimizeScript: async (sessionId: string, extraPrompt?: string): Promise<StepResponse> => {
+  // 步骤2：重新优化脚本（重置后续步骤；useOriginal=true 直接采用原始脚本）
+  reoptimizeScript: async (sessionId: string, extraPrompt?: string, useOriginal?: boolean): Promise<StepResponse> => {
     const { data } = await client.post(`/steps/${sessionId}/reoptimize`, {
+      extra_prompt: extraPrompt,
+      use_original: useOriginal,
+    })
+    return data
+  },
+
+  // 步骤3：生成思维导图
+  generateMindmap: async (sessionId: string, extraPrompt?: string): Promise<StepResponse> => {
+    const { data } = await client.post(`/steps/${sessionId}/mindmap`, {
       extra_prompt: extraPrompt,
     })
     return data
   },
 
-  // 步骤3：生成素材图
+  // 步骤3：重新生成思维导图（重置后续步骤）
+  regenerateMindmap: async (sessionId: string, extraPrompt?: string): Promise<StepResponse> => {
+    const { data } = await client.post(`/steps/${sessionId}/regenerate-mindmap`, {
+      extra_prompt: extraPrompt,
+    })
+    return data
+  },
+
+  // 步骤3：人工修改思维导图并保存
+  updateMindmap: async (sessionId: string, mindmap: string): Promise<StepResponse> => {
+    const { data } = await client.put(`/steps/${sessionId}/mindmap`, { mindmap })
+    return data
+  },
+
+  // 步骤4：生成素材图（支持选择生图模型配置）
   generateMaterials: async (
     sessionId: string,
     extraPrompt?: string,
-    referenceImages?: string[]
+    referenceImages?: string[],
+    modelConfigId?: string
   ): Promise<StepResponse> => {
     const { data } = await client.post(`/steps/${sessionId}/materials`, {
       extra_prompt: extraPrompt,
       reference_images: referenceImages,
+      model_config_id: modelConfigId,
     })
     return data
   },
@@ -142,15 +171,17 @@ export const stepApi = {
     return data
   },
 
-  // 步骤3：重新生成素材图（清空后续步骤）
+  // 步骤4：重新生成素材图（清空后续步骤）
   regenerateMaterials: async (
     sessionId: string,
     extraPrompt?: string,
-    referenceImages?: string[]
+    referenceImages?: string[],
+    modelConfigId?: string
   ): Promise<StepResponse> => {
     const { data } = await client.post(`/steps/${sessionId}/regenerate-materials`, {
       extra_prompt: extraPrompt,
       reference_images: referenceImages,
+      model_config_id: modelConfigId,
     })
     return data
   },
@@ -331,13 +362,142 @@ export const frameApi = {
     return data
   },
 
-  // 检查步骤5是否已完成
+  // 检查步骤6是否已完成
   checkCompletion: async (
     sessionId: string
   ): Promise<{ success: boolean; message: string; step_completed?: boolean }> => {
     const { data } = await client.post(
       `/frames/${sessionId}/check-completion`
     )
+    return data
+  },
+
+  // 更新相邻分片之间的 overlap 参数
+  updateOverlap: async (
+    sessionId: string,
+    overlapSeconds: number
+  ): Promise<{ success: boolean; message: string }> => {
+    const { data } = await client.put(`/frames/${sessionId}/overlap`, {
+      overlap_seconds: overlapSeconds,
+    })
+    return data
+  },
+}
+
+// 会话资产管理 API（素材管理台：音频/图片素材）
+export const assetApi = {
+  // 列出会话资产（可按类型过滤）
+  list: async (
+    sessionId: string,
+    assetType?: 'audio' | 'image'
+  ): Promise<{ success: boolean; assets: SessionAsset[] }> => {
+    const params = assetType ? { asset_type: assetType } : {}
+    const { data } = await client.get(`/assets/${sessionId}`, { params })
+    return data
+  },
+
+  // 上传资产（音频/图片）
+  upload: async (
+    sessionId: string,
+    assetType: 'audio' | 'image',
+    file: File
+  ): Promise<{ success: boolean; message: string; asset: SessionAsset }> => {
+    const formData = new FormData()
+    formData.append('file', file)
+    const { data } = await client.post(`/assets/${sessionId}/upload`, formData, {
+      params: { asset_type: assetType },
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+    return data
+  },
+
+  // 删除资产
+  remove: async (
+    sessionId: string,
+    assetId: string
+  ): Promise<{ success: boolean; message: string }> => {
+    const { data } = await client.delete(`/assets/${sessionId}/${assetId}`)
+    return data
+  },
+}
+
+// 生图模型管理 API
+export const modelApi = {
+  // 列出全部模型配置（可按类型过滤：image / chat）
+  list: async (
+    modelType?: 'image' | 'chat'
+  ): Promise<{ success: boolean; models: ImageModelConfig[] }> => {
+    const params = modelType ? { model_type: modelType } : {}
+    const { data } = await client.get('/models', { params })
+    return data
+  },
+
+  // 新增模型配置
+  create: async (payload: {
+    name: string
+    api_key: string
+    base_url: string
+    model_id: string
+    is_default?: boolean
+    model_type?: 'image' | 'chat'
+  }): Promise<{ success: boolean; message: string; model: ImageModelConfig }> => {
+    const { data } = await client.post('/models', payload)
+    return data
+  },
+
+  // 更新模型配置
+  update: async (
+    modelId: string,
+    payload: {
+      name: string
+      api_key: string
+      base_url: string
+      model_id: string
+      is_default?: boolean
+      model_type?: 'image' | 'chat'
+    }
+  ): Promise<{ success: boolean; message: string; model: ImageModelConfig }> => {
+    const { data } = await client.put(`/models/${modelId}`, payload)
+    return data
+  },
+
+  // 设为默认模型
+  setDefault: async (
+    modelId: string
+  ): Promise<{ success: boolean; message: string; model: ImageModelConfig }> => {
+    const { data } = await client.post(`/models/${modelId}/set-default`)
+    return data
+  },
+
+  // 删除模型配置
+  remove: async (modelId: string): Promise<{ success: boolean; message: string }> => {
+    const { data } = await client.delete(`/models/${modelId}`)
+    return data
+  },
+}
+
+// 提示词管理 API（分片镜头 skill 提示词）
+export const promptApi = {
+  // 列出全部提示词模板
+  list: async (): Promise<{ success: boolean; prompts: PromptTemplate[] }> => {
+    const { data } = await client.get('/prompts')
+    return data
+  },
+
+  // 获取单个提示词内容
+  get: async (
+    name: string
+  ): Promise<{ success: boolean; prompt: PromptTemplate }> => {
+    const { data } = await client.get(`/prompts/${name}`)
+    return data
+  },
+
+  // 保存提示词（markdown 覆盖写）
+  save: async (
+    name: string,
+    content: string
+  ): Promise<{ success: boolean; message: string }> => {
+    const { data } = await client.put(`/prompts/${name}`, { content })
     return data
   },
 }

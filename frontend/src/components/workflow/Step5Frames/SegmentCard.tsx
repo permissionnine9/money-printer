@@ -27,6 +27,7 @@ interface SegmentCardProps {
   onEditFrame: (segmentIndex: number, frameType: 'first' | 'last', prompt: string) => void
   onInsertSegment: (afterIndex: number) => void
   onFirstFrameModeChange?: (index: number, mode: string | undefined) => void
+  onLastFrameModeChange?: (index: number, mode: string) => void
 }
 
 export const SegmentCard: React.FC<SegmentCardProps> = ({
@@ -48,6 +49,7 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
   onEditFrame,
   onInsertSegment,
   onFirstFrameModeChange,
+  onLastFrameModeChange,
 }) => {
   return (
     <>
@@ -82,6 +84,7 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
             onGenerateSingleFrame={onGenerateSingleFrame}
             onGenerateSingleFrames={onGenerateSingleFrames}
             onFirstFrameModeChange={onFirstFrameModeChange}
+            onLastFrameModeChange={onLastFrameModeChange}
           />
         }
       >

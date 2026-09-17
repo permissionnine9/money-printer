@@ -1,12 +1,13 @@
-"""视频创作工作流 V2 - 符合PRD的6步流程
+"""视频创作工作流 V2 - 7步流程
 
-工作流程（符合PRD）：
+工作流程：
 1. submit_script_and_params: 用户输入脚本 + 选定参数后提交
 2. optimize_script: LLM优化脚本
-3. generate_material_images: 生成素材图（1-2张）
-4. generate_segment_scripts: 生成分片脚本
-5. generate_segment_frames: 生成首尾帧
-6. generate_videos: 生成视频
+3. generate_mindmap: 生成剧本结构思维导图（支持人工修改）
+4. generate_material_images: 基于思维导图生成素材图
+5. generate_segment_scripts: 生成分片脚本
+6. generate_segment_frames: 生成首尾帧（多模式：含全能参考模式）
+7. generate_videos: 生成视频（远程ComfyUI整段时间轴，支持mock）
 """
 import asyncio
 import uuid
@@ -18,15 +19,63 @@ from backend.core.models import (
     MaterialImage,
     SegmentFrame,
 )
-from backend.core.config import SHENGSUANYUN_IMAGE2IMAGE_REQUEST_TIME_GAP, SHENGSUANYUN_FRAME_IMAGE_MODEL
-from backend.core.services import LLMService, ImageService, VideoService
+from backend.core.config import (
+    SHENGSUANYUN_IMAGE2IMAGE_REQUEST_TIME_GAP,
+    SHENGSUANYUN_FRAME_IMAGE_MODEL,
+    SHENGSUANYUN_API_KEY,
+    VIDEO_SERVICE_TYPE,
+)
+from backend.core.services import LLMService, ImageService, get_legacy_video_service, VideoServiceComfyUI
 from backend.core.persistence import SessionManager
 
 logger = logging.getLogger(__name__)
 
 
+def build_image_service_from_model_config(model_config_id: str | None = None):
+    """根据模型管理中的配置构造 ImageService（自定义 key/baseUrl/modelId）
+
+    Args:
+        model_config_id: 模型配置ID；为 None 时读取默认生图模型配置，
+            无默认配置则返回使用系统配置的 ImageService
+
+    Returns:
+        配置好的 ImageService 实例
+
+    Raises:
+        ValueError: 配置不存在
+    """
+    from backend.core.persistence import ModelManager
+    from backend.core.services import ImageService
+
+    manager = ModelManager()
+    if model_config_id:
+        config = manager.get_model(model_config_id)
+        if not config:
+            raise ValueError(f"生图模型配置不存在: {model_config_id}")
+    else:
+        config = manager.get_default_model(model_type="image")
+
+    if not config:
+        return ImageService()
+
+    return ImageService(
+        api_key=config["api_key"] or SHENGSUANYUN_API_KEY,
+        base_url=config["base_url"] or None,
+        image_model=config["model_id"] or None,
+    )
+
+
 class VideoCreationWorkflowV2:
-    """视频创作工作流 V2 - 符合PRD的6步流程"""
+    """视频创作工作流 V2 - 7步流程
+
+    1. submit_script_and_params: 用户输入脚本 + 选定参数后提交
+    2. optimize_script: LLM优化脚本
+    3. generate_mindmap: 生成剧本结构思维导图（支持人工修改）
+    4. generate_material_images: 基于思维导图生成素材图
+    5. generate_segment_scripts: 生成分片脚本
+    6. generate_segment_frames: 生成首尾帧（多模式：含全能参考模式）
+    7. generate_videos: 生成视频（远程ComfyUI整段时间轴，支持mock）
+    """
 
     def __init__(
         self,
@@ -40,8 +89,25 @@ class VideoCreationWorkflowV2:
             session_manager: 可选的 SessionManager 实例（用于依赖注入）
         """
         self.llm_service = LLMService()
-        self.image_service = ImageService()
-        self.video_service = VideoService()
+        # 应用模型管理中的默认生图模型配置（无默认时使用系统配置）
+        self.image_service = build_image_service_from_model_config()
+        # 模型管理中配置了默认 chat 模型时，注入到 LLM 服务
+        try:
+            from backend.core.persistence import ModelManager
+            chat_model = ModelManager().get_default_model(model_type="chat")
+            if chat_model and (chat_model.get("model_id") or chat_model.get("base_url")):
+                self.llm_service = LLMService(
+                    api_key=chat_model.get("api_key") or None,
+                    base_url=chat_model.get("base_url") or None,
+                    model=chat_model.get("model_id") or None,
+                )
+                logger.info(f"[LLM] 使用模型管理中的默认 chat 模型: {chat_model['name']} ({chat_model.get('model_id')})")
+        except Exception as e:
+            logger.warning(f"[LLM] 读取默认 chat 模型配置失败，使用系统默认: {e}")
+        # ComfyUI 整段视频服务（步骤7主链路）
+        self.comfyui_service = VideoServiceComfyUI()
+        # 逐分片视频服务（兼容单分片重生成等 legacy 接口）
+        self.video_service = get_legacy_video_service()
         # 支持依赖注入，允许共享 SessionManager 实例
         self.session_manager = session_manager or SessionManager(db_path)
         logger.info("VideoCreationWorkflowV2 初始化完成")
@@ -96,12 +162,13 @@ class VideoCreationWorkflowV2:
         }
 
     # ==================== 步骤 2: 优化脚本 ====================
-    async def step_optimize_script(self, session_id: str, extra_prompt: str = "") -> dict:
+    async def step_optimize_script(self, session_id: str, extra_prompt: str = "", use_original: bool = False) -> dict:
         """步骤2：LLM优化视频长脚本
 
         Args:
             session_id: 会话ID
             extra_prompt: 自定义提示词，用于增加控制力（如：更多动作细节、特定风格等）
+            use_original: 直接采用第一步原始脚本，跳过 LLM 优化
 
         Returns:
             执行结果
@@ -109,6 +176,8 @@ class VideoCreationWorkflowV2:
         logger.info(f"[步骤2] 优化脚本 - 会话: {session_id[:8]}...")
         if extra_prompt:
             logger.info(f"[步骤2] 使用自定义提示词: {extra_prompt[:100]}...")
+        if use_original:
+            logger.info(f"[步骤2] 直接采用原始脚本，跳过 LLM 优化")
 
         # 检查前置步骤
         can_execute, reason = self.session_manager.can_execute_step(session_id, "optimize_script")
@@ -121,14 +190,19 @@ class VideoCreationWorkflowV2:
         params = submit_result['result_data']['video_params']
 
         try:
-            video_params = VideoParams(**params)
-
-            # LLM优化总脚本
-            optimized_script = await self.llm_service.optimize_long_script(
-                original_script,
-                video_params,
-                extra_prompt=extra_prompt
-            )
+            if use_original:
+                # 直接采用原始脚本，不经过 LLM 加工
+                optimized_script = original_script
+                message = "已直接采用原始脚本"
+            else:
+                # LLM优化总脚本
+                video_params = VideoParams(**params)
+                optimized_script = await self.llm_service.optimize_long_script(
+                    original_script,
+                    video_params,
+                    extra_prompt=extra_prompt
+                )
+                message = "脚本优化完成"
 
             # 保存结果
             result_data = {
@@ -137,12 +211,16 @@ class VideoCreationWorkflowV2:
                 "script_length": len(optimized_script)
             }
 
-            self.session_manager.save_step_result(session_id, "optimize_script", result_data)
+            # 步骤2已完成时采用原始脚本：仅覆盖本步骤结果，不清空后续步骤、不回退 current_step
+            if use_original and self.session_manager.is_step_completed(session_id, "optimize_script"):
+                self.session_manager.update_step_result(session_id, "optimize_script", result_data)
+            else:
+                self.session_manager.save_step_result(session_id, "optimize_script", result_data)
             logger.info(f"[步骤2] 完成 - 优化后脚本长度: {len(optimized_script)} 字符")
 
             return {
                 "success": True,
-                "message": "脚本优化完成",
+                "message": message,
                 "data": result_data
             }
 
@@ -150,35 +228,26 @@ class VideoCreationWorkflowV2:
             logger.error(f"[步骤2] 失败: {str(e)}")
             return {"success": False, "error": f"脚本优化失败: {str(e)}"}
 
-    # ==================== 步骤 3: 生成素材图 ====================
-    async def step_generate_material_images(
-        self,
-        session_id: str,
-        extra_prompt: str = "",
-        reference_images: list[str] | None = None
-    ) -> dict:
-        """步骤3：生成素材图（设定稿风格：角色设定图、物品设定图、场景设定图）
+    # ==================== 步骤 3: 生成思维导图 ====================
+    async def step_generate_mindmap(self, session_id: str, extra_prompt: str = "") -> dict:
+        """步骤3：基于优化后的脚本生成剧本结构思维导图
 
-        支持两种模式：
-        1. 纯文生图：不提供参考图，使用默认模型生成
-        2. 图生图：提供参考图，使用 gemini-3-pro-image-preview 模型，基于参考图生成
+        思维导图以 markdown 层级文本表达剧本结构（故事梗概/角色/场景/道具/情节），
+        前端用 markmap 渲染并支持人工修改；也是步骤4生成素材图的结构化依据。
 
         Args:
             session_id: 会话ID
-            extra_prompt: 自定义提示词，用于增加控制力（如：更鲜艳的颜色、卡通风格等）
-            reference_images: 用户上传的参考图路径列表（可选，支持本地路径和URL）
+            extra_prompt: 自定义提示词
 
         Returns:
             执行结果
         """
-        logger.info(f"[步骤3] 生成素材图（设定稿）- 会话: {session_id[:8]}...")
+        logger.info(f"[步骤3] 生成思维导图 - 会话: {session_id[:8]}...")
         if extra_prompt:
             logger.info(f"[步骤3] 使用自定义提示词: {extra_prompt[:100]}...")
-        if reference_images:
-            logger.info(f"[步骤3] 使用 {len(reference_images)} 张用户参考图")
 
         # 检查前置步骤
-        can_execute, reason = self.session_manager.can_execute_step(session_id, "generate_material_images")
+        can_execute, reason = self.session_manager.can_execute_step(session_id, "generate_mindmap")
         if not can_execute:
             return {"success": False, "error": reason}
 
@@ -190,19 +259,137 @@ class VideoCreationWorkflowV2:
         try:
             video_params = VideoParams(**params)
 
-            # 生成素材图提示词（包含 type: character/props/environment）
-            prompts_data = await self.llm_service.generate_material_prompts(
+            mindmap_markdown = await self.llm_service.generate_mindmap(
                 optimized_script,
                 video_params,
                 extra_prompt=extra_prompt
             )
 
-            logger.info(f"[步骤3] LLM 生成了 {len(prompts_data)} 个素材图提示词")
+            if not mindmap_markdown or not mindmap_markdown.strip():
+                return {"success": False, "error": "思维导图生成为空"}
+
+            result_data = {
+                "mindmap": mindmap_markdown,
+                "edited": False,
+            }
+
+            self.session_manager.save_step_result(session_id, "generate_mindmap", result_data)
+            logger.info(f"[步骤3] 完成 - 思维导图 {len(mindmap_markdown)} 字符")
+
+            return {
+                "success": True,
+                "message": "思维导图生成完成",
+                "data": result_data
+            }
+
+        except Exception as e:
+            logger.error(f"[步骤3] 失败: {str(e)}")
+            return {"success": False, "error": f"思维导图生成失败: {str(e)}"}
+
+    def update_mindmap(self, session_id: str, mindmap_markdown: str) -> dict:
+        """人工修改思维导图并保存（不重置后续步骤，由前端决定是否重新生成）"""
+        logger.info(f"[步骤3] 人工修改思维导图 - 会话: {session_id[:8]}...")
+
+        if not mindmap_markdown or not mindmap_markdown.strip():
+            return {"success": False, "error": "思维导图内容不能为空"}
+
+        success = self.session_manager.update_mindmap(session_id, mindmap_markdown)
+        if not success:
+            return {"success": False, "error": "思维导图尚未生成，请先生成"}
+
+        return {"success": True, "message": "思维导图已保存"}
+
+    def update_overlap(self, session_id: str, overlap_seconds: float) -> dict:
+        """更新相邻分片之间的 overlap 参数（存入视频参数，供视频生成使用）
+
+        Args:
+            session_id: 会话ID
+            overlap_seconds: 相邻分片重叠时长（秒），0 表示无重叠
+
+        Returns:
+            执行结果
+        """
+        logger.info(f"[步骤6] 更新 overlap 参数为 {overlap_seconds}s - 会话: {session_id[:8]}...")
+
+        if overlap_seconds < 0 or overlap_seconds > 5:
+            return {"success": False, "error": "overlap 时长范围 0-5 秒"}
+
+        submit_result = self.session_manager.get_step_result(session_id, "submit_script_and_params")
+        if not submit_result:
+            return {"success": False, "error": "请先完成步骤1：提交脚本和参数"}
+
+        result_data = submit_result['result_data']
+        video_params = result_data.get('video_params', {})
+        video_params['overlap_seconds'] = overlap_seconds
+        result_data['video_params'] = video_params
+
+        self.session_manager.update_step_result(session_id, "submit_script_and_params", result_data)
+        logger.info(f"[步骤6] overlap 参数已保存: {overlap_seconds}s")
+
+        return {"success": True, "message": f"相邻分片 overlap 已设置为 {overlap_seconds} 秒"}
+
+    # ==================== 步骤 4: 生成素材图 ====================
+    async def step_generate_material_images(
+        self,
+        session_id: str,
+        extra_prompt: str = "",
+        reference_images: list[str] | None = None,
+        model_config_id: str | None = None
+    ) -> dict:
+        """步骤4：基于思维导图生成素材图（设定稿风格：角色设定图、物品设定图、场景设定图）
+
+        支持两种模式：
+        1. 纯文生图：不提供参考图，使用默认模型生成
+        2. 图生图：提供参考图，使用默认生图模型基于参考图生成
+
+        Args:
+            session_id: 会话ID
+            extra_prompt: 自定义提示词，用于增加控制力（如：更鲜艳的颜色、卡通风格等）
+            reference_images: 用户上传的参考图路径列表（可选，支持本地路径和URL）
+            model_config_id: 可选的生图模型配置ID（模型管理中添加的模型）
+
+        Returns:
+            执行结果
+        """
+        logger.info(f"[步骤4] 生成素材图（基于思维导图）- 会话: {session_id[:8]}...")
+        if extra_prompt:
+            logger.info(f"[步骤4] 使用自定义提示词: {extra_prompt[:100]}...")
+        if reference_images:
+            logger.info(f"[步骤4] 使用 {len(reference_images)} 张用户参考图")
+
+        # 检查前置步骤
+        can_execute, reason = self.session_manager.can_execute_step(session_id, "generate_material_images")
+        if not can_execute:
+            return {"success": False, "error": reason}
+
+        # 获取思维导图和参数
+        mindmap_result = self.session_manager.get_step_result(session_id, "generate_mindmap")
+        mindmap_markdown = mindmap_result['result_data']['mindmap']
+        script_result = self.session_manager.get_step_result(session_id, "optimize_script")
+        params = script_result['result_data']['video_params']
+
+        try:
+            video_params = VideoParams(**params)
+
+            # 生成素材图提示词（基于思维导图，包含 type: character/props/environment）
+            prompts_data = await self.llm_service.generate_material_prompts(
+                mindmap_markdown,
+                video_params,
+                extra_prompt=extra_prompt
+            )
+
+            logger.info(f"[步骤4] LLM 生成了 {len(prompts_data)} 个素材图提示词")
             for i, p in enumerate(prompts_data):
                 logger.info(f"  - {i+1}. [{p.get('type', 'general')}] {p.get('description', '')[:50]}...")
 
-            # 生成素材图（如果有参考图，将使用 gemini-3-pro-image-preview 模型）
-            images = await self.image_service.generate_material_images(
+            # 按模型配置选择生图服务（指定 model_config_id 时用之；否则用已应用默认配置的 self.image_service）
+            image_service = self.image_service
+            if model_config_id:
+                image_service = build_image_service_from_model_config(model_config_id)
+                logger.info(f"[步骤4] 使用指定生图模型配置: {model_config_id[:8]}...")
+
+            # 生成素材图（实际模型由模型管理默认配置或请求参数决定）
+            images = await image_service.generate_material_images(
                 prompts_data, video_params, reference_images=reference_images
             )
 
@@ -223,17 +410,18 @@ class VideoCreationWorkflowV2:
                 "type_counts": type_counts
             }
 
-            if failed_count > 0:
+            if failed_count > 0 or completed_count == 0:
                 # 收集失败原因
                 failed_reasons = [img.description for img in images if img.task_status == 'failed']
                 for i, reason in enumerate(failed_reasons):
-                    logger.error(f"[步骤3] 图片 {i+1} 失败原因: {reason}")
+                    logger.error(f"[步骤4] 图片 {i+1} 失败原因: {reason}")
 
+                error_msg = f"素材图生成失败：{failed_count} 张图片生成失败，原因: {'; '.join(failed_reasons)}" if failed_count > 0 else "素材图生成失败：未生成任何图片（请检查模型配置或生图服务可用性）"
                 self.session_manager.save_step_result(session_id, "generate_material_images", result_data, success=False)
-                logger.error(f"[步骤3] 失败：{failed_count} 张图片生成失败")
+                logger.error(f"[步骤4] 失败：{error_msg}")
                 return {
                     "success": False,
-                    "error": f"素材图生成失败：{failed_count} 张图片生成失败，原因: {'; '.join(failed_reasons)}"
+                    "error": error_msg
                 }
 
             # 保存成功结果
@@ -242,7 +430,7 @@ class VideoCreationWorkflowV2:
             # 生成详细的成功消息
             type_names = {"character": "角色设定图", "props": "物品设定图", "environment": "场景设定图"}
             type_msg = ", ".join([f"{type_names.get(t, t)} {c}张" for t, c in type_counts.items()])
-            logger.info(f"[步骤3] 完成 - 成功生成 {completed_count} 张素材图: {type_msg}")
+            logger.info(f"[步骤4] 完成 - 成功生成 {completed_count} 张素材图: {type_msg}")
 
             return {
                 "success": True,
@@ -251,7 +439,7 @@ class VideoCreationWorkflowV2:
             }
 
         except Exception as e:
-            logger.error(f"[步骤3] 失败: {str(e)}")
+            logger.error(f"[步骤4] 失败: {str(e)}")
             return {"success": False, "error": f"素材图生成失败: {str(e)}"}
 
     # ==================== 步骤 4: 生成分片脚本 ====================
@@ -401,17 +589,19 @@ class VideoCreationWorkflowV2:
                 else:
                     prompts_map[segment_scripts[i].index] = result
 
-            # ========== 2. 构建需要生成的帧任务列表（支持三种模式） ==========
+            # ========== 2. 构建需要生成的帧任务列表（支持多种模式） ==========
             # 分批处理：
-            # 批次1：所有尾帧 + generate 首帧（不依赖其他帧，可并发）
-            # 批次2：generate_continuous 首帧（需要前一分片尾帧作为参考）
+            # 批次1：普通尾帧 + generate 首帧（不依赖其他帧，可并发）
+            # 批次2：generate_continuous 首帧 / all_reference 首尾帧（依赖其他帧作为参考）
 
             batch1_tasks = []  # 批次1：(segment_index, frame_type, prompt)
-            batch2_tasks = []  # 批次2：(segment_index, frame_type, prompt, prev_seg_idx)
+            batch2_tasks = []  # 批次2：(segment_index, frame_type, prompt, ref_mode)
+            # ref_mode: 'prev_last'（参考素材图+前片尾帧）或 'all'（全能参考：素材图+前片尾帧+后片首帧等全部可用素材）
 
             # 统计
             reuse_count = 0
             continuous_count = 0
+            all_reference_count = 0
             generate_count = 0
 
             for segment in segment_scripts:
@@ -422,13 +612,19 @@ class VideoCreationWorkflowV2:
                 if segment.first_frame_mode == "reuse_prev" and idx > 0:
                     # 模式1：复用，不生成
                     reuse_count += 1
-                    logger.info(f"[步骤5] 分片 {idx} 首帧将复用分片 {idx - 1} 的尾帧")
+                    logger.info(f"[步骤6] 分片 {idx} 首帧将复用分片 {idx - 1} 的尾帧")
+                elif segment.first_frame_mode == "all_reference":
+                    # 全能参考模式：素材图 + 前片尾帧 + 后片首帧等全部可用素材
+                    if first_prompt:
+                        batch2_tasks.append((idx, "first", first_prompt, "all"))
+                        all_reference_count += 1
+                        logger.info(f"[步骤6] 分片 {idx} 首帧使用全能参考模式生成")
                 elif segment.first_frame_mode == "generate_continuous" and idx > 0:
                     # 模式2：连续生成，需要前一帧作为参考
                     if first_prompt:
-                        batch2_tasks.append((idx, "first", first_prompt, idx - 1))
+                        batch2_tasks.append((idx, "first", first_prompt, "prev_last"))
                         continuous_count += 1
-                        logger.info(f"[步骤5] 分片 {idx} 首帧将连续生成（参考分片 {idx - 1} 尾帧）")
+                        logger.info(f"[步骤6] 分片 {idx} 首帧将连续生成（参考分片 {idx - 1} 尾帧）")
                 else:
                     # 模式3：全新生成，只使用素材图
                     if first_prompt:
@@ -436,11 +632,17 @@ class VideoCreationWorkflowV2:
                         generate_count += 1
 
                 # 尾帧处理（即使 reuse_next 也需要生成，因为是被复用方）
-                if last_prompt:
+                if segment.last_frame_mode == "all_reference":
+                    # 全能参考模式尾帧：进入批次2（依赖前片尾帧/后片首帧）
+                    if last_prompt:
+                        batch2_tasks.append((idx, "last", last_prompt, "all"))
+                        all_reference_count += 1
+                        logger.info(f"[步骤6] 分片 {idx} 尾帧使用全能参考模式生成")
+                elif last_prompt:
                     batch1_tasks.append((idx, "last", last_prompt))
                     generate_count += 1
 
-            logger.info(f"[步骤5] 任务统计: 全新生成 {generate_count} 张，连续生成 {continuous_count} 张，复用 {reuse_count} 张")
+            logger.info(f"[步骤6] 任务统计: 全新生成 {generate_count} 张，连续生成 {continuous_count} 张，全能参考 {all_reference_count} 张，复用 {reuse_count} 张")
 
             # ========== 3. 批量提交和轮询（两批次处理） ==========
             generated_frames = {}  # {(idx, type): (id, path)}
@@ -475,7 +677,7 @@ class VideoCreationWorkflowV2:
                             i2i_prompt,
                             material_image_urls,
                             video_params,
-                            model=SHENGSUANYUN_FRAME_IMAGE_MODEL,
+                            model=getattr(self.image_service, '_image_model', None) or SHENGSUANYUN_FRAME_IMAGE_MODEL,
                             compress_reference=True
                         )
                         if submit_result.get("success"):
@@ -538,16 +740,16 @@ class VideoCreationWorkflowV2:
                     self.session_manager.update_step_result(session_id, "generate_segment_frames", intermediate_data)
                     logger.info(f"[步骤5] [批次1] 进度已更新到数据库，前端可见")
 
-            # ========== 3.2 批次2：生成 generate_continuous 首帧（参考前一分片尾帧） ==========
+            # ========== 3.2 批次2：生成 generate_continuous 首帧 / all_reference 首尾帧 ==========
             if batch2_tasks and not cancelled:
-                logger.info(f"[步骤5] [批次2] 开始生成 {len(batch2_tasks)} 张需要连续的首帧...")
+                logger.info(f"[步骤6] [批次2] 开始生成 {len(batch2_tasks)} 张需要参考其他帧的图片...")
                 submitted_batch2 = []  # [(seg_idx, frame_type, request_id)]
 
                 # 间隔提交批次2的所有任务
-                for i, (seg_idx, frame_type, prompt, prev_seg_idx) in enumerate(batch2_tasks):
+                for i, (seg_idx, frame_type, prompt, ref_mode) in enumerate(batch2_tasks):
                     # 检查取消标志
                     if self.session_manager.is_step_cancelled(session_id, "generate_segment_frames"):
-                        logger.info(f"[步骤5] 检测到取消请求，停止提交批次2任务（已提交 {len(submitted_batch2)}/{len(batch2_tasks)} 个）")
+                        logger.info(f"[步骤6] 检测到取消请求，停止提交批次2任务（已提交 {len(submitted_batch2)}/{len(batch2_tasks)} 个）")
                         cancelled = True
                         break
 
@@ -555,19 +757,32 @@ class VideoCreationWorkflowV2:
                     if i > 0:
                         await asyncio.sleep(SHENGSUANYUN_IMAGE2IMAGE_REQUEST_TIME_GAP)
 
-                    logger.info(f"[步骤5] [批次2] 提交任务 {i + 1}/{len(batch2_tasks)}: 分片 {seg_idx} 首帧（参考分片 {prev_seg_idx} 尾帧）")
+                    logger.info(f"[步骤6] [批次2] 提交任务 {i + 1}/{len(batch2_tasks)}: 分片 {seg_idx} {frame_type}帧（参考模式: {ref_mode}）")
 
                     try:
-                        # 获取前一分片的尾帧作为额外参考
-                        prev_last_id, prev_last_path = generated_frames.get((prev_seg_idx, "last"), ("", ""))
-
-                        # 构建参考图列表：素材图 + 前一分片尾帧
+                        # 构建参考图列表：素材图 + 相邻分片帧（按参考模式）
                         reference_images = list(material_image_urls)  # 复制素材图列表
-                        if prev_last_path:
-                            reference_images.append(prev_last_path)
-                            logger.info(f"[步骤5] [批次2] 添加前一分片尾帧作为参考: {prev_last_path}")
+
+                        if ref_mode == "all":
+                            # 全能参考模式：素材图 + 前一分片尾帧 + 后一分片首帧（全部可用素材）
+                            prev_last_id, prev_last_path = generated_frames.get((seg_idx - 1, "last"), ("", ""))
+                            next_first_id, next_first_path = generated_frames.get((seg_idx + 1, "first"), ("", ""))
+                            if prev_last_path and prev_last_path not in reference_images:
+                                reference_images.append(prev_last_path)
+                                logger.info(f"[步骤6] [批次2] 全能参考：添加前一分片尾帧: {prev_last_path}")
+                            if next_first_path and next_first_path not in reference_images:
+                                reference_images.append(next_first_path)
+                                logger.info(f"[步骤6] [批次2] 全能参考：添加后一分片首帧: {next_first_path}")
+                            if len(reference_images) == len(material_image_urls):
+                                logger.warning(f"[步骤6] [批次2] 警告：分片 {seg_idx} 相邻帧不可用，全能参考仅使用素材图")
                         else:
-                            logger.warning(f"[步骤5] [批次2] 警告：分片 {prev_seg_idx} 尾帧不可用，仅使用素材图")
+                            # 连续生成模式：素材图 + 前一分片尾帧
+                            prev_last_id, prev_last_path = generated_frames.get((seg_idx - 1, "last"), ("", ""))
+                            if prev_last_path:
+                                reference_images.append(prev_last_path)
+                                logger.info(f"[步骤6] [批次2] 添加前一分片尾帧作为参考: {prev_last_path}")
+                            else:
+                                logger.warning(f"[步骤6] [批次2] 警告：分片 {seg_idx - 1} 尾帧不可用，仅使用素材图")
 
                         # 构建提示词
                         i2i_prompt = self.image_service.build_frame_prompt(prompt, video_params, frame_type)
@@ -578,23 +793,23 @@ class VideoCreationWorkflowV2:
                             i2i_prompt,
                             reference_images,
                             video_params,
-                            model=SHENGSUANYUN_FRAME_IMAGE_MODEL,
+                            model=getattr(self.image_service, '_image_model', None) or SHENGSUANYUN_FRAME_IMAGE_MODEL,
                             compress_reference=True
                         )
                         if submit_result.get("success"):
                             request_id = submit_result["request_id"]
                             submitted_batch2.append((seg_idx, frame_type, request_id))
-                            logger.info(f"[步骤5] [批次2] 分片 {seg_idx} 首帧任务已提交: {request_id}")
+                            logger.info(f"[步骤6] [批次2] 分片 {seg_idx} {frame_type}帧任务已提交: {request_id}")
                         else:
-                            logger.error(f"[步骤5] [批次2] 分片 {seg_idx} 首帧提交失败: {submit_result.get('error')}")
+                            logger.error(f"[步骤6] [批次2] 分片 {seg_idx} {frame_type}帧提交失败: {submit_result.get('error')}")
                             submitted_batch2.append((seg_idx, frame_type, None))
                     except Exception as e:
-                        logger.error(f"[批次2] 分片 {seg_idx} 首帧提交失败: {e}")
+                        logger.error(f"[批次2] 分片 {seg_idx} {frame_type}帧提交失败: {e}")
                         submitted_batch2.append((seg_idx, frame_type, None))
 
                 # 并发轮询批次2的所有任务
                 if not cancelled and submitted_batch2:
-                    logger.info(f"[步骤5] [批次2] 已提交 {len(submitted_batch2)} 个任务，开始并发轮询...")
+                    logger.info(f"[步骤6] [批次2] 已提交 {len(submitted_batch2)} 个任务，开始并发轮询...")
 
                     poll_tasks = [poll_task(seg_idx, frame_type, req_id) for seg_idx, frame_type, req_id in submitted_batch2]
                     poll_results = await asyncio.gather(*poll_tasks)
@@ -603,9 +818,9 @@ class VideoCreationWorkflowV2:
                     for seg_idx, frame_type, image_id, image_path in poll_results:
                         generated_frames[(seg_idx, frame_type)] = (image_id, image_path)
                         if image_path:
-                            logger.info(f"[步骤5] [批次2] 分片 {seg_idx} {frame_type}帧生成成功")
+                            logger.info(f"[步骤6] [批次2] 分片 {seg_idx} {frame_type}帧生成成功")
                         else:
-                            logger.error(f"[步骤5] [批次2] 分片 {seg_idx} {frame_type}帧生成失败")
+                            logger.error(f"[步骤6] [批次2] 分片 {seg_idx} {frame_type}帧生成失败")
                             error_count += 1
 
                     # 【重要】立即更新数据库状态，让前端能看到批次2的进度
@@ -613,7 +828,7 @@ class VideoCreationWorkflowV2:
                     intermediate_data = {
                         "segment_frames": [frame.model_dump() for frame in intermediate_frames],
                         "frame_count": len(intermediate_frames),
-                        "generated_count": generate_count + continuous_count,
+                        "generated_count": generate_count + continuous_count + all_reference_count,
                         "reused_count": reuse_count,
                         "error_count": error_count,
                         "_generating": True,  # 仍在生成中
@@ -621,7 +836,7 @@ class VideoCreationWorkflowV2:
                         "_success": False
                     }
                     self.session_manager.update_step_result(session_id, "generate_segment_frames", intermediate_data)
-                    logger.info(f"[步骤5] [批次2] 进度已更新到数据库，前端可见")
+                    logger.info(f"[步骤6] [批次2] 进度已更新到数据库，前端可见")
 
             # 如果被取消且没有生成任何帧，直接返回
             if cancelled and len(generated_frames) == 0:
@@ -736,14 +951,14 @@ class VideoCreationWorkflowV2:
             logger.error(f"[步骤5] 失败: {str(e)}")
             return {"success": False, "error": f"首尾帧生成失败: {str(e)}"}
 
-    # ==================== 步骤 6: 生成视频 ====================
+    # ==================== 步骤 7: 生成视频 ====================
     async def step_generate_videos(self, session_id: str, extra_prompt: str = "") -> dict:
-        """步骤6：生成视频（支持视频快照依赖链路）
+        """步骤7：生成视频
 
-        支持两种生成模式：
-        1. 普通模式：直接生成视频
-        2. 视频快照模式：对于 first_frame_mode='use_video_snapshot' 的分片，
-           需要等待前一个分片的视频生成完成，然后截取最后一帧作为当前分片的首帧
+        两种链路（由 VIDEO_SERVICE_TYPE 决定）：
+        1. comfyui（默认）：上传首帧/音频素材到远程 ComfyUI，构造 timeline_data
+           整段提交生成最终长视频（远程不可用时 mock 本地合成演示视频）
+        2. legacy（doubao/jimeng/wan22）：逐分片首尾帧生成（含视频快照依赖链路）
 
         Args:
             session_id: 会话ID
@@ -752,14 +967,121 @@ class VideoCreationWorkflowV2:
         Returns:
             执行结果
         """
-        logger.info(f"[步骤6] 生成视频 - 会话: {session_id[:8]}...")
+        logger.info(f"[步骤7] 生成视频 - 会话: {session_id[:8]}...")
         if extra_prompt:
-            logger.info(f"[步骤6] 使用自定义提示词: {extra_prompt[:100]}...")
+            logger.info(f"[步骤7] 使用自定义提示词: {extra_prompt[:100]}...")
 
         # 检查前置步骤
         can_execute, reason = self.session_manager.can_execute_step(session_id, "generate_videos")
         if not can_execute:
             return {"success": False, "error": reason}
+
+        # ComfyUI 整段时间轴生成链路
+        if VIDEO_SERVICE_TYPE == "comfyui":
+            return await self._step_generate_videos_comfyui(session_id, extra_prompt)
+
+        return await self._step_generate_videos_legacy(session_id, extra_prompt)
+
+    async def _step_generate_videos_comfyui(self, session_id: str, extra_prompt: str = "") -> dict:
+        """步骤7（ComfyUI 链路）：上传材料 → 构造 timeline_data → 整段生成最终视频"""
+        logger.info(f"[步骤7][ComfyUI] 整段视频生成 - 会话: {session_id[:8]}...")
+
+        # 获取首尾帧、分片脚本和参数
+        frames_result = self.session_manager.get_step_result(session_id, "generate_segment_frames")
+        segments_result = self.session_manager.get_step_result(session_id, "generate_segment_scripts")
+        script_result = self.session_manager.get_step_result(session_id, "optimize_script")
+
+        segment_frames = frames_result['result_data']['segment_frames']
+        segments = segments_result['result_data']['segment_scripts']
+        params = script_result['result_data']['video_params']
+        overlap_seconds = float(params.get('overlap_seconds', 0) or 0)
+
+        try:
+            # 收集各分片首帧（缺失首帧的分片不传参考图，仅靠提示词生成）
+            frame_image_paths = {}
+            for frame in segment_frames:
+                idx = frame.get('segment_index', -1)
+                path = frame.get('first_image_path') or ""
+                if idx >= 0 and path:
+                    frame_image_paths[idx] = path
+
+            # 收集会话音频资产（参考音频）
+            audio_assets = self.session_manager.list_assets(session_id, asset_type="audio")
+
+            if extra_prompt:
+                # 用户自定义提示词并入每段提示词
+                segments = [dict(seg, content=f"{seg.get('content', '')}。{extra_prompt}") for seg in segments]
+
+            logger.info(
+                f"[步骤7][ComfyUI] 材料: {len(frame_image_paths)} 张首帧, {len(audio_assets)} 个音频, "
+                f"overlap={overlap_seconds}s, mock={self.comfyui_service.mock}"
+            )
+
+            # 生成最终视频（mock 模式本地合成演示视频）
+            result = await self.comfyui_service.generate_full_video(
+                segments=segments,
+                frame_image_paths=frame_image_paths,
+                audio_assets=audio_assets,
+                overlap_seconds=overlap_seconds,
+            )
+
+            timeline = result["timeline_data"]
+            result_data = {
+                "generated_videos": [
+                    {
+                        "segment_index": i,
+                        "video_id": result.get("prompt_id", ""),
+                        "video_path": result["video_path"],
+                        "duration": round((seg.get("endFrame", 0) - seg.get("startFrame", 0)) / timeline.get("fps", 24), 2),
+                        "prompt": seg.get("prompt", ""),
+                        "task_status": "completed",
+                    }
+                    for i, seg in enumerate(timeline["segmentConfig"]["segments"])
+                ],
+                "video_count": len(segments),
+                "success_count": len(segments),
+                "failed_count": 0,
+                "final_video": {
+                    "video_path": result["video_path"],
+                    "prompt_id": result.get("prompt_id", ""),
+                    "mock": result.get("mock", False),
+                    "overlap_seconds": timeline.get("_overlap_seconds", 0),
+                    "segment_count": len(segments),
+                },
+                "timeline_data": timeline,
+                "_generating": False,
+                "_success": True,
+            }
+
+            self.session_manager.save_step_result(session_id, "generate_videos", result_data)
+            self.session_manager.update_session_status(session_id, "completed")
+
+            mode_text = "（mock 演示视频）" if result.get("mock") else ""
+            logger.info(f"[步骤7][ComfyUI] 完成 - 最终视频已生成{mode_text}: {result['video_path']}")
+
+            return {
+                "success": True,
+                "message": f"最终视频生成完成{mode_text}",
+                "data": result_data
+            }
+
+        except Exception as e:
+            logger.error(f"[步骤7][ComfyUI] 失败: {str(e)}")
+            # 保存失败状态
+            failure_data = {
+                "generated_videos": [],
+                "video_count": 0,
+                "success_count": 0,
+                "failed_count": 1,
+                "_generating": False,
+                "_success": False,
+                "error": str(e),
+            }
+            self.session_manager.save_step_result(session_id, "generate_videos", failure_data, success=False)
+            return {"success": False, "error": f"视频生成失败: {str(e)}", "data": failure_data}
+
+    async def _step_generate_videos_legacy(self, session_id: str, extra_prompt: str = "") -> dict:
+        """步骤7（legacy 链路）：逐分片生成视频（支持视频快照依赖链路）"""
 
         # 获取首尾帧、分片脚本和参数
         frames_result = self.session_manager.get_step_result(session_id, "generate_segment_frames")
@@ -803,13 +1125,13 @@ class VideoCreationWorkflowV2:
                     snapshot_segments.add(seg.index)
 
             if snapshot_segments:
-                logger.info(f"[步骤6] 发现 {len(snapshot_segments)} 个使用视频快照模式的分片: {sorted(snapshot_segments)}")
+                logger.info(f"[步骤7] 发现 {len(snapshot_segments)} 个使用视频快照模式的分片: {sorted(snapshot_segments)}")
 
             # 按顺序处理每个分片
             for i, segment in enumerate(segment_scripts):
                 # 检查是否被取消
                 if self.session_manager.is_step_cancelled(session_id, "generate_videos"):
-                    logger.warning(f"[步骤6] 视频生成已被用户取消 - 会话: {session_id[:8]}...")
+                    logger.warning(f"[步骤7] 视频生成已被用户取消 - 会话: {session_id[:8]}...")
                     # 将未处理的视频标记为 cancelled 状态
                     for j in range(i, total_segments):
                         all_videos[j].task_status = "cancelled"
@@ -830,7 +1152,7 @@ class VideoCreationWorkflowV2:
                         "_cancelled": True
                     }
                     self.session_manager.save_step_result(session_id, "generate_videos", result_data, success=False)
-                    logger.info(f"[步骤6] 已停止 - 已生成 {success_count}/{total_segments} 个视频，{cancelled_count} 个已取消")
+                    logger.info(f"[步骤7] 已停止 - 已生成 {success_count}/{total_segments} 个视频，{cancelled_count} 个已取消")
 
                     return {
                         "success": False,
@@ -850,7 +1172,7 @@ class VideoCreationWorkflowV2:
                 if is_snapshot_mode:
                     # 视频快照模式：需要从前一个分片的视频中截取最后一帧
                     if i == 0:
-                        logger.error(f"[步骤6] 分片 {segment.index} 是第一个分片，无法使用视频快照模式")
+                        logger.error(f"[步骤7] 分片 {segment.index} 是第一个分片，无法使用视频快照模式")
                         all_videos[i].task_status = "failed"
                         all_videos[i].video_path = "生成失败: 第一个分片无法使用视频快照"
                         continue
@@ -858,7 +1180,7 @@ class VideoCreationWorkflowV2:
                     # 获取前一个分片的视频
                     prev_video = all_videos[i - 1]
                     if prev_video.task_status != "completed" or not prev_video.video_path:
-                        logger.error(f"[步骤6] 分片 {segment.index} 的前一个分片视频未生成成功")
+                        logger.error(f"[步骤7] 分片 {segment.index} 的前一个分片视频未生成成功")
                         all_videos[i].task_status = "failed"
                         all_videos[i].video_path = "生成失败: 前一个分片视频未生成成功"
                         continue
@@ -868,12 +1190,12 @@ class VideoCreationWorkflowV2:
                     snapshot_path = extract_last_frame(prev_video.video_path)
 
                     if not snapshot_path:
-                        logger.error(f"[步骤6] 无法从分片 {i-1} 的视频截取快照")
+                        logger.error(f"[步骤7] 无法从分片 {i-1} 的视频截取快照")
                         all_videos[i].task_status = "failed"
                         all_videos[i].video_path = "生成失败: 无法截取视频快照"
                         continue
 
-                    logger.info(f"[步骤6] 已从分片 {i-1} 的视频截取快照: {snapshot_path}")
+                    logger.info(f"[步骤7] 已从分片 {i-1} 的视频截取快照: {snapshot_path}")
 
                     # 更新当前分片的首帧为截取的快照
                     frame.first_image_path = snapshot_path
@@ -887,7 +1209,7 @@ class VideoCreationWorkflowV2:
                     # 标记为失败并继续处理下一个
                     all_videos[i].task_status = "failed"
                     all_videos[i].video_path = f"生成失败: 分片 {segment.index} 缺少首帧"
-                    logger.error(f"[步骤6] 分片 {segment.index} 缺少首帧，跳过")
+                    logger.error(f"[步骤7] 分片 {segment.index} 缺少首帧，跳过")
                     continue
 
                 # 获取前后分片（用于上下文连贯）
@@ -899,7 +1221,7 @@ class VideoCreationWorkflowV2:
 
                 if video_generation_mode == 'first_frame_reference':
                     # 首帧+参考图模式：使用豆包seedance-pro，首帧+素材参考图+提示词
-                    logger.info(f"[步骤6] 分片 {segment.index} 使用首帧+参考图模式生成视频")
+                    logger.info(f"[步骤7] 分片 {segment.index} 使用首帧+参考图模式生成视频")
 
                     # 获取素材图作为参考
                     material_result = self.session_manager.get_step_result(session_id, "generate_material_images")
@@ -924,7 +1246,7 @@ class VideoCreationWorkflowV2:
                     )
                 else:
                     # 默认：首尾帧模式
-                    logger.info(f"[步骤6] 分片 {segment.index} 使用首尾帧模式生成视频")
+                    logger.info(f"[步骤7] 分片 {segment.index} 使用首尾帧模式生成视频")
                     video = await self.video_service.generate_video_from_frames(
                         segment,
                         frame.first_image_path,
@@ -965,7 +1287,7 @@ class VideoCreationWorkflowV2:
                 }
                 # 不推进 current_step，仅更新数据
                 self.session_manager.update_step_result(session_id, "generate_videos", intermediate_data)
-                logger.info(f"[步骤6] 进度更新: {success_count + failed_count}/{total_segments} 个视频已处理")
+                logger.info(f"[步骤7] 进度更新: {success_count + failed_count}/{total_segments} 个视频已处理")
 
             # 统计成功和失败
             success_count = sum(1 for v in all_videos if v.task_status == "completed")
@@ -983,7 +1305,7 @@ class VideoCreationWorkflowV2:
 
             if failed_count > 0:
                 self.session_manager.save_step_result(session_id, "generate_videos", result_data, success=False)
-                logger.error(f"[步骤6] 部分失败 - {failed_count} 个视频生成失败")
+                logger.error(f"[步骤7] 部分失败 - {failed_count} 个视频生成失败")
                 return {
                     "success": False,
                     "error": f"视频生成部分失败：{failed_count} 个视频生成失败",
@@ -994,7 +1316,7 @@ class VideoCreationWorkflowV2:
 
             # 更新会话状态为已完成
             self.session_manager.update_session_status(session_id, "completed")
-            logger.info(f"[步骤6] 完成 - 生成 {success_count} 个视频片段")
+            logger.info(f"[步骤7] 完成 - 生成 {success_count} 个视频片段")
 
             return {
                 "success": True,
@@ -1003,7 +1325,7 @@ class VideoCreationWorkflowV2:
             }
 
         except Exception as e:
-            logger.error(f"[步骤6] 失败: {str(e)}")
+            logger.error(f"[步骤7] 失败: {str(e)}")
             return {"success": False, "error": f"视频生成失败: {str(e)}"}
 
     def _update_frame_with_snapshot(self, session_id: str, segment_index: int, snapshot_path: str) -> bool:
@@ -1269,6 +1591,22 @@ class VideoCreationWorkflowV2:
                     ]
                     logger.info(f"[编辑] 使用全部 {len(material_image_urls)} 张素材图作为参考")
 
+                    # 全能参考模式：自动扩展参考图（素材图 + 前一分片尾帧 + 后一分片首帧）
+                    if (frame_type == "first" and segment.first_frame_mode == "all_reference") or \
+                       (frame_type == "last" and segment.last_frame_mode == "all_reference"):
+                        frames_result = self.session_manager.get_step_result(session_id, "generate_segment_frames")
+                        if frames_result:
+                            all_frames = frames_result['result_data'].get('segment_frames', [])
+                            for other in all_frames:
+                                other_idx = other.get('segment_index', -1)
+                                if other_idx == segment_index - 1 and other.get('last_image_path'):
+                                    if other['last_image_path'] not in material_image_urls:
+                                        material_image_urls.append(other['last_image_path'])
+                                elif other_idx == segment_index + 1 and other.get('first_image_path'):
+                                    if other['first_image_path'] not in material_image_urls:
+                                        material_image_urls.append(other['first_image_path'])
+                        logger.info(f"[编辑] 全能参考模式：参考图扩展至 {len(material_image_urls)} 张")
+
             # 确定提示词
             if custom_prompt and custom_prompt.strip():
                 # 使用自定义提示词
@@ -1295,7 +1633,7 @@ class VideoCreationWorkflowV2:
                 prefix=f"frame_{segment_index}_{frame_type}",
                 reference_images=material_image_urls,  # 传入素材图作为参考
                 frame_type=frame_type,  # 传递帧类型，用于在提示词中强调
-                model=SHENGSUANYUN_FRAME_IMAGE_MODEL,  # 使用首尾帧专用模型
+                model=getattr(self.image_service, '_image_model', None) or SHENGSUANYUN_FRAME_IMAGE_MODEL,
                 compress_reference=True  # 启用参考图压缩
             )
 
@@ -1580,7 +1918,7 @@ class VideoCreationWorkflowV2:
     ) -> dict:
         """编辑单个素材图
 
-        使用 gemini-3-pro-image-preview 模型基于参考图进行编辑。
+        使用默认生图模型基于参考图进行编辑。
         支持用户完全控制参考图列表，包括是否使用原素材图。
 
         Args:
@@ -1674,7 +2012,7 @@ class VideoCreationWorkflowV2:
     ) -> dict:
         """新增一个素材图
 
-        使用 gemini-3-pro-image-preview 模型生成新的素材图并添加到列表末尾。
+        使用默认生图模型生成新的素材图并添加到列表末尾。
         支持纯文生图模式和图生图模式（提供参考图时）。
 
         Args:
@@ -1714,8 +2052,8 @@ class VideoCreationWorkflowV2:
 
             # 判断是否有参考图，决定使用文生图还是图生图
             if reference_images and len(reference_images) > 0:
-                # 有参考图：使用图生图模式（gemini-3-pro-image-preview）
-                logger.info(f"[新增] 使用图生图模式（gemini-3-pro-image-preview），参考图: {len(reference_images)} 张")
+                # 有参考图：使用图生图模式
+                logger.info(f"[新增] 使用图生图模式，参考图: {len(reference_images)} 张")
                 result = await self.image_service.edit_material_image(
                     original_image_path=reference_images[0],  # 第一张参考图作为原图
                     prompt=full_prompt,
@@ -1723,8 +2061,8 @@ class VideoCreationWorkflowV2:
                     reference_images=reference_images
                 )
             else:
-                # 无参考图：使用文生图模式（gemini-3-pro-image-preview）
-                logger.info(f"[新增] 使用纯文生图模式（gemini-3-pro-image-preview）")
+                # 无参考图：使用文生图模式
+                logger.info(f"[新增] 使用纯文生图模式")
                 result = await self.image_service._generate_image(
                     prompt=full_prompt,
                     video_params=video_params

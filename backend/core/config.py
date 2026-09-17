@@ -27,8 +27,17 @@ SHENGSUANYUN_API_KEY = os.getenv(
 SHENGSUANYUN_BASE_URL = "https://router.shengsuanyun.com/api/v1"
 
 # 视频生成服务配置
-# 可选值: "jimeng" (即梦首尾帧) 或 "wan22" (阿里wan2.2首尾帧) 或 "doubao" (豆包-seedance-1.0-pro)
-VIDEO_SERVICE_TYPE = os.getenv("VIDEO_SERVICE_TYPE", "doubao")
+# 可选值: "comfyui" (远程ComfyUI时间轴) 或 "jimeng" (即梦首尾帧) 或 "wan22" (阿里wan2.2首尾帧) 或 "doubao" (豆包-seedance-1.0-pro)
+VIDEO_SERVICE_TYPE = os.getenv("VIDEO_SERVICE_TYPE", "comfyui")
+
+# 远程 ComfyUI 服务配置
+COMFYUI_BASE_URL = os.getenv("COMFYUI_BASE_URL", "http://127.0.0.1:8188")
+# 远程 ComfyUI 暂不可用时置为 true，用本地 mock 视频代替真实调用
+COMFYUI_MOCK = os.getenv("COMFYUI_MOCK", "true").lower() in ("1", "true", "yes")
+# ComfyUI API 格式工作流模板文件（MiniMaxH3TimelinePlanner 节点的 timeline_data 会被自动注入）
+COMFYUI_WORKFLOW_PATH = BASE_DIR / "comfyui_workflow.json"
+# ComfyUI 时间轴帧率（段时长/overlap 均以帧为单位换算）
+COMFYUI_TIMELINE_FPS = 24
 
 # 视频模型配置
 SHENGSUANYUN_VIDEO_MODEL = "bytedance/jimeng_i2v_first_tail_v30"  # 即梦首尾帧模型
@@ -56,9 +65,6 @@ OSS_BUCKET = os.getenv("OSS_BUCKET", "")
 DEFAULT_VIDEO_PARAMS = {
     "resolution": "720p",
     "aspect_ratio": "16:9",
-    "language": "zh-CN",
-    "style": "cinematic",
-    "perspective": "third_person",
 }
 
 # 视频分辨率选项
@@ -66,30 +72,3 @@ RESOLUTION_OPTIONS = ["720p", "1080p", "4K"]
 
 # 宽高比选项
 ASPECT_RATIO_OPTIONS = ["16:9", "9:16", "1:1", "4:3"]
-
-# 语言选项
-LANGUAGE_OPTIONS = ["zh-CN", "en-US", "ja-JP", "ko-KR"]
-
-# 美学风格选项
-STYLE_OPTIONS = [
-    "cinematic",      # 电影风格
-    "anime",          # 动漫风格
-    "realistic",      # 写实风格
-    "cartoon",        # 卡通风格
-    "watercolor",     # 水彩风格
-    "oil_painting",   # 油画风格
-    "pixel_art",      # 像素风格
-    "3d_render",      # 3D渲染风格
-]
-
-# 视角选项
-PERSPECTIVE_OPTIONS = [
-    "first_person",   # 第一人称
-    "third_person",   # 第三人称
-    "aerial",         # 航拍视角
-    "close_up",       # 特写
-    "wide_angle",     # 广角
-]
-
-# 每个分片的最大时长（秒）
-MAX_SEGMENT_DURATION = 12

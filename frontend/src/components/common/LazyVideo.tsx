@@ -52,7 +52,7 @@ export const LazyVideo: React.FC<LazyVideoProps> = ({
             borderRadius: 4,
           }}
         >
-          <Spin tip="加载中..." />
+          <Spin description="加载中..." />
         </div>
       )}
     </div>

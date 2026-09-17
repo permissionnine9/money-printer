@@ -277,26 +277,23 @@ class VideoService:
         """
         parts = []
 
-        # 1. 视频风格参数
-        parts.append(f"Style: {video_params.style}")
-
-        # 2. 分片位置信息
+        # 1. 分片位置信息
         parts.append(f"[Segment {segment.index + 1}/{total_segments}]")
 
-        # 3. 上一个分片的简要描述（用于过渡连贯）
+        # 2. 上一个分片的简要描述（用于过渡连贯）
         if prev_segment:
             prev_summary = prev_segment.content[:100] + "..." if len(prev_segment.content) > 100 else prev_segment.content
             parts.append(f"[Previous]: {prev_summary}")
 
-        # 4. 当前分片核心内容（使用模型自带的方法）
+        # 3. 当前分片核心内容（使用模型自带的方法）
         parts.append(segment.to_video_prompt())
 
-        # 5. 下一个分片的简要描述（用于过渡连贯）
+        # 4. 下一个分片的简要描述（用于过渡连贯）
         if next_segment:
             next_summary = next_segment.content[:100] + "..." if len(next_segment.content) > 100 else next_segment.content
             parts.append(f"[Next]: {next_summary}")
 
-        # 6. 用户自定义提示词
+        # 5. 用户自定义提示词
         if extra_prompt:
             parts.append(f"[Extra]: {extra_prompt}")
 

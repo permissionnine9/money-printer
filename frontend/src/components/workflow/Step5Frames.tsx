@@ -6,7 +6,7 @@
  * 2. 前端轮询获取最新状态
  * 3. 显示每个帧的生成进度
  */
-import React, { useState, useMemo, useCallback } from 'react'
+import React, { useState, useMemo, useCallback, useEffect } from 'react'
 import {
   Card,
   Button,
@@ -19,6 +19,8 @@ import {
   Modal,
   Tabs,
   Form,
+  InputNumber,
+  Tooltip,
 } from 'antd'
 import {
   BorderOutlined,
@@ -33,6 +35,7 @@ import {
   CopyOutlined,
   PlusOutlined,
   StopOutlined,
+  InfoCircleOutlined,
 } from '@ant-design/icons'
 import type { SessionDetail } from '@/types'
 import { stepApi, frameApi, uploadApi, segmentApi } from '@/api/client'
@@ -104,6 +107,15 @@ export const Step5Frames: React.FC<Step5FramesProps> = ({ session }) => {
 
   // 视频生成模式变更loading状态
   const [changingVideoMode, setChangingVideoMode] = useState<number | null>(null)
+
+  // 相邻分片 overlap 参数（秒），从步骤1的视频参数读取
+  const videoParamsData = session.step_results?.submit_script_and_params?.result_data?.video_params
+  const savedOverlap = typeof videoParamsData?.overlap_seconds === 'number' ? videoParamsData.overlap_seconds : 0
+  const [overlapValue, setOverlapValue] = useState<number>(savedOverlap)
+  // 保存后同步输入框显示值
+  useEffect(() => {
+    setOverlapValue(savedOverlap)
+  }, [savedOverlap])
 
   // 检查前置步骤是否完成
   const canExecute = session.completed_steps?.includes('generate_segment_scripts')
@@ -322,6 +334,50 @@ export const Step5Frames: React.FC<Step5FramesProps> = ({ session }) => {
       message.error((error as Error).message)
     } finally {
       setChangingVideoMode(null)
+    }
+  }
+
+  // 处理尾帧参考模式变更（含全能参考模式）
+  const handleLastFrameModeChange = async (segmentIndex: number, mode: string) => {
+    setChangingVideoMode(segmentIndex)
+    try {
+      const segment = segments[segmentIndex]
+      if (!segment) return
+      const response = await segmentApi.update(session.session_id, segmentIndex, {
+        ...segment,
+        index: segmentIndex,
+        last_frame_mode: mode,
+      })
+      if (response.success) {
+        const modeNames: Record<string, string> = {
+          generate: '仅素材图',
+          generate_continuous: '连贯生成',
+          all_reference: '全能参考（素材图+前片尾帧+后片首帧）',
+        }
+        message.success(`分片 ${segmentIndex + 1} 尾帧参考模式已更新：${modeNames[mode] || mode}`)
+        await refreshSession()
+      } else {
+        message.error(response.message)
+      }
+    } catch (error) {
+      message.error((error as Error).message)
+    } finally {
+      setChangingVideoMode(null)
+    }
+  }
+
+  // 保存相邻分片 overlap 参数
+  const handleSaveOverlap = async () => {
+    try {
+      const response = await frameApi.updateOverlap(session.session_id, overlapValue)
+      if (response.success) {
+        message.success(response.message)
+        await refreshSession()
+      } else {
+        message.error(response.message)
+      }
+    } catch (error) {
+      message.error((error as Error).message)
     }
   }
 
@@ -577,7 +633,7 @@ export const Step5Frames: React.FC<Step5FramesProps> = ({ session }) => {
           <div>
             <p>重新生成将清空后续 {completedSubsequentSteps} 个已完成的步骤数据：</p>
             <ul>
-              {session.completed_steps?.includes('generate_videos') && <li>步骤6：生成视频</li>}
+              {session.completed_steps?.includes('generate_videos') && <li>步骤7：生成视频</li>}
             </ul>
             <p>此操作不可撤销，是否继续？</p>
           </div>
@@ -812,7 +868,7 @@ export const Step5Frames: React.FC<Step5FramesProps> = ({ session }) => {
   if (!canExecute) {
     return (
       <Card title="生成首尾帧" style={{ marginTop: 16 }}>
-        <Text type="secondary">请先完成步骤4：生成分片脚本</Text>
+        <Text type="secondary">请先完成步骤5：生成分片脚本</Text>
       </Card>
     )
   }
@@ -950,6 +1006,43 @@ export const Step5Frames: React.FC<Step5FramesProps> = ({ session }) => {
       }
       style={{ marginTop: 16 }}
     >
+      {/* 相邻分片 overlap 参数设置（用于步骤7视频生成的段间过渡衔接） */}
+      <div
+        style={{
+          marginBottom: 16,
+          padding: 12,
+          background: '#f0f5ff',
+          borderRadius: 4,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          gap: 8,
+        }}
+      >
+        <Text>
+          <Tooltip title="相邻两个分片视频段之间的重叠时长（秒），生成视频时用于段间过渡衔接，保证画面连贯。将自动对齐到 ComfyUI 要求的帧数规则（0 或 5+17n 帧）。">
+            <InfoCircleOutlined style={{ color: '#1890ff', marginRight: 8 }} />
+          </Tooltip>
+          相邻分片 overlap（段间重叠）
+        </Text>
+        <Space>
+          <Space.Compact>
+            <InputNumber
+              min={0}
+              max={5}
+              step={0.5}
+              value={overlapValue}
+              onChange={(v) => setOverlapValue(typeof v === 'number' ? v : 0)}
+              style={{ width: 100 }}
+            />
+            <Button disabled style={{ pointerEvents: 'none' }}>秒</Button>
+          </Space.Compact>
+          <Button size="small" type="primary" onClick={handleSaveOverlap}>
+            保存 overlap
+          </Button>
+        </Space>
+      </div>
       {isCancelled && (
         <div style={{ marginBottom: 16, padding: 12, background: '#fff2f0', borderRadius: 4 }}>
           <CloseCircleOutlined style={{ color: '#ff4d4f', marginRight: 8 }} />
@@ -991,6 +1084,7 @@ export const Step5Frames: React.FC<Step5FramesProps> = ({ session }) => {
                 onEditFrame={handleOpenEditModal}
                 onInsertSegment={showAddModal}
                 onFirstFrameModeChange={handleFirstFrameModeChange}
+                onLastFrameModeChange={handleLastFrameModeChange}
               />
             </Col>
           )

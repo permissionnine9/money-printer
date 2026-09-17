@@ -26,6 +26,7 @@ export interface SegmentInfo {
   atmosphere?: string
   duration: number
   first_frame_mode?: string
+  last_frame_mode?: string
   video_generation_mode?: string  // 'first_last_frame' 或 'first_frame_reference'
   [key: string]: unknown
 }

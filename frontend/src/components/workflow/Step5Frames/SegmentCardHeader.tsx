@@ -31,7 +31,22 @@ interface SegmentCardHeaderProps {
   onGenerateSingleFrame: (index: number, frameType: 'first' | 'last') => void
   onGenerateSingleFrames: (index: number) => void
   onFirstFrameModeChange?: (index: number, mode: string | undefined) => void
+  onLastFrameModeChange?: (index: number, mode: string) => void
 }
+
+// 首帧参考模式选项（特殊模式 reuse_prev / use_video_snapshot 由系统或其他控件管理）
+const FIRST_FRAME_REF_MODES = [
+  { value: 'generate', label: '首帧: 仅素材图' },
+  { value: 'generate_continuous', label: '首帧: 参考前片尾帧' },
+  { value: 'all_reference', label: '首帧: 全能参考' },
+]
+
+// 尾帧参考模式选项（特殊模式 reuse_next 由系统配对管理）
+const LAST_FRAME_REF_MODES = [
+  { value: 'generate', label: '尾帧: 仅素材图' },
+  { value: 'generate_continuous', label: '尾帧: 连贯生成' },
+  { value: 'all_reference', label: '尾帧: 全能参考' },
+]
 
 export const SegmentCardHeader: React.FC<SegmentCardHeaderProps> = ({
   segmentIndex,
@@ -47,10 +62,21 @@ export const SegmentCardHeader: React.FC<SegmentCardHeaderProps> = ({
   onGenerateSingleFrame,
   onGenerateSingleFrames,
   onFirstFrameModeChange,
+  onLastFrameModeChange,
 }) => {
   const videoMode = segment?.video_generation_mode
   const isFirstFrameReference = videoMode === 'first_frame_reference'
   const isUseVideoSnapshot = segment?.first_frame_mode === 'use_video_snapshot'
+
+  // 首帧参考模式下拉当前值（特殊模式时不显示为当前值）
+  const firstFrameMode: string | undefined = segment?.first_frame_mode
+  const firstFrameRefMode: string | undefined = FIRST_FRAME_REF_MODES.some(m => m.value === firstFrameMode)
+    ? firstFrameMode
+    : undefined
+  const lastFrameMode: string | undefined = segment?.last_frame_mode
+  const lastFrameRefMode: string | undefined = LAST_FRAME_REF_MODES.some(m => m.value === lastFrameMode)
+    ? lastFrameMode
+    : undefined
 
   // 首帧+参考图模式：只需要首帧
   // 视频快照模式：只需要尾帧
@@ -143,6 +169,36 @@ export const SegmentCardHeader: React.FC<SegmentCardHeaderProps> = ({
             ]}
           />
         </Tooltip>
+        {/* 首帧参考模式选择（含全能参考模式） */}
+        {onFirstFrameModeChange && (
+          <Tooltip title="首帧生成参考模式：仅素材图 / 参考前一分片尾帧保持连贯 / 全能参考（素材图+前片尾帧+后片首帧等全部可用素材）">
+            <Select
+              size="small"
+              value={firstFrameRefMode}
+              placeholder={isUseVideoSnapshot ? '首帧: 视频快照' : '首帧: 系统模式'}
+              onChange={(value) => onFirstFrameModeChange(segmentIndex, value)}
+              loading={changingVideoMode === segmentIndex}
+              disabled={isGenerating || isUseVideoSnapshot || changingVideoMode === segmentIndex}
+              style={{ width: 160 }}
+              options={FIRST_FRAME_REF_MODES}
+            />
+          </Tooltip>
+        )}
+        {/* 尾帧参考模式选择（含全能参考模式） */}
+        {onLastFrameModeChange && (
+          <Tooltip title="尾帧生成参考模式：仅素材图 / 连贯生成（后片首帧参考此帧）/ 全能参考（素材图+前片尾帧+后片首帧等全部可用素材）">
+            <Select
+              size="small"
+              value={lastFrameRefMode}
+              placeholder="尾帧: 系统模式"
+              onChange={(value: string) => onLastFrameModeChange(segmentIndex, value)}
+              loading={changingVideoMode === segmentIndex}
+              disabled={isGenerating || changingVideoMode === segmentIndex}
+              style={{ width: 160 }}
+              options={LAST_FRAME_REF_MODES}
+            />
+          </Tooltip>
+        )}
         {/* 非第一个分片，显示使用视频快照选项 */}
         {segmentIndex > 0 && onFirstFrameModeChange && (
           <Tooltip title="使用上一个分片生成视频的结尾帧作为本分片的首帧">

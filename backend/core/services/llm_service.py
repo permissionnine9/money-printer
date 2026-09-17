@@ -1,11 +1,12 @@
-"""LLM服务 - 使用盛算云 doubao-seed-1.8 进行脚本优化"""
+"""LLM服务 - 脚本优化/思维导图/分片/首尾帧提示词等 LLM 调用（模型由系统配置或模型管理默认 chat 模型决定）"""
 import logging
 import time
 from openai import OpenAI
 
-from backend.core.config import SHENGSUANYUN_API_KEY, SHENGSUANYUN_BASE_URL, SHENGSUANYUN_LLM_MODEL, MAX_SEGMENT_DURATION
+from backend.core.config import SHENGSUANYUN_API_KEY, SHENGSUANYUN_BASE_URL, SHENGSUANYUN_LLM_MODEL
 from backend.core.models import VideoParams, ScriptSegment
 from backend.core.utils.json_parser import parse_json_response
+from backend.core.services.prompt_manager import get_prompt_manager
 
 logger = logging.getLogger(__name__)
 
@@ -13,12 +14,24 @@ logger = logging.getLogger(__name__)
 class LLMService:
     """LLM服务类"""
 
-    def __init__(self):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        model: str | None = None,
+    ):
+        """初始化 LLM 服务
+
+        Args:
+            api_key: 可选 API Key（默认使用盛算云系统配置）
+            base_url: 可选 OpenAI 兼容 Base URL（默认使用盛算云系统配置）
+            model: 可选模型 ID（默认 doubao-seed-1.8；模型管理中设默认 chat 模型后由工作流注入）
+        """
         self.client = OpenAI(
-            base_url=SHENGSUANYUN_BASE_URL,
-            api_key=SHENGSUANYUN_API_KEY,
+            base_url=base_url or SHENGSUANYUN_BASE_URL,
+            api_key=api_key or SHENGSUANYUN_API_KEY,
         )
-        self.model = SHENGSUANYUN_LLM_MODEL
+        self.model = model or SHENGSUANYUN_LLM_MODEL
         self.max_retries = 2
         self.retry_delay = 2  # 秒
 
@@ -60,6 +73,10 @@ class LLMService:
                         content = chunk.choices[0].delta.content
                         response_text += content
 
+                # 空响应视为可重试错误（部分网关/思考型模型间歇性返回空流）
+                if not response_text.strip():
+                    raise Exception("empty stream response (响应文本为空)")
+
                 if attempt > 0:
                     logger.info(f"{operation_name} 重试成功")
 
@@ -71,7 +88,7 @@ class LLMService:
 
                 # 判断是否是可重试的错误
                 is_retryable = any(keyword in error_msg.lower() for keyword in [
-                    'ssl', 'connection', 'timeout', 'eof', 'network'
+                    'ssl', 'connection', 'timeout', 'eof', 'network', 'empty stream response'
                 ])
 
                 if not is_retryable or attempt == self.max_retries - 1:
@@ -107,30 +124,61 @@ class LLMService:
         if extra_prompt:
             extra_instruction = f"\n\n## 用户额外要求\n{extra_prompt}\n请在优化脚本时充分考虑以上要求。"
 
-        prompt = f"""你是一个专业的视频脚本优化专家。请根据以下原始脚本和视频参数，优化并生成高质量的视频总脚本。
-
-{video_params.to_prompt_context()}
-
-原始脚本:
-{original_script}{extra_instruction}
-
-请完成以下任务:
-1. 优化原始脚本，极大地丰富细节，使其更适合视频制作
-2. 设计{video_params.max_segment_duration}秒以内的转场，保障场景之间的连贯性
-3. 增强视觉描述，包括场景、动作、氛围等
-4. 确保整体风格与指定的美学风格一致
-
-注意：
-- 这是总脚本优化，不需要分片
-- 重点是丰富细节和提升质量
-- 保持原有的故事线和核心内容
-
-请直接返回优化后的完整脚本文本，不要JSON格式，不要其他说明。"""
+        # 提示词模板外置于 backend/prompts/optimize_script.md，可在网页上编辑
+        prompt = get_prompt_manager().render("optimize_script", {
+            "video_params_context": video_params.to_prompt_context(),
+            "original_script": original_script,
+            "extra_instruction": extra_instruction,
+            "max_segment_duration": video_params.max_segment_duration,
+        })
 
         logger.info("调用 LLM 优化脚本...")
         response_text = self._call_with_retry(prompt, temperature=0.7, operation_name="优化脚本")
         logger.info("脚本优化完成")
         return response_text.strip()
+
+    async def generate_mindmap(
+        self,
+        optimized_script: str,
+        video_params: VideoParams,
+        extra_prompt: str = ""
+    ) -> str:
+        """基于优化后的脚本生成剧本结构思维导图（markdown 层级文本）
+
+        思维导图以 markdown 标题层级表达剧本结构，供前端 markmap 渲染，
+        也作为后续素材图生成的结构化依据。
+
+        Args:
+            optimized_script: 优化后的脚本
+            video_params: 视频参数
+            extra_prompt: 额外的提示词
+
+        Returns:
+            思维导图 markdown 文本（# 标题为根，## 为分支，### 为子分支，- 为要点）
+        """
+        extra_instruction = ""
+        if extra_prompt:
+            extra_instruction = f"\n\n## 用户额外要求\n{extra_prompt}\n请在生成思维导图时充分考虑以上要求。"
+
+        # 提示词模板外置于 backend/prompts/mindmap.md，可在网页上编辑
+        prompt = get_prompt_manager().render("mindmap", {
+            "video_params_context": video_params.to_prompt_context(),
+            "optimized_script": optimized_script,
+            "extra_instruction": extra_instruction,
+        })
+
+        logger.info("调用 LLM 生成剧本思维导图...")
+        response_text = self._call_with_retry(prompt, temperature=0.5, operation_name="生成思维导图")
+        mindmap = response_text.strip()
+
+        # 去除 LLM 可能附加的代码块围栏
+        if mindmap.startswith("```"):
+            lines = mindmap.split("\n")
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            mindmap = "\n".join(lines).strip()
+
+        logger.info(f"思维导图生成完成（{len(mindmap)} 字符）")
+        return mindmap
 
     async def generate_segment_scripts(
         self,
@@ -139,6 +187,8 @@ class LLMService:
         extra_prompt: str = ""
     ) -> list[ScriptSegment]:
         """基于优化后的总脚本生成分片脚本（使用盛算云 API）
+
+        提示词模板外置于 backend/prompts/segment_scripts.md，可在网页上编辑。
 
         Args:
             optimized_script: 优化后的脚本
@@ -149,96 +199,12 @@ class LLMService:
         if extra_prompt:
             extra_instruction = f"\n\n## 用户额外要求\n{extra_prompt}\n请在生成分片时充分考虑以上要求。"
 
-        prompt = f"""你是一个专业的视频分镜专家。请根据以下优化后的视频脚本，生成专业详细的分片脚本。
-
-{video_params.to_prompt_context()}
-
-完整脚本:
-{optimized_script}{extra_instruction}
-
-基于"完整脚本"将脚本分割成多个分片，每个分片时长不超过{video_params.max_segment_duration}秒，不要过度分片，保障内容密度高，并为每个分片设计详细的拍摄参数。
-
-## 分片内容要求
-每个分片必须包含以下五个核心要素，内容要具体、生动、专业：
-
-**内容**：[描述这个镜头的具体内容，包括画面中的人物、场景、动作变化]
-- 明确描述画面中的主体（人物/物体）
-- 具体说明场景环境（时间、地点、光线条件）
-- 详细阐述动作变化过程（从开始到结束的状态变化）
-
-**动作**：[角色/物体的具体动作]
-- 人物：具体动作姿态、移动轨迹、表情变化
-- 物体：运动方式、速度、轨迹、状态变化
-- 要体现动作的连贯性和目的性
-
-**镜头运动**：[推荐的镜头运动方式]
-- 推：缓慢推进/快速推进，突出细节或情绪
-- 拉：缓慢拉出/快速拉出，展示环境或关系
-- 摇：水平摇摄/垂直摇摄，跟随主体或展示空间
-- 移：横移/纵移/环绕移动，创造动态视角
-- 升降：升高/降低，改变观察角度
-- 综合：多种运动的组合，如推+摇、移+升等
-
-**构图**：[推荐的构图方式]
-- 基础：中心构图、三分法、对称构图、对角线构图
-- 进阶：框架构图、引导线构图、留白构图、层次构图
-- 特殊：俯视构图、仰视构图、鸟瞰构图、微距构图
-- 要考虑主体位置、背景层次、画面平衡
-
-**氛围**：[画面的情感氛围]
-- 情绪基调：温馨、紧张、神秘、欢快、悲伤、庄严等
-- 视觉感受：明亮、昏暗、朦胧、清晰、压抑、开阔等
-- 心理暗示：安全感、不确定感、期待感、危机感等
-
-## 输出格式要求
-请以JSON格式返回结果，确保每个分片包含以下字段:
-{{
-    "segments": [
-        {{
-            "index": 0,
-            "content": "内容：描述这个镜头的具体内容，包括画面中的人物、场景、动作变化。动作：角色/物体的具体动作描述。镜头运动：推荐的镜头运动方式。构图：推荐的构图方式。氛围：画面的情感氛围描述。",
-            "duration": {video_params.max_segment_duration},
-            "action": "从内容中提取的动作关键词",
-            "camera_movement": "从内容中提取的镜头运动方式",
-            "composition": "从内容中提取的构图方式",
-            "focus": "对焦和镜头效果建议",
-            "atmosphere": "从内容中提取的氛围描述",
-            "transition": "与下一分片的转场方式",
-            "first_frame_mode": "generate 或 reuse_prev",
-            "last_frame_mode": "generate 或 reuse_next"
-        }}
-    ]
-}}
-
-重要 - 首尾帧生成模式（三种选择）:
-
-1. first_frame_mode（首帧模式）:
-   - "generate": 全新生成，与前一分片无关联（场景完全切换、或第一个分片）
-   - "generate_continuous": 需要生成，但要与前一分片尾帧保持视觉连贯（镜头切换但场景连续，如换角度拍同一场景）
-   - "reuse_prev": 100%复用前一分片尾帧（同一镜头的连续动作，画面完全相同）
-
-2. last_frame_mode（尾帧模式）:
-   - "generate": 全新生成（场景即将切换、或最后一个分片）
-   - "generate_continuous": 需要生成，但后一分片首帧会参考此帧保持连贯（镜头即将切换但场景连续）
-   - "reuse_next": 此帧会被下一分片100%复用（配合下一分片的 reuse_prev）
-
-三种选择指南:
-- 同一镜头连续动作 → reuse_prev / reuse_next（100%相同的图）
-- 换镜头但同场景（如切换拍摄角度）→ generate_continuous（需要连贯但画面不同）
-- 完全切换场景 → generate（无需连贯）
-
-注意:
-- 第一个分片的 first_frame_mode 必须是 "generate"
-- 最后一个分片的 last_frame_mode 必须是 "generate"
-- generate_continuous 比 reuse 更常用，因为大多数相邻分片需要连贯但不是完全相同
-
-其他注意事项:
-- 分片之间要保持故事连贯性
-- 转场要自然流畅
-- 每个分片的描述要足够详细，五个要素缺一不可
-- 所有参数要和总视频风格协调
-- content字段必须按顺序包含：内容、动作、镜头运动、构图、氛围
-- 仅返回JSON，不要包含其他内容"""
+        prompt = get_prompt_manager().render("segment_scripts", {
+            "video_params_context": video_params.to_prompt_context(),
+            "optimized_script": optimized_script,
+            "extra_instruction": extra_instruction,
+            "max_segment_duration": video_params.max_segment_duration,
+        })
 
         logger.info("调用 LLM 生成分片脚本...")
         # 分片脚本生成需要较大的输出空间，使用 16384 tokens
@@ -260,14 +226,14 @@ class LLMService:
     def _validate_frame_modes(self, segments: list[ScriptSegment]) -> list[ScriptSegment]:
         """校验并修正首尾帧模式，确保边界条件正确
 
-        有效的 first_frame_mode: "generate", "generate_continuous", "reuse_prev", "use_video_snapshot"
-        有效的 last_frame_mode: "generate", "generate_continuous", "reuse_next"
+        有效的 first_frame_mode: "generate", "generate_continuous", "reuse_prev", "use_video_snapshot", "all_reference"
+        有效的 last_frame_mode: "generate", "generate_continuous", "reuse_next", "all_reference"
         """
         if not segments:
             return segments
 
-        valid_first_modes = {"generate", "generate_continuous", "reuse_prev", "use_video_snapshot"}
-        valid_last_modes = {"generate", "generate_continuous", "reuse_next"}
+        valid_first_modes = {"generate", "generate_continuous", "reuse_prev", "use_video_snapshot", "all_reference"}
+        valid_last_modes = {"generate", "generate_continuous", "reuse_next", "all_reference"}
 
         # 规范化无效值
         for segment in segments:
@@ -310,11 +276,11 @@ class LLMService:
 
     async def generate_material_prompts(
         self,
-        optimized_script: str,
+        mindmap_markdown: str,
         video_params: VideoParams,
         extra_prompt: str = ""
     ) -> list[dict]:
-        """生成素材图片的提示词（基于优化后的总脚本）
+        """生成素材图片的提示词（基于剧本结构思维导图）
 
         生成"设定稿"风格的素材图，包含：
         1. 角色设定图：所有角色的多角度展示，带身高比例尺
@@ -322,7 +288,7 @@ class LLMService:
         3. 场景设定图：主要场景的概览
 
         Args:
-            optimized_script: 优化后的脚本
+            mindmap_markdown: 剧本结构思维导图（markdown 层级文本，步骤3产物）
             video_params: 视频参数
             extra_prompt: 额外的提示词，用于增加控制力（如：更鲜艳的颜色、卡通风格等）
         """
@@ -330,12 +296,16 @@ class LLMService:
         if extra_prompt:
             extra_instruction = f"\n\n## 用户额外要求\n{extra_prompt}\n请在生成素材图提示词时充分体现以上要求，将这些要求融入到每个 prompt 中。"
 
-        prompt = f"""你是一个专业的动画/影视概念设计师。请根据以下视频脚本，生成"设定稿/角色设定表"风格的素材图提示词。
+        prompt = f"""你是一个专业的动画/影视概念设计师。请根据以下剧本结构思维导图，生成"设定稿/角色设定表"风格的素材图提示词。
 
 {video_params.to_prompt_context()}
 
-完整脚本:
-{optimized_script}{extra_instruction}
+剧本结构思维导图（markdown 层级）:
+{mindmap_markdown}{extra_instruction}
+
+## 任务说明
+基于思维导图中的角色设定、场景设定、道具设定分支，生成2-6张"设定稿/角色设定表"风格的素材图提示词。
+思维导图中的视觉要点（外貌/服装/环境/光线/材质描述）应直接融入对应素材图的 prompt。
 
 ## 任务说明
 分析脚本中出现的所有视觉元素，生成2-6张"设定稿/角色设定表"风格的素材图提示词。
@@ -386,27 +356,27 @@ class LLMService:
     "prompts": [
         {{
             "type": "character_main",
-            "prompt": "[主角名称]的角色设定稿，多角度展示（正面、侧面、背面），[外貌描述]，[服装描述]，侧边带身高比例尺，角色设计参考图，{video_params.style}风格，白色背景",
+            "prompt": "[主角名称]的角色设定稿，多角度展示（正面、侧面、背面），[外貌描述]，[服装描述]，侧边带身高比例尺，角色设计参考图，白色背景",
             "description": "主要角色：[角色名称]，[简短描述]"
         }},
         {{
             "type": "character_minor",
-            "prompt": "次要角色设定稿，[配角描述]，简化的多角度展示，身高对比图，{video_params.style}风格，白色背景",
+            "prompt": "次要角色设定稿，[配角描述]，简化的多角度展示，身高对比图，白色背景",
             "description": "边缘角色：[角色列表]"
         }},
         {{
             "type": "props",
-            "prompt": "道具设定稿：[物品描述]，多角度展示，带尺寸标注，[材质和外观]，详细的正交视图，{video_params.style}风格，白色背景",
+            "prompt": "道具设定稿：[物品描述]，多角度展示，带尺寸标注，[材质和外观]，详细的正交视图，白色背景",
             "description": "重要道具：[物品列表]"
         }},
         {{
             "type": "environment_main",
-            "prompt": "场景概念设定稿：[场景描述]，带比例参考的布局概览，[光线和氛围]，关键区域标注，{video_params.style}风格",
+            "prompt": "场景概念设定稿：[场景描述]，带比例参考的布局概览，[光线和氛围]，关键区域标注",
             "description": "主场景：[场景名称]"
         }},
         {{
             "type": "environment_minor",
-            "prompt": "副场景设计稿：[副场景描述]，简化布局，背景参考图，{video_params.style}风格",
+            "prompt": "副场景设计稿：[副场景描述]，简化布局，背景参考图",
             "description": "副场景：[场景名称]"
         }}
     ]
@@ -438,7 +408,7 @@ class LLMService:
             logger.warning("无法解析素材图提示词JSON，使用默认提示词")
             # 使用简化的默认提示词，而不是原始响应文本
             prompts_data = [{
-                "prompt": f"高质量的{video_params.style}风格场景设定稿，细节丰富，专业设计",
+                "prompt": f"高质量的场景设定稿，细节丰富，专业设计",
                 "description": "默认素材图"
             }]
 
@@ -455,7 +425,7 @@ class LLMService:
         # 如果过滤后没有有效 prompt，使用默认值
         if not prompts:
             prompts = [{
-                "prompt": f"高质量的{video_params.style}风格场景设定稿，细节丰富，专业设计",
+                "prompt": f"高质量的场景设定稿，细节丰富，专业设计",
                 "description": "默认素材图",
                 "type": "general"
             }]
@@ -494,45 +464,17 @@ class LLMService:
         if extra_prompt:
             extra_instruction = f"\n用户额外要求: {extra_prompt}"
 
-        prompt = f"""你是一个专业的图片生成提示词专家。请为视频分片生成首帧和尾帧的图片提示词。
-
-## 图片生成基础参数（必须包含在每个提示词中）
-- 风格: {video_params.style}
-- 画面比例: {video_params.aspect_ratio}
-- 画质要求: 电影级画质，2K高清，细节丰富
-- 禁止元素: 绝对不能包含任何文字、标注、比例尺、尺寸标记、设计稿元素
-
-## 当前分片信息
-- 分片内容: {segment.content}
-- 动作描述: {segment.action}
-- 构图方式: {segment.composition}
-- 氛围: {segment.atmosphere}
-
-## 素材参考
-素材图描述: {material_description}
-（素材图用于保持角色/物品外观一致性，无需在提示词中重复描述角色外观细节）
-
-{continuity_hint}{extra_instruction}
-
-## 任务
-生成首帧和尾帧的图片提示词，两帧之间需要体现动作或状态明显的变化。
-
-## 提示词结构要求
-每个提示词应简洁聚焦，包含以下三部分：
-1. 【画面参数】风格、比例、画质要求（约20字）
-2. 【画面描述】当前帧的具体视觉内容：角色姿态、动作状态、场景环境、光线氛围（约50-80字）
-3. 【禁止项】明确禁止文字、标注等元素（约15字）
-
-## 示例格式
-"电影级画质，{video_params.style}风格，{video_params.aspect_ratio}画面。[具体的画面描述：谁在哪里做什么，什么姿态，什么光线氛围]。禁止出现任何文字、标注、比例尺。"
-
-返回JSON格式:
-{{
-    "first_frame": "首帧提示词（动作起始状态）",
-    "last_frame": "尾帧提示词（动作结束状态）"
-}}
-
-仅返回JSON，不要其他说明。"""
+        # 提示词模板外置于 backend/prompts/frame_prompts.md，可在网页上编辑
+        prompt = get_prompt_manager().render("frame_prompts", {
+            "aspect_ratio": video_params.aspect_ratio,
+            "segment_content": segment.content,
+            "segment_action": segment.action,
+            "segment_composition": segment.composition,
+            "segment_atmosphere": segment.atmosphere,
+            "material_description": material_description,
+            "continuity_hint": continuity_hint,
+            "extra_instruction": extra_instruction,
+        })
 
         logger.info(f"调用 LLM 生成分片 {segment.index} 首尾帧提示词...")
         response_text = self._call_with_retry(prompt, temperature=0.7, operation_name=f"生成分片{segment.index}首尾帧提示词")

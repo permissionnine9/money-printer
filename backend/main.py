@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
-from backend.api.v1 import sessions, steps, segments, frames, materials, uploads
+from backend.api.v1 import sessions, steps, segments, frames, materials, uploads, assets, models, prompts
 from backend.config import override_src_config
 
 # 配置日志
@@ -24,11 +24,10 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     # 启动时初始化
     print("FastAPI 应用启动")
-    
-    # 配置检查
+
+    # 打印实际生效的模型配置（模型管理默认配置 > 系统内置常量）
     override_src_config()
-    print(f"所有图片生成已统一使用: google/gemini-3-pro-image-preview")
-    
+
     yield
     # 关闭时清理
     print("FastAPI 应用关闭")
@@ -60,6 +59,9 @@ app.include_router(segments.router, prefix="/api/v1/segments", tags=["分片编�
 app.include_router(frames.router, prefix="/api/v1/frames", tags=["首尾帧管理"])
 app.include_router(materials.router, prefix="/api/v1/materials", tags=["素材图管理"])
 app.include_router(uploads.router, prefix="/api/v1/uploads", tags=["文件上传"])
+app.include_router(assets.router, prefix="/api/v1/assets", tags=["会话资产管理"])
+app.include_router(models.router, prefix="/api/v1/models", tags=["生图模型管理"])
+app.include_router(prompts.router, prefix="/api/v1/prompts", tags=["提示词管理"])
 
 
 @app.get("/")

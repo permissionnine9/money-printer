@@ -2,8 +2,8 @@
  * 步骤2：优化脚本
  */
 import React, { useState } from 'react'
-import { Card, Button, message, Spin, Typography, Modal, Input } from 'antd'
-import { ThunderboltOutlined, CheckCircleOutlined, RedoOutlined, ExclamationCircleOutlined, EditOutlined } from '@ant-design/icons'
+import { Card, Button, message, Spin, Typography, Modal, Input, Space } from 'antd'
+import { ThunderboltOutlined, CheckCircleOutlined, RedoOutlined, ExclamationCircleOutlined, EditOutlined, FileTextOutlined } from '@ant-design/icons'
 import type { SessionDetail } from '@/types'
 import { stepApi } from '@/api/client'
 import { useSessionStore } from '@/stores/sessionStore'
@@ -24,7 +24,7 @@ export const Step2Optimize: React.FC<Step2OptimizeProps> = ({ session }) => {
 
   // 获取步骤1的结果以显示分片时长
   const step1Result = session.step_results?.submit_script_and_params?.result_data
-  const maxSegmentDuration = step1Result?.video_params?.max_segment_duration || 8
+  const maxSegmentDuration = step1Result?.video_params?.max_segment_duration || 15
 
   // 检查前置步骤是否完成
   const canExecute = session.completed_steps?.includes('submit_script_and_params')
@@ -33,7 +33,7 @@ export const Step2Optimize: React.FC<Step2OptimizeProps> = ({ session }) => {
 
   // 获取已完成的后续步骤数量
   const completedSubsequentSteps = session.completed_steps?.filter(step =>
-    ['generate_material_images', 'generate_segment_scripts',
+    ['generate_mindmap', 'generate_material_images', 'generate_segment_scripts',
      'generate_segment_frames', 'generate_videos'].includes(step)
   ).length || 0
 
@@ -44,12 +44,12 @@ export const Step2Optimize: React.FC<Step2OptimizeProps> = ({ session }) => {
     setPromptModalVisible(true)
   }
 
-  // 执行优化（带可选的自定义提示词）
-  const executeOptimize = async (prompt?: string) => {
+  // 执行优化（带可选的自定义提示词；useOriginal=true 直接采用原始脚本）
+  const executeOptimize = async (prompt?: string, useOriginal?: boolean) => {
     setLoading(true)
     setPromptModalVisible(false)
     try {
-      const response = await stepApi.optimizeScript(session.session_id, prompt || undefined)
+      const response = await stepApi.optimizeScript(session.session_id, prompt || undefined, useOriginal)
       if (response.success) {
         message.success(response.message)
         await refreshSession()
@@ -63,12 +63,12 @@ export const Step2Optimize: React.FC<Step2OptimizeProps> = ({ session }) => {
     }
   }
 
-  // 执行重新优化（带可选的自定义提示词）
-  const executeReoptimize = async (prompt?: string) => {
+  // 执行重新优化（带可选的自定义提示词；useOriginal=true 直接采用原始脚本）
+  const executeReoptimize = async (prompt?: string, useOriginal?: boolean) => {
     setLoading(true)
     setPromptModalVisible(false)
     try {
-      const response = await stepApi.reoptimizeScript(session.session_id, prompt || undefined)
+      const response = await stepApi.reoptimizeScript(session.session_id, prompt || undefined, useOriginal)
       if (response.success) {
         message.success(response.message)
         await refreshSession()
@@ -80,6 +80,11 @@ export const Step2Optimize: React.FC<Step2OptimizeProps> = ({ session }) => {
     } finally {
       setLoading(false)
     }
+  }
+
+  // 直接采用原始脚本（仅覆盖步骤2结果，不清空后续步骤）
+  const handleUseOriginal = () => {
+    executeOptimize(undefined, true)
   }
 
   // 处理弹窗确认
@@ -94,10 +99,11 @@ export const Step2Optimize: React.FC<Step2OptimizeProps> = ({ session }) => {
             <div>
               <p>重新优化将清空后续 {completedSubsequentSteps} 个已完成的步骤数据：</p>
               <ul>
-                {session.completed_steps?.includes('generate_material_images') && <li>步骤3：生成素材图</li>}
-                {session.completed_steps?.includes('generate_segment_scripts') && <li>步骤4：生成分片脚本</li>}
-                {session.completed_steps?.includes('generate_segment_frames') && <li>步骤5：生成首尾帧</li>}
-                {session.completed_steps?.includes('generate_videos') && <li>步骤6：生成视频</li>}
+                {session.completed_steps?.includes('generate_mindmap') && <li>步骤3：生成思维导图</li>}
+                {session.completed_steps?.includes('generate_material_images') && <li>步骤4：生成素材图</li>}
+                {session.completed_steps?.includes('generate_segment_scripts') && <li>步骤5：生成分片脚本</li>}
+                {session.completed_steps?.includes('generate_segment_frames') && <li>步骤6：生成首尾帧</li>}
+                {session.completed_steps?.includes('generate_videos') && <li>步骤7：生成视频</li>}
               </ul>
               <p>此操作不可撤销，是否继续？</p>
             </div>
@@ -176,14 +182,23 @@ export const Step2Optimize: React.FC<Step2OptimizeProps> = ({ session }) => {
           }
           style={{ marginTop: 16 }}
           extra={
-            <Button
-              type="primary"
-              icon={<RedoOutlined />}
-              onClick={handleReoptimize}
-              loading={loading}
-            >
-              重新优化
-            </Button>
+            <Space>
+              <Button
+                icon={<FileTextOutlined />}
+                onClick={handleUseOriginal}
+                loading={loading}
+              >
+                采用原始脚本
+              </Button>
+              <Button
+                type="primary"
+                icon={<RedoOutlined />}
+                onClick={handleReoptimize}
+                loading={loading}
+              >
+                重新优化
+              </Button>
+            </Space>
           }
         >
           <div style={{ marginBottom: 16 }}>
@@ -224,15 +239,25 @@ export const Step2Optimize: React.FC<Step2OptimizeProps> = ({ session }) => {
           <Text>LLM 将优化您的脚本，丰富细节，设计{maxSegmentDuration}秒以内的转场分片。</Text>
         </div>
         <Spin spinning={loading}>
-          <Button
-            type="primary"
-            icon={<ThunderboltOutlined />}
-            onClick={handleOptimize}
-            loading={loading}
-            size="large"
-          >
-            开始优化脚本
-          </Button>
+          <Space>
+            <Button
+              type="primary"
+              icon={<ThunderboltOutlined />}
+              onClick={handleOptimize}
+              loading={loading}
+              size="large"
+            >
+              开始优化脚本
+            </Button>
+            <Button
+              icon={<FileTextOutlined />}
+              onClick={() => executeOptimize(undefined, true)}
+              loading={loading}
+              size="large"
+            >
+              直接采用原始脚本
+            </Button>
+          </Space>
         </Spin>
       </Card>
       {promptModal}

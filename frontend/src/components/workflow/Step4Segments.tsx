@@ -51,7 +51,7 @@ export const Step4Segments: React.FC<Step4SegmentsProps> = ({ session }) => {
 
   // 获取步骤1的结果以显示分片时长
   const step1Result = session.step_results?.submit_script_and_params?.result_data
-  const maxSegmentDuration = step1Result?.video_params?.max_segment_duration || 8
+  const maxSegmentDuration = step1Result?.video_params?.max_segment_duration || 15
   const [isRegenerate, setIsRegenerate] = useState(false)
   const [addModalVisible, setAddModalVisible] = useState(false)
   const [insertAfterIndex, setInsertAfterIndex] = useState<number>(-1)
@@ -131,8 +131,8 @@ export const Step4Segments: React.FC<Step4SegmentsProps> = ({ session }) => {
             <div>
               <p>重新生成将清空后续 {completedSubsequentSteps} 个已完成的步骤数据：</p>
               <ul>
-                {session.completed_steps?.includes('generate_segment_frames') && <li>步骤5：生成首尾帧</li>}
-                {session.completed_steps?.includes('generate_videos') && <li>步骤6：生成视频</li>}
+                {session.completed_steps?.includes('generate_segment_frames') && <li>步骤6：生成首尾帧</li>}
+                {session.completed_steps?.includes('generate_videos') && <li>步骤7：生成视频</li>}
               </ul>
               <p>此操作不可撤销，是否继续？</p>
             </div>
@@ -431,10 +431,10 @@ export const Step4Segments: React.FC<Step4SegmentsProps> = ({ session }) => {
       confirmLoading={batchLoading}
       cancelButtonProps={{ disabled: batchLoading }}
       closable={!batchLoading}
-      maskClosable={!batchLoading}
+      mask={{ closable: !batchLoading }}
       width={700}
     >
-      <Spin spinning={batchLoading} tip="正在批量修改分片...">
+      <Spin spinning={batchLoading} description="正在批量修改分片...">
         <div style={{ marginBottom: 16 }}>
           <Text strong>已选中 {selectedIndices.length} 个分片：</Text>
           <div style={{ marginTop: 8, padding: 12, background: '#f5f5f5', borderRadius: 4, maxHeight: 200, overflow: 'auto' }}>

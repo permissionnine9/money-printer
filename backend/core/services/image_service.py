@@ -29,9 +29,41 @@ IMAGE_COMPRESS_QUALITY = 85    # JPEG 压缩质量（1-100）
 class ImageService:
     """图片生成服务类 - 使用胜算云 API"""
 
-    def __init__(self, api_key: str = SHENGSUANYUN_API_KEY):
+    def __init__(self, api_key: str = SHENGSUANYUN_API_KEY, base_url: str | None = None, image_model: str | None = None):
         self._api_key = api_key
-        self._base_url = SHENGSUANYUN_BASE_URL
+        self._base_url = base_url or SHENGSUANYUN_BASE_URL
+        # 实例级默认模型（模型管理配置注入；未指定时使用系统默认 SHENGSUANYUN_IMAGE_MODEL）
+        self._image_model = image_model
+        # OpenAI 标准图片协议（/images/generations）同步结果的缓存 {request_id: image_url}
+        self._sync_results: dict[str, str] = {}
+
+    def _is_shengsuanyun(self) -> bool:
+        """是否走盛算云 tasks 协议（非盛算云 base_url 走 OpenAI 标准图片协议）"""
+        return "shengsuanyun.com" in self._base_url
+
+    @staticmethod
+    def _get_openai_image_size(video_params: "VideoParams") -> str:
+        """按视频宽高比与分辨率选择 OpenAI 图片协议推荐尺寸
+
+        依据 pucoding.com Image API 规则：宽高必须是 16 的倍数
+        （例如 16:9 下 1920x1080 无效，需用 1920x1088）。
+        """
+        # 各宽高比下（按分辨率从低到高）的合法尺寸
+        size_table = {
+            "16:9": ["1280x720", "1920x1088", "2560x1440", "3840x2160"],
+            "9:16": ["720x1280", "1088x1920", "1440x2560", "2160x3840"],
+            "1:1": ["1024x1024", "1536x1536", "2048x2048"],
+            "4:3": ["1024x768", "1280x960", "2048x1536"],
+            "3:2": ["1536x1024", "1920x1280", "3072x2048"],
+            "2:3": ["1024x1536", "1280x1920", "2048x3072"],
+            "21:9": ["3440x1440", "3840x1600"],
+        }
+        sizes = size_table.get(video_params.aspect_ratio, size_table["16:9"])
+
+        # 分辨率档位映射到尺寸档位
+        res = (video_params.resolution or "720p").lower()
+        level = {"720p": 0, "1080p": 1, "2k": 2, "4k": 3}.get(res, 0)
+        return sizes[min(level, len(sizes) - 1)]
 
     def _get_size(self, resolution: str) -> str:
         """根据分辨率获取 gemini-3-pro-image-preview 的尺寸参数
@@ -287,92 +319,26 @@ class ImageService:
         prompt: str,
         video_params: VideoParams,
         timeout: int = 150,
-        poll_interval: int = 3
+        poll_interval: int = 3,
+        model: str | None = None
     ) -> dict:
-        """生成图片（文生图）
+        """生成图片（文生图）- 复用统一的 submit_image_task 双协议链路
 
         Args:
             prompt: 图片提示词
             video_params: 视频参数
             timeout: 超时时间（秒）
             poll_interval: 轮询间隔（秒）
+            model: 使用的模型（可选，默认实例配置模型或系统默认）
 
         Returns:
             {"success": bool, "image_url": str, "error": str}
         """
-        size = self._get_size(video_params.resolution)
+        submit_result = await self.submit_image_task(prompt, video_params, model=model)
+        if not submit_result.get("success"):
+            return submit_result
 
-        url = f"{self._base_url}/tasks/generations"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self._api_key}",
-        }
-        payload = {
-            "model": SHENGSUANYUN_IMAGE_MODEL,
-            "prompt": prompt,
-            "size": size,
-            "aspect_ratio": video_params.aspect_ratio,
-        }
-
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                logger.info(f"[文生图] 使用模型: {SHENGSUANYUN_IMAGE_MODEL}")
-                logger.info(f"提交图片生成任务: {prompt[:50]}...")
-                response = await client.post(url, json=payload, headers=headers)
-
-                if response.status_code not in (200, 201, 202):
-                    logger.error(f"图片生成失败: HTTP {response.status_code} - {response.text}")
-                    return {"success": False, "error": f"HTTP {response.status_code}"}
-
-                result = response.json()
-                logger.info(f"提交响应: {result}")
-
-                data = result.get('data')
-                if isinstance(data, dict):
-                    request_id = data.get('request_id')
-                else:
-                    request_id = result.get('request_id') or result.get('id') or result.get('task_id')
-
-                if not request_id:
-                    logger.error(f"无法获取任务ID: {result}")
-                    return {"success": False, "error": "无法获取任务ID"}
-
-                logger.info(f"获得任务ID: {request_id}，开始轮询...")
-
-                elapsed = 0
-                while elapsed < timeout:
-                    await asyncio.sleep(poll_interval)
-                    elapsed += poll_interval
-
-                    query_result = await self.query_task_result(request_id)
-                    status = query_result.get("status")
-
-                    if query_result.get("success"):
-                        image_url = query_result.get("image_url")
-                        logger.info(f"任务完成，图片URL: {image_url}")
-                        return {"success": True, "image_url": image_url}
-
-                    if status == "failed":
-                        logger.error(f"任务失败: {query_result.get('error')}")
-                        return {"success": False, "error": query_result.get("error", "任务失败")}
-
-                    if status == "completed":
-                        logger.error(f"任务已完成但处理失败: {query_result.get('error')}")
-                        return {"success": False, "error": query_result.get("error", "图片URL提取失败")}
-
-                    if status == "pending":
-                        logger.info(f"任务处理中... ({elapsed}s/{timeout}s)")
-                        continue
-
-                    logger.warning(f"未知状态: {status}，返回错误")
-                    return {"success": False, "error": f"未知状态: {status}"}
-
-                logger.error(f"任务超时 ({timeout}s)")
-                return {"success": False, "error": f"任务超时 ({timeout}s)"}
-
-        except Exception as e:
-            logger.error(f"图片生成异常: {e}")
-            return {"success": False, "error": str(e)}
+        return await self.poll_i2i_task(submit_result["request_id"], timeout, poll_interval)
 
     async def submit_image_task(
         self,
@@ -395,7 +361,15 @@ class ImageService:
             {"success": bool, "request_id": str, "error": str}
         """
         size = self._get_size(video_params.resolution)
-        use_model = model or SHENGSUANYUN_IMAGE_MODEL
+        use_model = model or self._image_model or SHENGSUANYUN_IMAGE_MODEL
+
+        # 非盛算云服务：走 OpenAI 标准图片协议（同步生成，结果缓存后由 poll 取回）
+        if not self._is_shengsuanyun():
+            return await self._submit_openai_image_task(
+                styled_prompt=prompt, use_model=use_model,
+                video_params=video_params, reference_images=reference_images,
+                compress_reference=compress_reference,
+            )
 
         # 处理参考图
         images_data = []
@@ -479,6 +453,132 @@ class ImageService:
             return {"success": False, "error": "没有有效的参考图"}
         return await self.submit_image_task(prompt, video_params, reference_images, model=model, compress_reference=compress_reference)
 
+    async def _submit_openai_image_task(
+        self,
+        styled_prompt: str,
+        use_model: str,
+        video_params: "VideoParams",
+        reference_images: list[str] | None,
+        compress_reference: bool,
+    ) -> dict:
+        """OpenAI 标准图片协议提交（同步生成，参考 pucoding.com Image API 文档）
+
+        文生图: POST /images/generations (JSON)
+        图生图: POST /images/edits (multipart，image 字段可重复 1-4 张参考图)
+
+        同步接口无任务ID可轮询：生成 request_id 缓存结果，
+        上层 poll_i2i_task 命中缓存后直接返回。
+
+        Returns:
+            {"success": bool, "request_id": str, "error": str}
+        """
+        import uuid as _uuid
+        request_id = f"openai-{_uuid.uuid4().hex[:12]}"
+
+        openai_size = self._get_openai_image_size(video_params)
+
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(300.0)) as client:
+                # 部分服务存在间歇性分组路由问题（404/502），做轻量重试
+                max_attempts = 3
+                response = None
+                for attempt in range(max_attempts):
+                    if reference_images:
+                        # 图生图：/images/edits multipart（image 字段可重复，最多 4 张参考图）
+                        files = []
+                        for ref in reference_images[:4]:
+                            img_bytes, mime = await self._load_reference_bytes(ref, compress_reference)
+                            if img_bytes is not None:
+                                files.append(("image", ("reference.png", img_bytes, mime or "image/png")))
+                        if not files:
+                            return {"success": False, "error": f"参考图无法读取: {reference_images[0]}"}
+
+                        response = await client.post(
+                            f"{self._base_url}/images/edits",
+                            headers=headers,
+                            data={
+                                "model": use_model, "prompt": styled_prompt, "size": openai_size,
+                                "n": 1, "quality": "auto", "response_format": "b64_json",
+                            },
+                            files=files,
+                        )
+                    else:
+                        # 文生图：/images/generations JSON
+                        response = await client.post(
+                            f"{self._base_url}/images/generations",
+                            headers={**headers, "Content-Type": "application/json"},
+                            json={
+                                "model": use_model, "prompt": styled_prompt, "size": openai_size,
+                                "n": 1, "quality": "auto", "response_format": "b64_json",
+                            },
+                        )
+
+                    if response.status_code == 200:
+                        break
+                    if attempt < max_attempts - 1 and response.status_code in (404, 429, 500, 502, 503):
+                        logger.warning(f"[OpenAI图片] HTTP {response.status_code}，{5 * (attempt + 1)}s 后重试 ({attempt + 2}/{max_attempts})")
+                        await asyncio.sleep(5 * (attempt + 1))
+                    else:
+                        break
+
+                if response.status_code != 200:
+                    error_text = response.text[:300]
+                    logger.error(f"[OpenAI图片] 提交失败 HTTP {response.status_code}: {error_text}")
+                    return {"success": False, "error": f"HTTP {response.status_code}: {error_text}"}
+
+                data = response.json()
+                item = (data.get("data") or [{}])[0]
+                image_url = item.get("url") or ""
+
+                # b64_json 响应：落盘到 static/images/ 返回相对路径
+                if not image_url and item.get("b64_json"):
+                    import base64 as _b64
+                    img_dir = Path("static/images")
+                    img_dir.mkdir(parents=True, exist_ok=True)
+                    fname = f"openai_{_uuid.uuid4().hex[:8]}.png"
+                    (img_dir / fname).write_bytes(_b64.b64decode(item["b64_json"]))
+                    image_url = str(img_dir / fname)
+
+                if not image_url:
+                    return {"success": False, "error": f"响应中无图片: {str(data)[:300]}"}
+
+                # 缓存同步结果，供 poll_i2i_task 取回
+                self._sync_results[request_id] = image_url
+                logger.info(f"[OpenAI图片] 生成成功 [{request_id}]: {image_url[:80]}")
+                return {"success": True, "request_id": request_id}
+
+        except Exception as e:
+            logger.error(f"[OpenAI图片] 提交异常: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def _load_reference_bytes(self, image_path: str, compress: bool) -> tuple[bytes | None, str | None]:
+        """读取参考图为字节（支持本地路径与 URL），可选压缩"""
+        try:
+            if image_path.startswith(("http://", "https://")):
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    resp = await client.get(image_path)
+                    resp.raise_for_status()
+                    data = resp.content
+            else:
+                path = Path(image_path)
+                if not path.is_absolute():
+                    root = Path(__file__).parent.parent.parent.parent
+                    path = root / image_path
+                if not path.exists():
+                    logger.warning(f"参考图不存在: {path}")
+                    return None, None
+                data = path.read_bytes()
+
+            if compress:
+                data, mime = self._compress_image(data)
+                return data, mime
+            return data, mimetypes.guess_type(image_path)[0] or "image/png"
+        except Exception as e:
+            logger.error(f"读取参考图失败 {image_path}: {e}")
+            return None, None
+
     async def poll_i2i_task(
         self,
         request_id: str,
@@ -495,6 +595,11 @@ class ImageService:
         Returns:
             {"success": bool, "image_url": str, "error": str}
         """
+        # OpenAI 同步协议：命中缓存直接返回
+        if request_id in self._sync_results:
+            image_url = self._sync_results.pop(request_id)
+            return {"success": True, "image_url": image_url}
+
         elapsed = 0
         while elapsed < timeout:
             await asyncio.sleep(poll_interval)
@@ -565,7 +670,7 @@ class ImageService:
         timeout: int = 150,
         poll_interval: int = 5
     ) -> dict:
-        """生成单张图片（支持可选的参考图）
+        """生成单张图片（支持可选的参考图）- 复用统一的 submit_image_task 双协议链路
 
         统一的方法：有参考图时使用图生图，无参考图时使用文生图
 
@@ -579,95 +684,11 @@ class ImageService:
         Returns:
             {"success": bool, "image_url": str, "error": str}
         """
-        size = self._get_size(video_params.resolution)
+        submit_result = await self.submit_image_task(prompt, video_params, reference_images)
+        if not submit_result.get("success"):
+            return submit_result
 
-        # 处理参考图
-        images_data = []
-        if reference_images:
-            for img_path in reference_images:
-                img_data = self._image_to_base64(img_path)
-                if img_data:
-                    images_data.append(img_data)
-                else:
-                    logger.warning(f"跳过无效的参考图: {img_path}")
-
-        url = f"{self._base_url}/tasks/generations"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self._api_key}",
-        }
-        payload = {
-            "model": SHENGSUANYUN_IMAGE_MODEL,
-            "prompt": f"基于提示词生成一张图片：{prompt}",
-            "size": size,
-            "aspect_ratio": video_params.aspect_ratio,
-        }
-        # 如果有参考图，添加到请求中
-        mode = "图生图" if images_data else "文生图"
-        logger.info(f"[{mode}] 使用模型: {SHENGSUANYUN_IMAGE_MODEL}")
-        if images_data:
-            payload["images"] = images_data
-            logger.info(f"提交图片生成任务 (图生图): {prompt[:50]}... (参考图: {len(images_data)}张)")
-        else:
-            logger.info(f"提交图片生成任务 (文生图): {prompt[:50]}...")
-
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.post(url, json=payload, headers=headers)
-
-                if response.status_code not in (200, 201, 202):
-                    logger.error(f"图片生成失败: HTTP {response.status_code} - {response.text}")
-                    return {"success": False, "error": f"HTTP {response.status_code}"}
-
-                result = response.json()
-                logger.info(f"提交响应: {result}")
-
-                data = result.get('data')
-                if isinstance(data, dict):
-                    request_id = data.get('request_id')
-                else:
-                    request_id = result.get('request_id') or result.get('id') or result.get('task_id')
-
-                if not request_id:
-                    logger.error(f"无法获取任务ID: {result}")
-                    return {"success": False, "error": "无法获取任务ID"}
-
-                logger.info(f"获得任务ID: {request_id}，开始轮询...")
-
-                elapsed = 0
-                while elapsed < timeout:
-                    await asyncio.sleep(poll_interval)
-                    elapsed += poll_interval
-
-                    query_result = await self.query_task_result(request_id)
-                    status = query_result.get("status")
-
-                    if query_result.get("success"):
-                        image_url = query_result.get("image_url")
-                        logger.info(f"图片生成完成，URL: {image_url}")
-                        return {"success": True, "image_url": image_url}
-
-                    if status == "failed":
-                        logger.error(f"任务失败: {query_result.get('error')}")
-                        return {"success": False, "error": query_result.get("error", "任务失败")}
-
-                    if status == "completed":
-                        logger.error(f"图片已完成但处理失败: {query_result.get('error')}")
-                        return {"success": False, "error": query_result.get("error", "图片URL提取失败")}
-
-                    if status == "pending":
-                        logger.info(f"任务处理中... ({elapsed}s/{timeout}s)")
-                        continue
-
-                    logger.warning(f"未知状态: {status}，返回错误")
-                    return {"success": False, "error": f"未知状态: {status}"}
-
-                logger.error(f"任务超时 ({timeout}s)")
-                return {"success": False, "error": f"任务超时 ({timeout}s)"}
-
-        except Exception as e:
-            logger.error(f"图片生成异常: {e}")
-            return {"success": False, "error": str(e)}
+        return await self.poll_i2i_task(submit_result["request_id"], timeout, poll_interval)
 
     async def generate_material_images(
         self,
@@ -846,7 +867,7 @@ class ImageService:
         Returns:
             构建好的完整提示词
         """
-        styled_prompt = f"{prompt}，{video_params.style}风格，高质量"
+        styled_prompt = f"{prompt}，高质量"
 
         frame_context = ""
         if frame_type == "first":
@@ -894,7 +915,7 @@ class ImageService:
         Returns:
             (image_id, image_url)
         """
-        styled_prompt = f"{prompt}，{video_params.style}风格，高质量"
+        styled_prompt = f"{prompt}，高质量"
         use_i2i = reference_images and len(reference_images) > 0
 
         try:
