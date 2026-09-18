@@ -1,16 +1,13 @@
 /**
- * 创作工作流页面（7 步向导）
+ * 创作工作流页面（4 步向导）
  */
 import { useEffect, useCallback } from 'react'
 import { message } from 'antd'
 import {
   StepNavigator,
-  Step1Script,
-  Step2Optimize,
-  Step3Mindmap,
-  Step3Materials,
-  Step4Segments,
-  Step5Frames,
+  StepSelectEpisode,
+  StepStoryboardOutline,
+  StepSegmentManagement,
   Step6Videos,
 } from '@/components/workflow'
 import { useSessionStore } from '@/stores/sessionStore'
@@ -56,7 +53,6 @@ function WorkflowPage() {
   useEffect(() => {
     const sessionId = getSessionIdFromUrl()
     if (sessionId) {
-      console.log('从 URL 恢复会话:', sessionId)
       loadSession(sessionId)
     }
     // 只在组件挂载时执行一次
@@ -70,12 +66,14 @@ function WorkflowPage() {
     }
   }, [currentSession?.session_id, updateUrlSessionId])
 
-  // 同步会话的当前步骤到 workflowStore
+  // 同步会话的当前步骤到 workflowStore（仅在会话切换时；与剧本侧一致，
+  // 生成完成推进 current_step 不打断用户正在浏览的步骤）
   useEffect(() => {
     if (currentSession) {
       setCurrentStep(currentSession.current_step)
     }
-  }, [currentSession?.session_id, currentSession?.current_step, setCurrentStep])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentSession?.session_id])
 
   return (
     <div style={{ maxWidth: 1400, margin: '0 auto' }}>
@@ -88,14 +86,11 @@ function WorkflowPage() {
             onStepChange={setCurrentStep}
           />
 
-          {/* 步骤内容区域（7 步：+思维导图，素材图/分片/首尾帧/视频顺延） */}
-          {currentStep === 0 && <Step1Script session={currentSession} />}
-          {currentStep === 1 && <Step2Optimize session={currentSession} />}
-          {currentStep === 2 && <Step3Mindmap session={currentSession} />}
-          {currentStep === 3 && <Step3Materials session={currentSession} />}
-          {currentStep === 4 && <Step4Segments session={currentSession} />}
-          {currentStep === 5 && <Step5Frames session={currentSession} />}
-          {currentStep === 6 && <Step6Videos session={currentSession} />}
+          {/* 步骤内容区域（4 步：从剧本选集 → 分镜大纲 → 分镜管理 → 视频） */}
+          {currentStep === 0 && <StepSelectEpisode session={currentSession} />}
+          {currentStep === 1 && <StepStoryboardOutline session={currentSession} />}
+          {currentStep === 2 && <StepSegmentManagement session={currentSession} />}
+          {currentStep === 3 && <Step6Videos session={currentSession} />}
         </>
       )}
 
@@ -103,7 +98,9 @@ function WorkflowPage() {
       {!currentSession && !loading && (
         <div style={{ textAlign: 'center', padding: '80px 0' }}>
           <h2>欢迎使用 AI 视频创作智能体</h2>
-          <p style={{ color: '#888' }}>从左侧会话管理中新建或选择一个会话开始创作</p>
+          <p style={{ color: '#888' }}>
+            从左侧会话管理中新建一个视频会话即可开始创作（新会话将自动从剧本选集开始）
+          </p>
         </div>
       )}
     </div>

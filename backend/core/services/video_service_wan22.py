@@ -87,6 +87,9 @@ class VideoServiceWan22:
             resolution: 分辨率（720P 或 1080P）
             duration: 视频时长（5 或 10 秒）
         """
+        if not self.api_key:
+            raise ValueError("视频服务 API Key 未配置：请在服务端设置环境变量 SHENGSUANYUN_API_KEY")
+
         url = f"{self.base_url}/tasks/generations"
 
         headers = {

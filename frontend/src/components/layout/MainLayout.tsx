@@ -1,79 +1,98 @@
 /**
- * 主布局组件：顶部导航 + 左侧会话管理（仅工作流页）+ 内容区
+ * 主布局组件：顶部导航 + 左侧会话管理（视频 / 剧本两页各自渲染）+ 内容区
  */
-import React, { useEffect, useState } from 'react'
-import { Layout, Menu, Button, Tag, Popconfirm, Tooltip, Typography, Empty, Spin } from 'antd'
+import React, { useCallback, useEffect, useState } from 'react'
+import { Layout, Menu } from 'antd'
 import {
-  PlusOutlined,
-  ReloadOutlined,
-  DeleteOutlined,
   VideoCameraOutlined,
   AppstoreOutlined,
   FileTextOutlined,
+  FormOutlined,
 } from '@ant-design/icons'
 import { useLocation, useNavigate } from 'react-router-dom'
-import type { Session } from '@/types'
-import { sessionApi } from '@/api/client'
+import { SessionSider } from '@/components/common/SessionSider'
+import type { Session, ScriptSessionDetail } from '@/types'
+import { sessionApi, scriptSessionApi } from '@/api/client'
 import { useSessionStore } from '@/stores/sessionStore'
+import { useScriptSessionStore } from '@/stores/scriptSessionStore'
 import styles from './MainLayout.module.css'
 
 const { Header, Sider, Content, Footer } = Layout
-const { Text } = Typography
 
 interface MainLayoutProps {
   children: React.ReactNode
 }
 
-// 会话状态标签颜色映射
-const statusColor = (status: string) => {
-  if (status === 'completed') return 'success'
-  if (status === 'error') return 'error'
-  return 'processing'
+// 会话跳转：地址栏带 session_id 并整页刷新（与现有模式一致）
+function navigateWithSession(sessionId: string) {
+  const url = new URL(window.location.href)
+  url.searchParams.set('session_id', sessionId)
+  window.location.href = url.toString()
 }
 
 export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   const location = useLocation()
   const navigate = useNavigate()
   const isWorkflowPage = location.pathname === '/'
-  const [sessions, setSessions] = useState<Session[]>([])
-  const [loadingSessions, setLoadingSessions] = useState(false)
-  const currentSession = useSessionStore((state) => state.currentSession)
+  const isScriptPage = location.pathname === '/script'
 
-  // 加载会话列表
-  const loadSessions = async () => {
-    setLoadingSessions(true)
+  // 视频会话
+  const currentSession = useSessionStore((state) => state.currentSession)
+  const [videoSessions, setVideoSessions] = useState<Session[]>([])
+  const [loadingVideoSessions, setLoadingVideoSessions] = useState(false)
+  const [creatingVideoSession, setCreatingVideoSession] = useState(false)
+
+  // 剧本会话
+  const currentScriptSession = useScriptSessionStore((state) => state.currentSession)
+  const [scriptSessions, setScriptSessions] = useState<ScriptSessionDetail[]>([])
+  const [loadingScriptSessions, setLoadingScriptSessions] = useState(false)
+  const [creatingScriptSession, setCreatingScriptSession] = useState(false)
+
+  const loadVideoSessions = useCallback(async () => {
+    setLoadingVideoSessions(true)
     try {
       const result = await sessionApi.list()
-      setSessions(result.sessions || [])
+      // 旧版 7 步会话不兼容新工作流，隐藏
+      setVideoSessions((result.sessions || []).filter((s) => !s.legacy))
     } catch {
       // 静默失败，侧边栏显示空态
     } finally {
-      setLoadingSessions(false)
+      setLoadingVideoSessions(false)
     }
-  }
+  }, [])
+
+  const loadScriptSessions = useCallback(async () => {
+    setLoadingScriptSessions(true)
+    try {
+      const result = await scriptSessionApi.list()
+      setScriptSessions(result.sessions || [])
+    } catch {
+      // 静默失败
+    } finally {
+      setLoadingScriptSessions(false)
+    }
+  }, [])
 
   useEffect(() => {
-    if (isWorkflowPage) {
-      loadSessions()
+    if (isWorkflowPage) loadVideoSessions()
+  }, [isWorkflowPage, currentSession?.session_id, loadVideoSessions])
+
+  useEffect(() => {
+    if (isScriptPage) loadScriptSessions()
+  }, [isScriptPage, currentScriptSession?.session_id, loadScriptSessions])
+
+  // ==================== 视频会话操作 ====================
+  const handleCreateVideoSession = async () => {
+    setCreatingVideoSession(true)
+    try {
+      const session = await sessionApi.create()
+      navigateWithSession(session.session_id)
+    } catch {
+      setCreatingVideoSession(false)
     }
-  }, [isWorkflowPage, currentSession?.session_id])
-
-  // 点击会话：地址栏带上 session_id 并刷新网页
-  const handleSelectSession = (sessionId: string) => {
-    const url = new URL(window.location.href)
-    url.searchParams.set('session_id', sessionId)
-    window.location.href = url.toString()
   }
 
-  // 新建会话：创建后地址栏带 session_id 并整页刷新
-  const handleCreateSession = async () => {
-    const session = await sessionApi.create()
-    const url = new URL(window.location.href)
-    url.searchParams.set('session_id', session.session_id)
-    window.location.href = url.toString()
-  }
-
-  const handleDeleteSession = async (sessionId: string) => {
+  const handleDeleteVideoSession = async (sessionId: string) => {
     try {
       await sessionApi.delete(sessionId)
       if (currentSession?.session_id === sessionId) {
@@ -82,14 +101,41 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
         window.location.href = url.toString()
         return
       }
-      await loadSessions()
+      await loadVideoSessions()
+    } catch {
+      // ignore
+    }
+  }
+
+  // ==================== 剧本会话操作 ====================
+  const handleCreateScriptSession = async () => {
+    setCreatingScriptSession(true)
+    try {
+      const session = await scriptSessionApi.create()
+      navigateWithSession(session.session_id)
+    } catch {
+      setCreatingScriptSession(false)
+    }
+  }
+
+  const handleDeleteScriptSession = async (sessionId: string) => {
+    try {
+      await scriptSessionApi.delete(sessionId)
+      if (currentScriptSession?.session_id === sessionId) {
+        const url = new URL(window.location.href)
+        url.searchParams.delete('session_id')
+        window.location.href = url.toString()
+        return
+      }
+      await loadScriptSessions()
     } catch {
       // ignore
     }
   }
 
   const navItems = [
-    { key: '/', icon: <VideoCameraOutlined />, label: '创作工作流' },
+    { key: '/script', icon: <FormOutlined />, label: '创作剧本' },
+    { key: '/', icon: <VideoCameraOutlined />, label: '视频生成工作流' },
     { key: '/models', icon: <AppstoreOutlined />, label: '模型管理' },
     { key: '/prompts', icon: <FileTextOutlined />, label: '提示词管理' },
   ]
@@ -104,91 +150,44 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           selectedKeys={[location.pathname]}
           items={navItems}
           onClick={({ key }) => navigate(key)}
-          style={{ marginLeft: 48, background: 'transparent', borderBottom: 'none', minWidth: 360 }}
+          style={{ marginLeft: 48, background: 'transparent', borderBottom: 'none', minWidth: 480 }}
         />
       </Header>
       <Layout>
         {isWorkflowPage && (
           <Sider width={280} theme="light" className={styles.sider}>
-            <div style={{ padding: '16px 12px 8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <Text strong>会话管理</Text>
-              <Tooltip title="新建会话">
-                <Button size="small" type="primary" icon={<PlusOutlined />} onClick={handleCreateSession} />
-              </Tooltip>
-            </div>
-            <div style={{ padding: '0 12px 8px' }}>
-              <Button
-                size="small"
-                block
-                icon={<ReloadOutlined />}
-                onClick={loadSessions}
-                loading={loadingSessions}
-              >
-                刷新列表
-              </Button>
-            </div>
-            <div className={styles.sessionList}>
-              {sessions.length === 0 && !loadingSessions ? (
-                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无会话" style={{ marginTop: 48 }} />
-              ) : (
-                <Spin spinning={loadingSessions}>
-                  {sessions.map((s) => {
-                    const isActive = currentSession?.session_id === s.session_id
-                    return (
-                      <div
-                        key={s.session_id}
-                        className={`${styles.sessionItem} ${isActive ? styles.sessionItemActive : ''}`}
-                        onClick={() => handleSelectSession(s.session_id)}
-                        style={{ cursor: 'pointer', padding: '10px 12px' }}
-                      >
-                        <div style={{ width: '100%', minWidth: 0 }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <Text strong={isActive} ellipsis style={{ fontSize: 12 }}>
-                              {s.session_id.slice(0, 8)}
-                            </Text>
-                            <Popconfirm
-                              title="确定删除此会话？"
-                              onConfirm={(e) => {
-                                e?.stopPropagation()
-                                handleDeleteSession(s.session_id)
-                              }}
-                              onCancel={(e) => e?.stopPropagation()}
-                              okText="删除"
-                              cancelText="取消"
-                            >
-                              <Button
-                                type="text"
-                                danger
-                                size="small"
-                                icon={<DeleteOutlined />}
-                                onClick={(e) => e.stopPropagation()}
-                              />
-                            </Popconfirm>
-                          </div>
-                          <div style={{ display: 'flex', gap: 4, marginTop: 4, alignItems: 'center' }}>
-                            <Tag color={statusColor(s.status)} style={{ marginRight: 0, fontSize: 11 }}>
-                              {s.status === 'completed' ? '已完成' : s.status === 'error' ? '异常' : '进行中'}
-                            </Tag>
-                            <Text type="secondary" style={{ fontSize: 11 }}>
-                              {(s.completed_steps?.length || 0)}/7 步
-                            </Text>
-                            <Text type="secondary" style={{ fontSize: 11, marginLeft: 'auto' }}>
-                              {new Date(s.updated_at).toLocaleDateString()}
-                            </Text>
-                          </div>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </Spin>
-              )}
-            </div>
+            <SessionSider
+              sessions={videoSessions}
+              loading={loadingVideoSessions}
+              currentSessionId={currentSession?.session_id}
+              totalSteps={4}
+              creating={creatingVideoSession}
+              onCreate={handleCreateVideoSession}
+              onSelect={navigateWithSession}
+              onDelete={handleDeleteVideoSession}
+              onRefresh={loadVideoSessions}
+            />
+          </Sider>
+        )}
+        {isScriptPage && (
+          <Sider width={280} theme="light" className={styles.sider}>
+            <SessionSider
+              sessions={scriptSessions}
+              loading={loadingScriptSessions}
+              currentSessionId={currentScriptSession?.session_id}
+              totalSteps={4}
+              creating={creatingScriptSession}
+              onCreate={handleCreateScriptSession}
+              onSelect={navigateWithSession}
+              onDelete={handleDeleteScriptSession}
+              onRefresh={loadScriptSessions}
+            />
           </Sider>
         )}
         <Content className={styles.content}>{children}</Content>
       </Layout>
       <Footer className={styles.footer}>
-        AI视频创作智能体 ©2026 - 7步工作流：脚本 → 优化 → 思维导图 → 素材图 → 分片 → 首尾帧 → ComfyUI 视频
+        AI视频创作智能体 ©2026 - 创作剧本（构思 → 大纲 → 分集 → 定妆照） + 视频工作流（选集 → 分镜大纲 → 分镜管理 → 视频）
       </Footer>
     </Layout>
   )

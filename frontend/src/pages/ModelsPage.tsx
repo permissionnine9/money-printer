@@ -39,7 +39,7 @@ interface ModalState {
 const ModelsPage: React.FC = () => {
   const [models, setModels] = useState<ImageModelConfig[]>([])
   const [loading, setLoading] = useState(false)
-  const [filterType, setFilterType] = useState<'all' | 'image' | 'chat'>('all')
+  const [filterType, setFilterType] = useState<'all' | 'image' | 'chat' | 'agent'>('all')
   const [modal, setModal] = useState<ModalState>({ visible: false, editing: null, loading: false })
   const [form] = Form.useForm()
 
@@ -61,7 +61,7 @@ const ModelsPage: React.FC = () => {
 
   const openCreate = () => {
     form.resetFields()
-    form.setFieldsValue({ model_type: filterType === 'chat' ? 'chat' : 'image', is_default: false })
+    form.setFieldsValue({ model_type: filterType === 'all' ? 'image' : filterType, is_default: false })
     setModal({ visible: true, editing: null, loading: false })
   }
 
@@ -144,8 +144,8 @@ const ModelsPage: React.FC = () => {
       render: (name: string, record: ImageModelConfig) => (
         <Space>
           <span>{name}</span>
-          <Tag color={record.model_type === 'chat' ? 'geekblue' : 'cyan'}>
-            {record.model_type === 'chat' ? 'Chat' : '生图'}
+          <Tag color={record.model_type === 'chat' ? 'geekblue' : record.model_type === 'agent' ? 'purple' : 'cyan'}>
+            {record.model_type === 'chat' ? 'Chat' : record.model_type === 'agent' ? 'Agent' : '生图'}
           </Tag>
           {record.is_default && <Tag color="green">默认</Tag>}
         </Space>
@@ -156,7 +156,7 @@ const ModelsPage: React.FC = () => {
       dataIndex: 'base_url',
       key: 'base_url',
       render: (url: string) => (
-        <Text copyable={!!url} style={{ fontSize: 12 }}>{url || <Text type="secondary">（使用系统默认）</Text>}</Text>
+        <Text copyable={!!url} style={{ fontSize: 12 }}>{url || <Text type="secondary">（使用内置默认地址）</Text>}</Text>
       ),
     },
     {
@@ -173,7 +173,7 @@ const ModelsPage: React.FC = () => {
       key: 'api_key',
       render: (key: string) => (
         <Text style={{ fontSize: 12 }}>
-          {key ? `${key.slice(0, 6)}****${key.slice(-4)}` : <Text type="secondary">（使用系统默认）</Text>}
+          {key ? `${key.slice(0, 6)}****${key.slice(-4)}` : <Text type="secondary">（未填写，回退环境变量）</Text>}
         </Text>
       ),
     },
@@ -205,7 +205,7 @@ const ModelsPage: React.FC = () => {
   return (
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
       <Card
-        title="模型管理（生图 / Chat）"
+        title="模型管理（生图 / Chat / Agent）"
         extra={
           <Space>
             <Button icon={<ReloadOutlined />} onClick={loadModels} loading={loading}>
@@ -219,15 +219,15 @@ const ModelsPage: React.FC = () => {
       >
         <div style={{ marginBottom: 16 }}>
           <Text type="secondary">
-            管理多个模型配置（API Key / Base URL / 模型ID），支持「生图模型」与「Chat 模型」两类，各自独立默认。
-            默认生图模型用于素材图与首尾帧生成；默认 Chat 模型用于脚本优化、思维导图、分片等 LLM 环节。
+            管理多个模型配置（API Key / Base URL / 模型ID），支持「生图」「Chat」「Agent」三类，各自独立默认。
+            默认生图模型用于素材图与首尾帧生成；默认 Chat 模型用于脚本优化、思维导图、分片等 LLM 环节；默认 Agent 模型用于剧本创作各步骤的 Agent 调用。
           </Text>
         </div>
         <div style={{ marginBottom: 16 }}>
           <Segmented
             value={filterType}
             onChange={(v) => {
-              const t = v as 'all' | 'image' | 'chat'
+              const t = v as 'all' | 'image' | 'chat' | 'agent'
               setFilterType(t)
               setTimeout(() => {
                 modelApi.list(t === 'all' ? undefined : t)
@@ -239,6 +239,7 @@ const ModelsPage: React.FC = () => {
               { value: 'all', label: '全部' },
               { value: 'image', label: '生图模型' },
               { value: 'chat', label: 'Chat 模型' },
+              { value: 'agent', label: 'Agent 模型' },
             ]}
           />
         </div>
@@ -271,6 +272,7 @@ const ModelsPage: React.FC = () => {
               options={[
                 { value: 'image', label: '生图模型' },
                 { value: 'chat', label: 'Chat 模型' },
+              { value: 'agent', label: 'Agent 模型' },
               ]}
             />
           </Form.Item>
@@ -279,28 +281,28 @@ const ModelsPage: React.FC = () => {
             label="模型名称"
             rules={[{ required: true, message: '请输入模型名称' }]}
           >
-            <Input placeholder="例如：盛算云 Gemini、公司内部生图服务" />
+            <Input placeholder="例如：我的生图模型、公司内部生图服务" />
           </Form.Item>
           <Form.Item
             name="api_key"
             label="API Key"
-            extra="留空则使用系统默认 Key"
+            extra="留空则回退服务端环境变量 SHENGSUANYUN_API_KEY"
           >
             <Input.Password placeholder="sk-..." />
           </Form.Item>
           <Form.Item
             name="base_url"
             label="Base URL"
-            extra="OpenAI 兼容格式的 API 地址，留空则使用系统默认地址"
+            extra="OpenAI 兼容格式的 API 地址；留空则使用内置默认地址（盛算云网关）"
           >
             <Input placeholder="https://router.shengsuanyun.com/api/v1" />
           </Form.Item>
           <Form.Item
             name="model_id"
             label="模型 ID"
-            extra="生图如 google/gemini-3-pro-image-preview；Chat 如 bytedance/doubao-seed-1.8"
+            extra="服务商提供的模型 ID，一般为 厂商/模型名 格式，以服务商文档为准"
           >
-            <Input placeholder="google/gemini-3-pro-image-preview" />
+            <Input placeholder="例如：厂商名/模型名" />
           </Form.Item>
           <Form.Item
             name="is_default"

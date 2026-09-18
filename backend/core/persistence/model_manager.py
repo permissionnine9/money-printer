@@ -1,4 +1,4 @@
-"""模型配置管理 - 支持添加多个生图模型与 chat 模型（key/baseUrl/modelId 关联）"""
+"""模型配置管理 - 支持添加多个生图/chat/agent 模型（key/baseUrl/modelId 关联）"""
 import sqlite3
 import uuid
 from datetime import datetime
@@ -8,14 +8,15 @@ import logging
 logger = logging.getLogger(__name__)
 
 # 支持的模型类型
-MODEL_TYPES = ("image", "chat")
+MODEL_TYPES = ("image", "chat", "agent")
 
 
 class ModelManager:
     """模型配置管理器
 
     负责 model 配置表（image_models）的 CRUD 与默认模型查询。
-    model_type: 'image'（生图模型）或 'chat'（对话/LLM 模型），每类各自独立默认。
+    model_type: 'image'（生图模型）、'chat'（对话/LLM 模型）、
+    'agent'（Claude Agent SDK 端点，Anthropic 协议），每类各自独立默认。
     """
 
     def __init__(self, db_path: str = "data/sessions.db"):

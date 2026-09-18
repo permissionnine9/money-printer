@@ -7,7 +7,8 @@ import type {
   SessionDetail,
   StepResponse,
   VideoParams,
-  ScriptSegment,
+  StoryboardSegment,
+  SegmentPromptContext,
   SessionAsset,
   ImageModelConfig,
   PromptTemplate,
@@ -68,318 +69,96 @@ export const sessionApi = {
   },
 }
 
-// 工作流步骤 API
+// 工作流步骤 API（视频 4 步）
 export const stepApi = {
-  // 步骤1：提交脚本
-  submitScript: async (
+  // 步骤1：从剧本选集
+  selectEpisode: async (
     sessionId: string,
-    script: string,
-    params: VideoParams
+    payload: { script_session_id: string; episode_id: string } & VideoParams
   ): Promise<StepResponse> => {
-    const { data } = await client.post(`/steps/${sessionId}/submit`, {
-      script,
-      ...params,
-    })
+    const { data } = await client.post(`/steps/${sessionId}/select-episode`, payload)
     return data
   },
 
-  // 步骤1：重新提交脚本（修改脚本和参数，重置后续步骤）
-  resubmitScript: async (
+  // 步骤2：生成分镜大纲（返回 run_id，AgentRunProgress 观流）
+  generateStoryboardOutline: async (sessionId: string, extraPrompt?: string): Promise<string> => {
+    const { data } = await client.post(`/steps/${sessionId}/storyboard-outline/generate`, {
+      extra_prompt: extraPrompt,
+    })
+    const runId = data?.data?.run_id
+    if (!runId) throw new Error('未获取到 run_id')
+    return runId
+  },
+
+  // 步骤2：保存人工编辑的分镜大纲导图
+  updateStoryboardOutline: async (
     sessionId: string,
-    script: string,
-    params: VideoParams
-  ): Promise<StepResponse> => {
-    const { data } = await client.post(`/steps/${sessionId}/resubmit`, {
-      script,
-      ...params,
-    })
+    mindmap: string
+  ): Promise<{ success: boolean; data: { mindmap: string } }> => {
+    const { data } = await client.put(`/steps/${sessionId}/storyboard-outline`, { mindmap })
     return data
   },
 
-  // 步骤2：优化脚本（useOriginal=true 直接采用原始脚本，跳过 LLM）
-  optimizeScript: async (sessionId: string, extraPrompt?: string, useOriginal?: boolean): Promise<StepResponse> => {
-    const { data } = await client.post(`/steps/${sessionId}/optimize`, {
-      extra_prompt: extraPrompt,
-      use_original: useOriginal,
-    })
-    return data
-  },
-
-  // 步骤2：重新优化脚本（重置后续步骤；useOriginal=true 直接采用原始脚本）
-  reoptimizeScript: async (sessionId: string, extraPrompt?: string, useOriginal?: boolean): Promise<StepResponse> => {
-    const { data } = await client.post(`/steps/${sessionId}/reoptimize`, {
-      extra_prompt: extraPrompt,
-      use_original: useOriginal,
-    })
-    return data
-  },
-
-  // 步骤3：生成思维导图
-  generateMindmap: async (sessionId: string, extraPrompt?: string): Promise<StepResponse> => {
-    const { data } = await client.post(`/steps/${sessionId}/mindmap`, {
-      extra_prompt: extraPrompt,
-    })
-    return data
-  },
-
-  // 步骤3：重新生成思维导图（重置后续步骤）
-  regenerateMindmap: async (sessionId: string, extraPrompt?: string): Promise<StepResponse> => {
-    const { data } = await client.post(`/steps/${sessionId}/regenerate-mindmap`, {
-      extra_prompt: extraPrompt,
-    })
-    return data
-  },
-
-  // 步骤3：人工修改思维导图并保存
-  updateMindmap: async (sessionId: string, mindmap: string): Promise<StepResponse> => {
-    const { data } = await client.put(`/steps/${sessionId}/mindmap`, { mindmap })
-    return data
-  },
-
-  // 步骤4：生成素材图（支持选择生图模型配置）
-  generateMaterials: async (
+  // 步骤3：更新分镜配置（分镜形式 / overlap）
+  updateSegmentConfig: async (
     sessionId: string,
-    extraPrompt?: string,
-    referenceImages?: string[],
-    modelConfigId?: string
-  ): Promise<StepResponse> => {
-    const { data } = await client.post(`/steps/${sessionId}/materials`, {
-      extra_prompt: extraPrompt,
-      reference_images: referenceImages,
-      model_config_id: modelConfigId,
-    })
+    index: number,
+    config: { mode?: string; overlap?: number }
+  ): Promise<{ success: boolean; data: { segment: StoryboardSegment } }> => {
+    const { data } = await client.put(`/steps/${sessionId}/storyboard-segments/${index}/config`, config)
     return data
   },
 
-  // 步骤4：生成分片脚本
-  generateSegments: async (sessionId: string, extraPrompt?: string): Promise<StepResponse> => {
-    const { data } = await client.post(`/steps/${sessionId}/segments`, {
-      extra_prompt: extraPrompt,
-    })
+  // 步骤3：获取分镜提示词生成弹窗的上下文
+  getSegmentPromptContext: async (
+    sessionId: string,
+    index: number
+  ): Promise<SegmentPromptContext> => {
+    const { data } = await client.get(`/steps/${sessionId}/storyboard-segments/${index}/prompt-context`)
+    return data?.data
+  },
+
+  // 步骤3：生成分镜提示词（返回 run_id，仅全能参考模式）
+  generateSegmentPrompt: async (sessionId: string, index: number): Promise<string> => {
+    const { data } = await client.post(`/steps/${sessionId}/storyboard-segments/${index}/generate-prompt`, {})
+    const runId = data?.data?.run_id
+    if (!runId) throw new Error('未获取到 run_id')
+    return runId
+  },
+
+  // 步骤3：完成分镜配置（推进到步骤4）
+  completeSegmentManagement: async (sessionId: string): Promise<StepResponse> => {
+    const { data } = await client.post(`/steps/${sessionId}/segment-management/complete`, {})
     return data
   },
 
-  // 步骤5：生成首尾帧
-  generateFrames: async (sessionId: string): Promise<StepResponse> => {
-    const { data } = await client.post(`/steps/${sessionId}/frames`, {})
-    return data
-  },
-
-  // 步骤6：生成视频
+  // 步骤4：生成视频
   generateVideos: async (sessionId: string): Promise<StepResponse> => {
     const { data } = await client.post(`/steps/${sessionId}/videos`, {})
     return data
   },
 
-  // 步骤4：重新生成素材图（清空后续步骤）
-  regenerateMaterials: async (
-    sessionId: string,
-    extraPrompt?: string,
-    referenceImages?: string[],
-    modelConfigId?: string
-  ): Promise<StepResponse> => {
-    const { data } = await client.post(`/steps/${sessionId}/regenerate-materials`, {
-      extra_prompt: extraPrompt,
-      reference_images: referenceImages,
-      model_config_id: modelConfigId,
-    })
-    return data
-  },
-
-  // 步骤4：重新生成分片脚本（清空后续步骤）
-  regenerateSegments: async (sessionId: string, extraPrompt?: string): Promise<StepResponse> => {
-    const { data } = await client.post(`/steps/${sessionId}/regenerate-segments`, {
-      extra_prompt: extraPrompt,
-    })
-    return data
-  },
-
-  // 步骤5：重新生成首尾帧（清空后续步骤）
-  regenerateFrames: async (sessionId: string): Promise<StepResponse> => {
-    const { data } = await client.post(`/steps/${sessionId}/regenerate-frames`, {})
-    return data
-  },
-
-  // 步骤6：重新生成视频
+  // 步骤4：重新生成视频
   regenerateVideos: async (sessionId: string): Promise<StepResponse> => {
     const { data } = await client.post(`/steps/${sessionId}/regenerate-videos`, {})
     return data
   },
 
-  // 步骤5：取消首尾帧生成
-  cancelFrames: async (sessionId: string): Promise<StepResponse> => {
-    const { data } = await client.post(`/steps/${sessionId}/cancel-frames`, {})
-    return data
-  },
-
-  // 步骤5：重置首尾帧状态为未开始
-  resetFrames: async (sessionId: string): Promise<StepResponse> => {
-    const { data } = await client.post(`/steps/${sessionId}/reset-frames`, {})
-    return data
-  },
-
-  // 步骤6：取消视频生成
+  // 步骤4：取消视频生成
   cancelVideos: async (sessionId: string): Promise<StepResponse> => {
     const { data } = await client.post(`/steps/${sessionId}/cancel-videos`, {})
     return data
   },
 
-  // 步骤6：恢复视频备份
+  // 步骤4：恢复视频备份
   restoreVideosBackup: async (sessionId: string): Promise<StepResponse> => {
     const { data } = await client.post(`/steps/${sessionId}/restore-videos-backup`, {})
     return data
   },
 
-  // 步骤6：重新生成单个视频
+  // 步骤4：重新生成单个视频
   regenerateSingleVideo: async (sessionId: string, segmentIndex: number): Promise<StepResponse> => {
     const { data } = await client.post(`/steps/${sessionId}/regenerate-single-video/${segmentIndex}`, {})
-    return data
-  },
-
-  // 优化分片提示词（基于首尾帧图片和上下文）
-  optimizeSegmentPrompt: async (
-    sessionId: string,
-    segmentIndex: number,
-    customRequirement?: string
-  ): Promise<StepResponse> => {
-    const { data } = await client.post(`/steps/${sessionId}/optimize-segment-prompt/${segmentIndex}`, {
-      custom_requirement: customRequirement,
-    })
-    return data
-  },
-}
-
-// 分片编辑 API
-export const segmentApi = {
-  // 更新分片
-  update: async (
-    sessionId: string,
-    index: number,
-    segment: ScriptSegment
-  ): Promise<{ success: boolean; message: string }> => {
-    const { data } = await client.put(`/segments/${sessionId}/${index}`, segment)
-    return data
-  },
-
-  // 删除分片
-  delete: async (
-    sessionId: string,
-    index: number
-  ): Promise<{ success: boolean; message: string }> => {
-    const { data } = await client.delete(`/segments/${sessionId}/${index}`)
-    return data
-  },
-
-  // 添加分片
-  add: async (
-    sessionId: string,
-    segment: Omit<ScriptSegment, 'index'>,
-    insertAfter: number = -1
-  ): Promise<{ success: boolean; message: string }> => {
-    const { data } = await client.post(`/segments/${sessionId}/add`, {
-      ...segment,
-      insert_after: insertAfter,
-    })
-    return data
-  },
-
-  // 批量重新生成分片
-  batchRegenerate: async (
-    sessionId: string,
-    segmentIndices: number[],
-    extraPrompt?: string
-  ): Promise<{ success: boolean; message: string }> => {
-    const { data } = await client.post(`/segments/${sessionId}/batch-regenerate`, {
-      segment_indices: segmentIndices,
-      extra_prompt: extraPrompt,
-    })
-    return data
-  },
-}
-
-// 首尾帧管理 API
-export const frameApi = {
-  // 重新生成首尾帧
-  regenerate: async (
-    sessionId: string,
-    segmentIndex: number,
-    frameType: 'first' | 'last',
-    customPrompt?: string,
-    referenceImages?: string[]
-  ): Promise<{ success: boolean; message: string; frame_path?: string }> => {
-    const { data } = await client.post(
-      `/frames/${sessionId}/${segmentIndex}/regenerate`,
-      {
-        frame_type: frameType,
-        custom_prompt: customPrompt,
-        reference_images: referenceImages,
-      }
-    )
-    return data
-  },
-
-  // 上传首尾帧
-  upload: async (
-    sessionId: string,
-    segmentIndex: number,
-    frameType: 'first' | 'last',
-    imagePath: string
-  ): Promise<{ success: boolean; message: string; frame_path?: string }> => {
-    const { data } = await client.post(
-      `/frames/${sessionId}/${segmentIndex}/upload`,
-      { frame_type: frameType, image_path: imagePath }
-    )
-    return data
-  },
-
-  // 复用帧（支持选择任意分片的帧）
-  reuse: async (
-    sessionId: string,
-    segmentIndex: number,
-    frameType: 'first' | 'last',
-    sourceSegmentIndex?: number,
-    sourceFrameType?: 'first' | 'last'
-  ): Promise<{ success: boolean; message: string; frame_path?: string }> => {
-    const { data } = await client.post(
-      `/frames/${sessionId}/${segmentIndex}/reuse`,
-      {
-        frame_type: frameType,
-        source_segment_index: sourceSegmentIndex,
-        source_frame_type: sourceFrameType,
-      }
-    )
-    return data
-  },
-
-  // 使用上一个分片视频的结尾快照作为首帧
-  useVideoSnapshot: async (
-    sessionId: string,
-    segmentIndex: number
-  ): Promise<{ success: boolean; message: string; frame_path?: string; step_completed?: boolean }> => {
-    const { data } = await client.post(
-      `/frames/${sessionId}/${segmentIndex}/use-video-snapshot`
-    )
-    return data
-  },
-
-  // 检查步骤6是否已完成
-  checkCompletion: async (
-    sessionId: string
-  ): Promise<{ success: boolean; message: string; step_completed?: boolean }> => {
-    const { data } = await client.post(
-      `/frames/${sessionId}/check-completion`
-    )
-    return data
-  },
-
-  // 更新相邻分片之间的 overlap 参数
-  updateOverlap: async (
-    sessionId: string,
-    overlapSeconds: number
-  ): Promise<{ success: boolean; message: string }> => {
-    const { data } = await client.put(`/frames/${sessionId}/overlap`, {
-      overlap_seconds: overlapSeconds,
-    })
     return data
   },
 }
@@ -425,7 +204,7 @@ export const assetApi = {
 export const modelApi = {
   // 列出全部模型配置（可按类型过滤：image / chat）
   list: async (
-    modelType?: 'image' | 'chat'
+    modelType?: 'image' | 'chat' | 'agent'
   ): Promise<{ success: boolean; models: ImageModelConfig[] }> => {
     const params = modelType ? { model_type: modelType } : {}
     const { data } = await client.get('/models', { params })
@@ -454,7 +233,7 @@ export const modelApi = {
       base_url: string
       model_id: string
       is_default?: boolean
-      model_type?: 'image' | 'chat'
+      model_type?: 'image' | 'chat' | 'agent'
     }
   ): Promise<{ success: boolean; message: string; model: ImageModelConfig }> => {
     const { data } = await client.put(`/models/${modelId}`, payload)
@@ -502,76 +281,6 @@ export const promptApi = {
   },
 }
 
-// 素材图管理 API
-export const materialApi = {
-  // 编辑素材图（使用图生图）
-  edit: async (
-    sessionId: string,
-    index: number,
-    prompt: string,
-    description?: string,
-    referenceImages?: string[],
-    originalImagePath?: string
-  ): Promise<{ success: boolean; message: string; image_path?: string }> => {
-    const { data } = await client.post(`/materials/${sessionId}/${index}/edit`, {
-      prompt,
-      description,
-      reference_images: referenceImages,
-      original_image_path: originalImagePath,
-    })
-    return data
-  },
-
-  // 重新生成素材图
-  regenerate: async (
-    sessionId: string,
-    index: number,
-    customPrompt?: string
-  ): Promise<{ success: boolean; message: string; image_path?: string }> => {
-    const { data } = await client.post(`/materials/${sessionId}/${index}/regenerate`, {
-      custom_prompt: customPrompt,
-    })
-    return data
-  },
-
-  // 删除素材图
-  delete: async (
-    sessionId: string,
-    index: number
-  ): Promise<{ success: boolean; message: string }> => {
-    const { data } = await client.delete(`/materials/${sessionId}/${index}`)
-    return data
-  },
-
-  // 仅更新素材图描述（不重新生成图片）
-  updateDescription: async (
-    sessionId: string,
-    index: number,
-    description: string
-  ): Promise<{ success: boolean; message: string }> => {
-    const { data } = await client.put(`/materials/${sessionId}/${index}/description`, {
-      description,
-    })
-    return data
-  },
-
-  // 新增素材图
-  add: async (
-    sessionId: string,
-    prompt: string,
-    description?: string,
-    referenceImages?: string[]
-  ): Promise<{ success: boolean; message: string; image_path?: string; index?: number }> => {
-    const { data } = await client.post(`/materials/${sessionId}/add`, {
-      prompt,
-      description,
-      reference_images: referenceImages,
-    })
-    return data
-  },
-}
-
-// 文件上传 API
 export const uploadApi = {
   // 上传图片
   uploadImage: async (file: File): Promise<{ file_path: string; url: string }> => {
@@ -582,6 +291,156 @@ export const uploadApi = {
         'Content-Type': 'multipart/form-data',
       },
     })
+    return data
+  },
+}
+
+
+// ==================== 剧本工作流 API（/script-sessions） ====================
+
+import type {
+  ScriptSessionDetail,
+  ScriptEntity,
+  Episode,
+  LookbookImage,
+  EntityType,
+  EntityReferences,
+} from '@/types'
+
+// 剧本会话管理
+export const scriptSessionApi = {
+  create: async (): Promise<ScriptSessionDetail> => {
+    const { data } = await client.post('/script-sessions', {})
+    return data.data
+  },
+
+  list: async (): Promise<{ sessions: ScriptSessionDetail[]; total: number }> => {
+    const { data } = await client.get('/script-sessions')
+    return data.data
+  },
+
+  get: async (sessionId: string): Promise<ScriptSessionDetail> => {
+    const { data } = await client.get(`/script-sessions/${sessionId}`)
+    return data.data
+  },
+
+  delete: async (sessionId: string): Promise<void> => {
+    await client.delete(`/script-sessions/${sessionId}`)
+  },
+}
+
+// 剧本 4 步（SSE 端点走 sse.ts，这里只放普通请求）
+export const scriptStepApi = {
+  // 第 1 步：人工编辑故事逻辑
+  updateStoryLogic: async (sessionId: string, storyLogic: string): Promise<any> => {
+    const { data } = await client.put(`/script-sessions/${sessionId}/ideation`, {
+      story_logic: storyLogic,
+    })
+    return data.data
+  },
+
+  // 第 2 步：人工编辑大纲
+  updateOutline: async (sessionId: string, mindmap: string): Promise<any> => {
+    const { data } = await client.put(`/script-sessions/${sessionId}/outline`, { mindmap })
+    return data.data
+  },
+
+  // 第 3 步：生成（全量/单集重设计）→ { run_id }（SSE 观流走 agentRunApi）
+  generateEpisodes: async (sessionId: string, extraInstruction?: string): Promise<string> => {
+    const { data } = await client.post(`/script-sessions/${sessionId}/episodes/generate`, {
+      extra_instruction: extraInstruction || '',
+    })
+    return data.data.run_id
+  },
+
+  regenerateEpisode: async (sessionId: string, episodeId: string, extraInstruction?: string): Promise<string> => {
+    const { data } = await client.post(`/script-sessions/${sessionId}/episodes/regenerate`, {
+      episode_id: episodeId,
+      extra_instruction: extraInstruction || '',
+    })
+    return data.data.run_id
+  },
+
+  // 第 3 步：分集 CRUD
+  listEpisodes: async (sessionId: string): Promise<Episode[]> => {
+    const { data } = await client.get(`/script-sessions/${sessionId}/episodes`)
+    return data.data.episodes
+  },
+
+  updateEpisode: async (sessionId: string, episodeId: string, fields: Partial<Episode>): Promise<Episode> => {
+    const { data } = await client.put(`/script-sessions/${sessionId}/episodes/${episodeId}`, fields)
+    return data.data
+  },
+
+  // 第 4 步：定妆照
+  generateLookbook: async (
+    sessionId: string,
+    entityIds: string[],
+    stylePrompt?: string,
+    modelConfigId?: string
+  ): Promise<string> => {
+    const { data } = await client.post(`/script-sessions/${sessionId}/lookbook/generate`, {
+      entity_ids: entityIds,
+      style_prompt: stylePrompt || '',
+      model_config_id: modelConfigId,
+    })
+    return data.data.run_id
+  },
+
+  completeLookbook: async (sessionId: string): Promise<any> => {
+    const { data } = await client.post(`/script-sessions/${sessionId}/lookbook/complete`)
+    return data.data
+  },
+
+  listLookbook: async (
+    sessionId: string,
+    entityId?: string,
+    taskStatus?: string
+  ): Promise<LookbookImage[]> => {
+    const params: any = {}
+    if (entityId) params.entity_id = entityId
+    if (taskStatus) params.task_status = taskStatus
+    const { data } = await client.get(`/script-sessions/${sessionId}/lookbook`, { params })
+    return data.data.images
+  },
+
+  regenerateLookbookImage: async (
+    sessionId: string,
+    imageId: string,
+    prompt?: string,
+    modelConfigId?: string
+  ): Promise<string> => {
+    const { data } = await client.post(`/script-sessions/${sessionId}/lookbook/${imageId}/regenerate`, {
+      prompt,
+      model_config_id: modelConfigId,
+    })
+    return data.data.run_id
+  },
+
+  deleteLookbookImage: async (sessionId: string, imageId: string): Promise<void> => {
+    await client.delete(`/script-sessions/${sessionId}/lookbook/${imageId}`)
+  },
+}
+
+// 剧本实体库
+export const entityApi = {
+  list: async (sessionId: string, entityType?: EntityType): Promise<ScriptEntity[]> => {
+    const params = entityType ? { entity_type: entityType } : {}
+    const { data } = await client.get(`/script-sessions/${sessionId}/entities`, { params })
+    return data.data.entities
+  },
+
+  // 实体引用集：该实体出现在哪几集（episode_id + title + actions）
+  getReferences: async (sessionId: string, entityId: string): Promise<EntityReferences> => {
+    const { data } = await client.get(`/script-sessions/${sessionId}/entities/${entityId}/references`)
+    return data.data ?? data
+  },
+}
+
+// Agent run（通用：剧本/视频共用）
+export const agentRunApi = {
+  cancel: async (runId: string): Promise<{ success: boolean; message: string }> => {
+    const { data } = await client.post(`/agent-runs/${runId}/cancel`)
     return data
   },
 }

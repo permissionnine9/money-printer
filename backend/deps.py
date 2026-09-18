@@ -2,15 +2,39 @@
 FastAPI 依赖注入
 """
 from functools import lru_cache
-from backend.core.persistence.session_manager import SessionManager
+from backend.core.persistence.session_manager import (
+    SCRIPT_STEPS,
+    VIDEO_STEPS,
+    SessionManager,
+)
 from backend.core.persistence.model_manager import ModelManager
+from backend.core.persistence.script_manager import ScriptManager
+from backend.core.agents.storyboard import StoryboardWorkflow
 from backend.core.agents.workflow_v2 import VideoCreationWorkflowV2
 
 
 @lru_cache()
 def get_session_manager() -> SessionManager:
-    """获取会话管理器实例（单例）"""
-    return SessionManager()
+    """获取视频会话管理器实例（单例，视频工作流 4 步）"""
+    return SessionManager(steps=VIDEO_STEPS)
+
+
+@lru_cache()
+def get_storyboard_workflow() -> StoryboardWorkflow:
+    """获取分镜工作流实例（单例，共享视频 SessionManager）"""
+    return StoryboardWorkflow(session_manager=get_session_manager())
+
+
+@lru_cache()
+def get_script_session_manager() -> SessionManager:
+    """获取剧本会话管理器实例（单例，剧本工作流 4 步）"""
+    return SessionManager(steps=SCRIPT_STEPS)
+
+
+@lru_cache()
+def get_script_manager() -> ScriptManager:
+    """获取剧本数据管理器实例（单例，与 SessionManager 共用同一个 SQLite）"""
+    return ScriptManager()
 
 
 @lru_cache()

@@ -8,7 +8,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
-from backend.api.v1 import sessions, steps, segments, frames, materials, uploads, assets, models, prompts
+from backend.api.v1 import (
+    sessions,
+    steps,
+    uploads,
+    assets,
+    models,
+    prompts,
+    script_sessions,
+    agent_runs,
+)
 from backend.config import override_src_config
 
 # 配置日志
@@ -55,13 +64,12 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 # 注册路由
 app.include_router(sessions.router, prefix="/api/v1/sessions", tags=["会话管理"])
 app.include_router(steps.router, prefix="/api/v1/steps", tags=["工作流步骤"])
-app.include_router(segments.router, prefix="/api/v1/segments", tags=["分片编辑"])
-app.include_router(frames.router, prefix="/api/v1/frames", tags=["首尾帧管理"])
-app.include_router(materials.router, prefix="/api/v1/materials", tags=["素材图管理"])
 app.include_router(uploads.router, prefix="/api/v1/uploads", tags=["文件上传"])
 app.include_router(assets.router, prefix="/api/v1/assets", tags=["会话资产管理"])
 app.include_router(models.router, prefix="/api/v1/models", tags=["生图模型管理"])
 app.include_router(prompts.router, prefix="/api/v1/prompts", tags=["提示词管理"])
+app.include_router(script_sessions.router, prefix="/api/v1/script-sessions", tags=["剧本工作流"])
+app.include_router(agent_runs.router, prefix="/api/v1/agent-runs", tags=["Agent 运行"])
 
 
 @app.get("/")

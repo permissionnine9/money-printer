@@ -17,9 +17,9 @@ class ModelConfigRequest(BaseModel):
     name: str = Field(..., description="模型显示名称")
     api_key: str = Field(default="", description="API Key")
     base_url: str = Field(default="", description="API Base URL（OpenAI 兼容格式，如 https://router.shengsuanyun.com/api/v1）")
-    model_id: str = Field(default="", description="模型ID（如 google/gemini-3-pro-image-preview 或 bytedance/doubao-seed-1.8）")
+    model_id: str = Field(default="", description="模型 ID（服务商提供，一般为 厂商/模型名 格式）")
     is_default: bool = Field(default=False, description="是否设为该类型的默认模型")
-    model_type: str = Field(default="image", description="模型类型：'image'（生图）或 'chat'（对话/LLM）")
+    model_type: str = Field(default="image", description="模型类型：'image'（生图）、'chat'（对话/LLM）、'agent'（Agent SDK 端点，Anthropic 协议）")
 
 
 @router.get("")
@@ -27,7 +27,7 @@ async def list_models(
     model_type: str | None = None,
     model_manager: ModelManager = Depends(get_model_manager),
 ):
-    """列出模型配置（可选按类型过滤：image / chat）"""
+    """列出模型配置（可选按类型过滤：image / chat / agent）"""
     if model_type and model_type not in MODEL_TYPES:
         raise HTTPException(status_code=400, detail=f"model_type 仅支持 {list(MODEL_TYPES)}")
 
@@ -45,6 +45,8 @@ async def create_model(
         raise HTTPException(status_code=400, detail="模型名称不能为空")
     if request.model_type not in MODEL_TYPES:
         raise HTTPException(status_code=400, detail=f"model_type 仅支持 {list(MODEL_TYPES)}")
+    if request.model_type == "image" and not request.model_id.strip():
+        raise HTTPException(status_code=400, detail="生图模型的模型 ID 不能为空")
 
     try:
         model = model_manager.create_model(
@@ -73,6 +75,8 @@ async def update_model(
         raise HTTPException(status_code=400, detail="模型名称不能为空")
     if request.model_type not in MODEL_TYPES:
         raise HTTPException(status_code=400, detail=f"model_type 仅支持 {list(MODEL_TYPES)}")
+    if request.model_type == "image" and not request.model_id.strip():
+        raise HTTPException(status_code=400, detail="生图模型的模型 ID 不能为空")
 
     try:
         model = model_manager.update_model(
@@ -103,7 +107,7 @@ async def set_default_model(
     if not model:
         raise HTTPException(status_code=404, detail="模型配置不存在")
 
-    type_label = "生图" if model["model_type"] == "image" else "chat"
+    type_label = {"image": "生图", "chat": "chat", "agent": "agent"}.get(model["model_type"], model["model_type"])
     return {"success": True, "message": f"已将「{model['name']}」设为默认{type_label}模型", "model": model}
 
 

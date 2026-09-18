@@ -6,14 +6,12 @@ import { Steps } from 'antd'
 import type { SessionDetail } from '@/types'
 import styles from './StepNavigator.module.css'
 
+// 视频工作流 4 步（与 STEP_NAMES 一致）
 const STEPS = [
-  { title: '提交脚本', content: '输入原始脚本和参数' },
-  { title: '优化脚本', content: 'LLM 优化脚本' },
-  { title: '思维导图', content: '生成剧本结构导图，可人工修改' },
-  { title: '生成素材图', content: '基于思维导图生成设定稿' },
-  { title: '生成分片', content: '切割分镜头脚本' },
-  { title: '生成首尾帧', content: '多模式首尾帧（含全能参考）' },
-  { title: '生成视频', content: '远程 ComfyUI 生成最终视频' },
+  { title: '从剧本选集', content: '选择剧本分集与视频参数' },
+  { title: '分镜大纲', content: '生成本集分镜导图与分镜列表' },
+  { title: '分镜管理', content: '分镜形式配置与提示词生成' },
+  { title: '视频', content: '远程 ComfyUI 生成最终视频' },
 ]
 
 interface StepNavigatorProps {

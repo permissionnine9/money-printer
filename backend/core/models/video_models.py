@@ -66,6 +66,25 @@ class ScriptSegment(BaseModel):
         return ", ".join(parts)
 
 
+class StoryboardSegment(BaseModel):
+    """分镜大纲产出的分镜（步骤3 分镜管理的基本单元）"""
+    index: int = Field(description="分镜索引（从 0 开始）")
+    title: str = Field(default="", description="分镜标题")
+    outline: str = Field(default="", description="分镜大纲（画面/动作/剧情概述）")
+    # 分镜形式：首帧/尾帧/全能参考/首尾帧（仅全能参考模式实现 overlap 与提示词生成逻辑）
+    mode: str = Field(
+        default="first_last_frame",
+        description="""分镜形式:
+        - 'first_frame': 首帧模式（关联逻辑暂未实现）
+        - 'last_frame': 尾帧模式（关联逻辑暂未实现）
+        - 'all_reference': 全能参考模式（支持 overlap 与分镜提示词生成）
+        - 'first_last_frame': 首尾帧模式（关联逻辑暂未实现）""",
+    )
+    overlap: int = Field(default=1, ge=0, le=3, description="与上一分镜的重叠秒数（仅全能参考模式使用）")
+    duration: int = Field(default=15, ge=5, le=30, description="建议时长（秒，大纲阶段 LLM 分析，第 3 步展示为参考）")
+    prompt: str = Field(default="", description="已生成的分镜提示词（video-prompt skill 产出）")
+
+
 class MaterialImage(BaseModel):
     """素材图片（设定稿风格）"""
     image_id: str = Field(description="图片ID")

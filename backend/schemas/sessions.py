@@ -14,6 +14,7 @@ class SessionResponse(BaseModel):
     current_step: Optional[str] = None  # 完成所有步骤后可能为 None
     status: str
     completed_steps: List[str] = Field(default_factory=list)
+    legacy: bool = Field(default=False, description="旧版 7 步会话（不兼容新工作流）")
 
 
 class SessionDetailResponse(SessionResponse):

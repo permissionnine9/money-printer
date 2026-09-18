@@ -2,6 +2,7 @@
 from .video_models import (
     VideoParams,
     ScriptSegment,
+    StoryboardSegment,
     MaterialImage,
     SegmentFrame,
     GeneratedVideo,
@@ -10,6 +11,7 @@ from .video_models import (
 __all__ = [
     "VideoParams",
     "ScriptSegment",
+    "StoryboardSegment",
     "MaterialImage",
     "SegmentFrame",
     "GeneratedVideo",

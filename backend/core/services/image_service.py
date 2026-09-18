@@ -12,8 +12,6 @@ from PIL import Image
 from backend.core.config import (
     SHENGSUANYUN_API_KEY,
     SHENGSUANYUN_BASE_URL,
-    SHENGSUANYUN_IMAGE_MODEL,
-    SHENGSUANYUN_FRAME_IMAGE_MODEL,
     SHENGSUANYUN_IMAGE2IMAGE_REQUEST_TIME_GAP,
 )
 from backend.core.models import MaterialImage, VideoParams
@@ -25,15 +23,67 @@ logger = logging.getLogger(__name__)
 IMAGE_COMPRESS_MAX_SIZE = 1920  # 最大边长（像素）
 IMAGE_COMPRESS_QUALITY = 85    # JPEG 压缩质量（1-100）
 
+# 生图模型未配置的统一报错文案
+_NOT_CONFIGURED_MSG = "生图模型未配置（缺少 API Key 或模型 ID），请在「模型管理」完成配置"
+
+
+class ImageModelNotConfiguredError(RuntimeError):
+    """生图模型未配置（无默认 image 模型 / 缺 API Key / 缺模型 ID）"""
+
+
+def build_image_service_from_model_config(model_config_id: str | None = None) -> "ImageService":
+    """唯一的生图服务工厂：按「模型管理」配置构造 ImageService，未配置或不完整时显式报错
+
+    Args:
+        model_config_id: 模型配置ID；为 None 时读取默认生图模型配置
+
+    Returns:
+        配置好的 ImageService 实例
+
+    Raises:
+        ImageModelNotConfiguredError: 无配置 / 配置不存在 / 缺 API Key / 缺模型 ID
+    """
+    from backend.core.persistence import ModelManager
+
+    manager = ModelManager()
+    if model_config_id:
+        config = manager.get_model(model_config_id)
+        if not config:
+            raise ImageModelNotConfiguredError(f"生图模型配置不存在: {model_config_id}")
+    else:
+        config = manager.get_default_model(model_type="image")
+
+    if not config:
+        raise ImageModelNotConfiguredError(
+            "未配置默认生图模型：请在「模型管理」添加模型类型为「生图」的配置并设为默认"
+        )
+
+    api_key = (config["api_key"] or "").strip() or SHENGSUANYUN_API_KEY
+    if not api_key:
+        raise ImageModelNotConfiguredError(
+            "生图 API Key 未配置：请在「模型管理」填写 API Key，或在服务端设置环境变量 SHENGSUANYUN_API_KEY"
+        )
+
+    image_model = (config["model_id"] or "").strip()
+    if not image_model:
+        raise ImageModelNotConfiguredError("生图模型缺少模型 ID：请在「模型管理」填写模型 ID")
+
+    return ImageService(
+        api_key=api_key,
+        base_url=(config["base_url"] or "").strip() or None,
+        image_model=image_model,
+    )
+
 
 class ImageService:
     """图片生成服务类 - 使用胜算云 API"""
 
-    def __init__(self, api_key: str = SHENGSUANYUN_API_KEY, base_url: str | None = None, image_model: str | None = None):
-        self._api_key = api_key
+    def __init__(self, api_key: str | None = None, base_url: str | None = None, image_model: str | None = None):
+        # api_key 优先取传入值，留空回退服务端环境变量 SHENGSUANYUN_API_KEY
+        self._api_key = (api_key or "").strip() or SHENGSUANYUN_API_KEY
         self._base_url = base_url or SHENGSUANYUN_BASE_URL
-        # 实例级默认模型（模型管理配置注入；未指定时使用系统默认 SHENGSUANYUN_IMAGE_MODEL）
-        self._image_model = image_model
+        # 实例级默认模型（模型管理配置注入；未指定时无默认，调用时显式报错）
+        self._image_model = (image_model or "").strip() or None
         # OpenAI 标准图片协议（/images/generations）同步结果的缓存 {request_id: image_url}
         self._sync_results: dict[str, str] = {}
 
@@ -66,7 +116,7 @@ class ImageService:
         return sizes[min(level, len(sizes) - 1)]
 
     def _get_size(self, resolution: str) -> str:
-        """根据分辨率获取 gemini-3-pro-image-preview 的尺寸参数
+        """根据分辨率获取盛算云协议的尺寸参数
 
         支持的尺寸: 1K, 2K, 4K
         """
@@ -329,7 +379,7 @@ class ImageService:
             video_params: 视频参数
             timeout: 超时时间（秒）
             poll_interval: 轮询间隔（秒）
-            model: 使用的模型（可选，默认实例配置模型或系统默认）
+            model: 使用的模型（可选，默认使用实例配置模型，未配置时报错）
 
         Returns:
             {"success": bool, "image_url": str, "error": str}
@@ -354,14 +404,17 @@ class ImageService:
             prompt: 图片提示词
             video_params: 视频参数
             reference_images: 参考图路径列表（可选，有则使用图生图，无则使用文生图）
-            model: 使用的模型（可选，默认使用 SHENGSUANYUN_IMAGE_MODEL）
+            model: 使用的模型（可选，默认使用实例配置模型，未配置时报错）
             compress_reference: 是否压缩参考图（默认 False，生成首尾帧时建议设为 True）
 
         Returns:
             {"success": bool, "request_id": str, "error": str}
         """
         size = self._get_size(video_params.resolution)
-        use_model = model or self._image_model or SHENGSUANYUN_IMAGE_MODEL
+        use_model = model or self._image_model
+        if not use_model or not self._api_key:
+            logger.error(_NOT_CONFIGURED_MSG)
+            return {"success": False, "error": _NOT_CONFIGURED_MSG}
 
         # 非盛算云服务：走 OpenAI 标准图片协议（同步生成，结果缓存后由 poll 取回）
         if not self._is_shengsuanyun():
@@ -443,7 +496,7 @@ class ImageService:
             prompt: 图片提示词
             reference_images: 参考图路径列表（本地路径或URL）
             video_params: 视频参数
-            model: 使用的模型（可选，默认使用 SHENGSUANYUN_IMAGE_MODEL）
+            model: 使用的模型（可选，默认使用实例配置模型，未配置时报错）
             compress_reference: 是否压缩参考图（默认 False，生成首尾帧时建议设为 True）
 
         Returns:
@@ -649,7 +702,7 @@ class ImageService:
             video_params: 视频参数
             timeout: 超时时间（秒）
             poll_interval: 轮询间隔（秒）
-            model: 使用的模型（可选，默认使用 SHENGSUANYUN_IMAGE_MODEL）
+            model: 使用的模型（可选，默认使用实例配置模型，未配置时报错）
             compress_reference: 是否压缩参考图（默认 False，生成首尾帧时建议设为 True）
 
         Returns:
@@ -909,7 +962,7 @@ class ImageService:
             prefix: 图片标识前缀（用于日志）
             reference_images: 参考图URL列表（素材图），用于保持角色/物品一致性
             frame_type: 帧类型，"first" 表示首帧，"last" 表示尾帧
-            model: 使用的模型（可选，默认使用 SHENGSUANYUN_IMAGE_MODEL）
+            model: 使用的模型（可选，默认使用实例配置模型，未配置时报错）
             compress_reference: 是否压缩参考图（默认 False，生成首尾帧时建议设为 True）
 
         Returns:
@@ -952,7 +1005,7 @@ class ImageService:
         timeout: int = 180,
         poll_interval: int = 5
     ) -> dict:
-        """编辑单个素材图（使用 gemini-3-pro-image-preview 模型进行图生图）
+        """编辑单个素材图（图生图）
 
         Args:
             original_image_path: 原始素材图路径（本地路径或URL）

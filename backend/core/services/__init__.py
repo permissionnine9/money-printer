@@ -1,5 +1,4 @@
 """服务模块"""
-from .llm_service import LLMService
 from .image_service import ImageService
 from .comfyui_service import VideoServiceComfyUI, ComfyUIClient, TimelineBuilder
 from .video_service_jimeng import VideoService as VideoServiceJimeng
@@ -50,7 +49,6 @@ def get_legacy_video_service():
 
 
 __all__ = [
-    "LLMService",
     "ImageService",
     "VideoService",
     "VideoServiceComfyUI",

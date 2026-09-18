@@ -90,6 +90,9 @@ class VideoService:
             aspect_ratio: 宽高比（16:9, 4:3, 1:1, 3:4, 9:16, 21:9）
             frames: 视频帧数（121=5秒，241=10秒）
         """
+        if not self.api_key:
+            raise ValueError("视频服务 API Key 未配置：请在服务端设置环境变量 SHENGSUANYUN_API_KEY")
+
         url = f"{self.base_url}/tasks/generations"
 
         headers = {

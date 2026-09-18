@@ -4,9 +4,26 @@ import logging
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+# 剧本创作工作流 4 步
+SCRIPT_STEPS = [
+    "story_ideation",     # 1. 故事构思（多轮对话盘问）
+    "story_outline",      # 2. 故事大纲（markmap）
+    "episode_design",     # 3. 分集设计（agent 工具增量落库）
+    "lookbook_images",    # 4. 剧本定妆照（agent 出 prompt + 确定性生图）
+]
+
+# 视频生成工作流 4 步（重构后）
+VIDEO_STEPS = [
+    "select_episode",       # 1. 从剧本选集
+    "storyboard_outline",   # 2. 分镜大纲（markmap + 分镜列表）
+    "segment_management",   # 3. 分镜管理（分镜形式配置 + 提示词生成）
+    "generate_videos",      # 4. 视频生成
+]
 
 
 class SessionManager:
@@ -17,32 +34,27 @@ class SessionManager:
     2. 持久化每个步骤的结果
     3. 查询会话状态和步骤结果
     4. 支持从任意步骤继续执行
+
+    步骤序列由构造参数 steps 注入（SCRIPT_STEPS / VIDEO_STEPS）。
     """
 
-    # 定义所有步骤（按顺序，7步流程）
-    STEPS = [
-        "submit_script_and_params",  # 1. 提交脚本和参数
-        "optimize_script",           # 2. 优化脚本
-        "generate_mindmap",          # 3. 生成思维导图
-        "generate_material_images",  # 4. 生成素材图
-        "generate_segment_scripts",  # 5. 生成分片脚本
-        "generate_segment_frames",   # 6. 生成首尾帧
-        "generate_videos",           # 7. 生成视频
-    ]
-
-    def __init__(self, db_path: str = "data/sessions.db"):
+    def __init__(self, db_path: str = "data/sessions.db", steps: list[str] | None = None):
         """初始化会话管理器
 
         Args:
             db_path: SQLite数据库路径
+            steps: 本管理器管辖的步骤序列（默认视频工作流 5 步）
         """
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.STEPS = list(steps) if steps else VIDEO_STEPS
         self._init_database()
 
     def _init_database(self):
         """初始化数据库表"""
         with sqlite3.connect(str(self.db_path)) as conn:
+            # WAL 模式：多连接（video/script 两个 SessionManager + ModelManager）并发读写
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS sessions (
                     session_id TEXT PRIMARY KEY,
@@ -52,6 +64,16 @@ class SessionManager:
                     status TEXT DEFAULT 'active'
                 )
             """)
+            # 新列迁移：工作流类型与剧本溯源（已存在则忽略）
+            for column, default in (
+                ("workflow_type", "'video'"),
+                ("script_session_id", "NULL"),
+                ("source_episode_id", "NULL"),
+            ):
+                try:
+                    conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} TEXT DEFAULT {default}")
+                except sqlite3.OperationalError:
+                    pass  # 列已存在
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS step_results (
@@ -79,11 +101,20 @@ class SessionManager:
 
             conn.commit()
 
-    def create_session(self, session_id: str) -> dict:
+    def create_session(
+        self,
+        session_id: str,
+        workflow_type: str = "video",
+        script_session_id: str | None = None,
+        source_episode_id: str | None = None,
+    ) -> dict:
         """创建新会话
 
         Args:
             session_id: 会话ID
+            workflow_type: 工作流类型（'video' | 'script'）
+            script_session_id: 视频会话指向的剧本会话ID
+            source_episode_id: 视频会话指向的剧本分集ID
 
         Returns:
             会话信息
@@ -92,8 +123,8 @@ class SessionManager:
 
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.execute(
-                "INSERT INTO sessions (session_id, created_at, updated_at, current_step, status) VALUES (?, ?, ?, ?, ?)",
-                (session_id, now, now, self.STEPS[0], "active")
+                "INSERT INTO sessions (session_id, created_at, updated_at, current_step, status, workflow_type, script_session_id, source_episode_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (session_id, now, now, self.STEPS[0], "active", workflow_type, script_session_id, source_episode_id)
             )
             conn.commit()
 
@@ -102,7 +133,10 @@ class SessionManager:
             "created_at": now,
             "updated_at": now,
             "current_step": self.STEPS[0],
-            "status": "active"
+            "status": "active",
+            "workflow_type": workflow_type,
+            "script_session_id": script_session_id,
+            "source_episode_id": source_episode_id,
         }
 
     def get_session(self, session_id: str) -> Optional[dict]:
@@ -283,83 +317,9 @@ class SessionManager:
         for i in range(step_index):
             prev_step = self.STEPS[i]
             if not self.is_step_completed(session_id, prev_step):
-                # 特殊处理：执行步骤6时，如果步骤5未完成，检查是否满足特殊模式的完成条件
-                if step_name == "generate_videos" and prev_step == "generate_segment_frames":
-                    if self._check_frames_completion_with_special_modes(session_id):
-                        # 自动更新步骤5状态为完成
-                        self.check_and_update_frames_step_status(session_id)
-                        continue
                 return False, f"前置步骤 {prev_step} 尚未完成"
 
         return True, "可以执行"
-
-    def _check_frames_completion_with_special_modes(self, session_id: str) -> bool:
-        """检查步骤5是否已完成（考虑特殊模式）
-
-        支持的特殊模式：
-        - 首帧+参考图模式 (first_frame_reference)：只需要首帧，不需要尾帧
-        - 视频快照模式 (use_video_snapshot)：首帧在视频生成阶段获取，只需要尾帧
-
-        Args:
-            session_id: 会话ID
-
-        Returns:
-            是否所有分片的首尾帧都已配置完成
-        """
-        step_result = self.get_step_result(session_id, "generate_segment_frames")
-        if not step_result:
-            return False
-
-        result_data = step_result['result_data']
-        segment_frames = result_data.get('segment_frames', [])
-
-        if not segment_frames:
-            return False
-
-        # 获取分片脚本数据
-        segments_result = self.get_step_result(session_id, "generate_segment_scripts")
-        segment_scripts = segments_result.get('result_data', {}).get('segment_scripts', []) if segments_result else []
-
-        # 构建分片索引到模式的映射
-        segment_modes = {}
-        for seg in segment_scripts:
-            idx = seg.get('index', -1)
-            if idx >= 0:
-                segment_modes[idx] = {
-                    'first_frame_mode': seg.get('first_frame_mode', 'generate'),
-                    'video_generation_mode': seg.get('video_generation_mode', 'first_last_frame')
-                }
-
-        # 检查所有帧是否都已配置完成
-        for frame in segment_frames:
-            segment_index = frame.get('segment_index', -1)
-            first_path = frame.get('first_image_path', '')
-            last_path = frame.get('last_image_path', '')
-
-            # 获取该分片的模式
-            modes = segment_modes.get(segment_index, {})
-            first_frame_mode = modes.get('first_frame_mode', 'generate')
-            video_generation_mode = modes.get('video_generation_mode', 'first_last_frame')
-
-            # 判断该分片是否完成
-            if video_generation_mode == 'first_frame_reference':
-                # 首帧+参考图模式：只需要首帧
-                # 但如果首帧模式是 use_video_snapshot，则首帧会在第6步获取，也认为配置完成
-                if first_frame_mode == 'use_video_snapshot':
-                    # 首帧将从视频快照获取，配置已完成
-                    continue
-                if not first_path:
-                    return False
-            elif first_frame_mode == 'use_video_snapshot':
-                # 视频快照模式：首帧在视频生成阶段获取，只需要尾帧
-                if not last_path:
-                    return False
-            else:
-                # 普通模式：需要首尾帧都完成
-                if not first_path or not last_path:
-                    return False
-
-        return True
 
     def update_session_status(self, session_id: str, status: str):
         """更新会话状态
@@ -615,17 +575,26 @@ class SessionManager:
             row = cursor.fetchone()
             return row[0] if row else None
 
-    def list_sessions(self) -> list[dict]:
-        """列出所有会话
+    def list_sessions(self, workflow_type: str | None = None) -> list[dict]:
+        """列出所有会话（可按工作流类型过滤）
+
+        Args:
+            workflow_type: 'video' | 'script'，None 为全部
 
         Returns:
             会话列表
         """
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                "SELECT * FROM sessions ORDER BY updated_at DESC"
-            )
+            if workflow_type:
+                cursor = conn.execute(
+                    "SELECT * FROM sessions WHERE workflow_type = ? ORDER BY updated_at DESC",
+                    (workflow_type,)
+                )
+            else:
+                cursor = conn.execute(
+                    "SELECT * FROM sessions ORDER BY updated_at DESC"
+                )
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
 
@@ -774,495 +743,6 @@ class SessionManager:
             conn.commit()
             return cursor.rowcount > 0
 
-    # ==================== 分片脚本编辑方法 ====================
-
-    def update_segment_script(self, session_id: str, segment_index: int, segment_data: dict) -> bool:
-        """更新单个分片脚本
-
-        Args:
-            session_id: 会话ID
-            segment_index: 分片索引
-            segment_data: 分片数据字典
-
-        Returns:
-            是否更新成功
-        """
-        step_result = self.get_step_result(session_id, "generate_segment_scripts")
-        if not step_result:
-            return False
-
-        result_data = step_result['result_data']
-        segment_scripts = result_data.get('segment_scripts', [])
-
-        # 如果 segment_data 是 Pydantic 对象，转换为字典
-        if hasattr(segment_data, 'model_dump'):
-            segment_data = segment_data.model_dump()
-        elif hasattr(segment_data, 'dict'):
-            segment_data = segment_data.dict()
-
-        # 查找并更新对应索引的分片
-        updated = False
-        for i, seg in enumerate(segment_scripts):
-            if seg.get('index') == segment_index:
-                # 保留索引，更新其他字段
-                segment_data['index'] = segment_index
-                segment_scripts[i] = segment_data
-                updated = True
-                break
-
-        if not updated:
-            return False
-
-        # 保存更新后的数据
-        result_data['segment_scripts'] = segment_scripts
-        now = datetime.now().isoformat()
-        result_json = json.dumps(result_data, ensure_ascii=False)
-
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.execute("""
-                UPDATE step_results
-                SET result_data = ?, completed_at = ?
-                WHERE session_id = ? AND step_name = ?
-            """, (result_json, now, session_id, "generate_segment_scripts"))
-            conn.execute(
-                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
-                (now, session_id)
-            )
-            conn.commit()
-
-        return True
-
-    def delete_segment(self, session_id: str, segment_index: int) -> bool:
-        """删除分片脚本（及其对应的首尾帧）
-
-        Args:
-            session_id: 会话ID
-            segment_index: 分片索引
-
-        Returns:
-            是否删除成功
-        """
-        # 更新分片脚本
-        step_result = self.get_step_result(session_id, "generate_segment_scripts")
-        if not step_result:
-            return False
-
-        result_data = step_result['result_data']
-        segment_scripts = result_data.get('segment_scripts', [])
-
-        # 删除指定索引的分片
-        new_scripts = [seg for seg in segment_scripts if seg.get('index') != segment_index]
-        if len(new_scripts) == len(segment_scripts):
-            return False  # 没有找到要删除的分片
-
-        # 重新编号索引
-        for i, seg in enumerate(new_scripts):
-            seg['index'] = i
-
-        result_data['segment_scripts'] = new_scripts
-        result_data['segment_count'] = len(new_scripts)
-
-        now = datetime.now().isoformat()
-        result_json = json.dumps(result_data, ensure_ascii=False)
-
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.execute("""
-                UPDATE step_results
-                SET result_data = ?, completed_at = ?
-                WHERE session_id = ? AND step_name = ?
-            """, (result_json, now, session_id, "generate_segment_scripts"))
-
-            # 同步删除对应的首尾帧
-            frames_result = self.get_step_result(session_id, "generate_segment_frames")
-            if frames_result:
-                frames_data = frames_result['result_data']
-                segment_frames = frames_data.get('segment_frames', [])
-                new_frames = [f for f in segment_frames if f.get('segment_index') != segment_index]
-                # 重新编号首尾帧索引
-                for i, frame in enumerate(new_frames):
-                    frame['segment_index'] = i
-                frames_data['segment_frames'] = new_frames
-                frames_data['frame_count'] = len(new_frames)
-                frames_json = json.dumps(frames_data, ensure_ascii=False)
-                conn.execute("""
-                    UPDATE step_results
-                    SET result_data = ?, completed_at = ?
-                    WHERE session_id = ? AND step_name = ?
-                """, (frames_json, now, session_id, "generate_segment_frames"))
-
-            conn.execute(
-                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
-                (now, session_id)
-            )
-            conn.commit()
-
-        return True
-
-    def add_segment(self, session_id: str, segment_data: dict, insert_after: int = -1) -> bool:
-        """新增分片脚本
-
-        修复：插入分片时不清空已有的首尾帧数据，而是智能调整帧数据索引
-
-        Args:
-            session_id: 会话ID
-            segment_data: 分片数据字典
-            insert_after: 插入位置（-1表示末尾，否则在指定索引之后插入）
-
-        Returns:
-            是否添加成功
-        """
-        step_result = self.get_step_result(session_id, "generate_segment_scripts")
-        if not step_result:
-            return False
-
-        result_data = step_result['result_data']
-        segment_scripts = result_data.get('segment_scripts', [])
-
-        # 确定插入位置
-        if insert_after < 0 or insert_after >= len(segment_scripts):
-            insert_pos = len(segment_scripts)
-        else:
-            insert_pos = insert_after + 1
-
-        # 设置新分片的索引
-        segment_data['index'] = insert_pos
-
-        # 插入新分片
-        segment_scripts.insert(insert_pos, segment_data)
-
-        # 重新编号索引
-        for i, seg in enumerate(segment_scripts):
-            seg['index'] = i
-
-        result_data['segment_scripts'] = segment_scripts
-        result_data['segment_count'] = len(segment_scripts)
-
-        now = datetime.now().isoformat()
-        result_json = json.dumps(result_data, ensure_ascii=False)
-
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.execute("""
-                UPDATE step_results
-                SET result_data = ?, completed_at = ?
-                WHERE session_id = ? AND step_name = ?
-            """, (result_json, now, session_id, "generate_segment_scripts"))
-            conn.execute(
-                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
-                (now, session_id)
-            )
-            conn.commit()
-
-        # 修复：不清空步骤5和步骤6，而是智能调整帧数据
-        self._adjust_frames_after_insert(session_id, insert_pos)
-
-        return True
-
-    def _adjust_frames_after_insert(self, session_id: str, insert_pos: int) -> bool:
-        """插入分片后调整帧数据
-
-        保留已有的首尾帧数据，为新分片创建空的帧数据，调整后续分片的索引
-
-        Args:
-            session_id: 会话ID
-            insert_pos: 新分片插入的位置
-
-        Returns:
-            是否成功
-        """
-        try:
-            # 获取现有的帧数据
-            frames_result = self.get_step_result(session_id, "generate_segment_frames")
-            if not frames_result:
-                # 没有帧数据，无需调整
-                return True
-
-            result_data = frames_result['result_data']
-            segment_frames = result_data.get('segment_frames', [])
-
-            if not segment_frames:
-                return True
-
-            # 为新分片创建空的帧数据
-            new_frame = {
-                "segment_index": insert_pos,
-                "first_image_id": "",
-                "first_image_path": "",
-                "last_image_id": "",
-                "last_image_path": "",
-                "first_prompt": "",
-                "last_prompt": "",
-                "first_status": "waiting",
-                "last_status": "waiting"
-            }
-
-            # 插入新的空帧数据
-            segment_frames.insert(insert_pos, new_frame)
-
-            # 调整后续帧的 segment_index
-            for i, frame in enumerate(segment_frames):
-                frame['segment_index'] = i
-
-            # 更新数据库
-            result_data['segment_frames'] = segment_frames
-            now = datetime.now().isoformat()
-            result_json = json.dumps(result_data, ensure_ascii=False)
-
-            with sqlite3.connect(str(self.db_path)) as conn:
-                conn.execute("""
-                    UPDATE step_results
-                    SET result_data = ?, completed_at = ?
-                    WHERE session_id = ? AND step_name = ?
-                """, (result_json, now, session_id, "generate_segment_frames"))
-                conn.commit()
-
-            # 清空步骤6（视频数据），因为分片结构变化了
-            self.clear_step_result(session_id, "generate_videos")
-
-            logger.info(f"[插入分片] 已调整帧数据，新分片位置: {insert_pos}")
-            return True
-
-        except Exception as e:
-            logger.error(f"[插入分片] 调整帧数据失败: {e}")
-            return False
-
-    def update_mindmap(self, session_id: str, mindmap_markdown: str) -> bool:
-        """更新思维导图内容（人工修改，不推进 current_step）
-
-        Args:
-            session_id: 会话ID
-            mindmap_markdown: 新的思维导图 markdown 文本
-
-        Returns:
-            是否更新成功
-        """
-        step_result = self.get_step_result(session_id, "generate_mindmap")
-        if not step_result:
-            return False
-
-        result_data = step_result['result_data']
-        result_data['mindmap'] = mindmap_markdown
-        result_data['edited'] = True
-
-        return self.update_step_result(session_id, "generate_mindmap", result_data)
-
-    def update_material_image(self, session_id: str, image_index: int, update_data: dict) -> bool:
-        """更新单个素材图信息
-
-        Args:
-            session_id: 会话ID
-            image_index: 图片索引
-            update_data: 要更新的字段字典（如 image_path, task_status, description 等）
-
-        Returns:
-            是否更新成功
-        """
-        step_result = self.get_step_result(session_id, "generate_material_images")
-        if not step_result:
-            return False
-
-        result_data = step_result['result_data']
-        material_images = result_data.get('material_images', [])
-
-        if image_index < 0 or image_index >= len(material_images):
-            return False
-
-        # 更新指定索引的图片信息
-        for key, value in update_data.items():
-            material_images[image_index][key] = value
-
-        # 保存更新后的数据
-        now = datetime.now().isoformat()
-        result_json = json.dumps(result_data, ensure_ascii=False)
-
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.execute("""
-                UPDATE step_results
-                SET result_data = ?, completed_at = ?
-                WHERE session_id = ? AND step_name = ?
-            """, (result_json, now, session_id, "generate_material_images"))
-            conn.execute(
-                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
-                (now, session_id)
-            )
-            conn.commit()
-
-        return True
-
-    def _create_frame_data(
-        self,
-        segment_index: int,
-        frame_type: str = None,
-        image_path: str = None,
-        image_id: str = None,
-        prompt: str = None
-    ) -> dict:
-        """创建帧数据结构的辅助方法
-
-        Args:
-            segment_index: 分片索引
-            frame_type: 帧类型 ("first" 或 "last")，可选
-            image_path: 图片路径，可选
-            image_id: 图片ID，可选
-            prompt: 生成提示词，可选
-
-        Returns:
-            帧数据字典
-        """
-        frame = {
-            'segment_index': segment_index,
-            'first_image_path': None,
-            'first_image_id': None,
-            'first_prompt': None,
-            'first_status': 'waiting',
-            'last_image_path': None,
-            'last_image_id': None,
-            'last_prompt': None,
-            'last_status': 'waiting',
-        }
-
-        # 如果有帧类型和路径，填充对应字段
-        if frame_type and image_path:
-            prefix = 'first' if frame_type == 'first' else 'last'
-            frame[f'{prefix}_image_path'] = image_path
-            frame[f'{prefix}_status'] = 'completed'
-            if image_id:
-                frame[f'{prefix}_image_id'] = image_id
-            if prompt:
-                frame[f'{prefix}_prompt'] = prompt
-
-        return frame
-
-    def _insert_frame_sorted(self, segment_frames: list, new_frame: dict) -> None:
-        """按 segment_index 顺序插入帧数据
-
-        Args:
-            segment_frames: 现有帧列表
-            new_frame: 要插入的新帧
-        """
-        segment_index = new_frame['segment_index']
-        inserted = False
-
-        for i, frame in enumerate(segment_frames):
-            if frame.get('segment_index') > segment_index:
-                segment_frames.insert(i, new_frame)
-                inserted = True
-                break
-
-        if not inserted:
-            segment_frames.append(new_frame)
-
-    def update_segment_frame(
-        self,
-        session_id: str,
-        segment_index: int,
-        frame_type: str,
-        image_path: str,
-        image_id: str = None,
-        prompt: str = None
-    ) -> bool:
-        """更新单个首/尾帧路径
-
-        Args:
-            session_id: 会话ID
-            segment_index: 分片索引
-            frame_type: 帧类型 ("first" 或 "last")
-            image_path: 新的图片路径
-            image_id: 新的图片ID（可选）
-            prompt: 生成提示词（可选）
-
-        Returns:
-            是否更新成功
-        """
-        if frame_type not in ("first", "last"):
-            return False
-
-        step_result = self.get_step_result(session_id, "generate_segment_frames")
-
-        # 如果步骤5不存在，需要先初始化
-        if not step_result:
-            segments_result = self.get_step_result(session_id, "generate_segment_scripts")
-            if not segments_result:
-                return False
-
-            segment_scripts = segments_result['result_data'].get('segment_scripts', [])
-            if not segment_scripts:
-                return False
-
-            # 使用辅助方法初始化帧数据结构
-            segment_frames = [
-                self._create_frame_data(seg.get('index', i))
-                for i, seg in enumerate(segment_scripts)
-            ]
-
-            result_data = {
-                'segment_frames': segment_frames,
-                '_generating': False,
-                '_cancelled': False,
-            }
-
-            self.save_step_result(session_id, "generate_segment_frames", result_data, success=False)
-            step_result = self.get_step_result(session_id, "generate_segment_frames")
-
-        result_data = step_result['result_data']
-        segment_frames = result_data.get('segment_frames', [])
-
-        # 查找并更新对应索引的帧
-        updated = False
-        for frame in segment_frames:
-            if frame.get('segment_index') == segment_index:
-                prefix = 'first' if frame_type == 'first' else 'last'
-                frame[f'{prefix}_image_path'] = image_path
-                frame[f'{prefix}_status'] = 'completed'
-                if image_id:
-                    frame[f'{prefix}_image_id'] = image_id
-                if prompt:
-                    frame[f'{prefix}_prompt'] = prompt
-                updated = True
-                break
-
-        # 如果没找到对应的帧数据，添加新的帧数据
-        if not updated:
-            new_frame = self._create_frame_data(
-                segment_index, frame_type, image_path, image_id, prompt
-            )
-            self._insert_frame_sorted(segment_frames, new_frame)
-
-        # 保存更新后的数据
-        now = datetime.now().isoformat()
-        result_json = json.dumps(result_data, ensure_ascii=False)
-
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.execute("""
-                UPDATE step_results
-                SET result_data = ?, completed_at = ?
-                WHERE session_id = ? AND step_name = ?
-            """, (result_json, now, session_id, "generate_segment_frames"))
-            conn.execute(
-                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
-                (now, session_id)
-            )
-            conn.commit()
-
-        return True
-
-        # 保存更新后的数据
-        now = datetime.now().isoformat()
-        result_json = json.dumps(result_data, ensure_ascii=False)
-
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.execute("""
-                UPDATE step_results
-                SET result_data = ?, completed_at = ?
-                WHERE session_id = ? AND step_name = ?
-            """, (result_json, now, session_id, "generate_segment_frames"))
-            conn.execute(
-                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
-                (now, session_id)
-            )
-            conn.commit()
-
-        return True
-
     def set_step_cancelled(self, session_id: str, step_name: str, cancelled: bool = True) -> bool:
         """设置步骤的取消标志
 
@@ -1316,107 +796,3 @@ class SessionManager:
         if not step_result:
             return False
         return step_result.get('result_data', {}).get('_cancelled', False)
-
-    def check_and_update_frames_step_status(self, session_id: str) -> bool:
-        """检查所有首尾帧是否都已生成完成，如果是则更新步骤状态为成功
-
-        在单独重新生成帧后调用此方法，检查是否所有帧都已成功生成。
-        支持特殊模式：
-        - 首帧+参考图模式 (first_frame_reference)：只需要首帧，不需要尾帧
-        - 视频快照模式 (use_video_snapshot)：首帧在视频生成阶段获取，只需要尾帧
-
-        如果所有帧都成功，则更新步骤的 _success 状态为 True，并将 current_step 前进到下一步。
-
-        Args:
-            session_id: 会话ID
-
-        Returns:
-            是否所有帧都已成功生成（并且步骤状态已更新）
-        """
-        step_result = self.get_step_result(session_id, "generate_segment_frames")
-        if not step_result:
-            return False
-
-        result_data = step_result['result_data']
-        segment_frames = result_data.get('segment_frames', [])
-
-        if not segment_frames:
-            return False
-
-        # 获取分片脚本数据，用于判断每个分片的模式
-        segments_result = self.get_step_result(session_id, "generate_segment_scripts")
-        segment_scripts = segments_result.get('result_data', {}).get('segment_scripts', []) if segments_result else []
-
-        # 构建分片索引到模式的映射
-        segment_modes = {}
-        for seg in segment_scripts:
-            idx = seg.get('index', -1)
-            if idx >= 0:
-                segment_modes[idx] = {
-                    'first_frame_mode': seg.get('first_frame_mode', 'generate'),
-                    'video_generation_mode': seg.get('video_generation_mode', 'first_last_frame')
-                }
-
-        # 检查所有帧是否都已生成完成（考虑特殊模式）
-        all_complete = True
-        error_count = 0
-        for frame in segment_frames:
-            segment_index = frame.get('segment_index', -1)
-            first_path = frame.get('first_image_path', '')
-            last_path = frame.get('last_image_path', '')
-
-            # 获取该分片的模式
-            modes = segment_modes.get(segment_index, {})
-            first_frame_mode = modes.get('first_frame_mode', 'generate')
-            video_generation_mode = modes.get('video_generation_mode', 'first_last_frame')
-
-            # 判断该分片是否完成
-            segment_complete = False
-
-            if video_generation_mode == 'first_frame_reference':
-                # 首帧+参考图模式：只需要首帧
-                # 但如果首帧模式是 use_video_snapshot，则首帧会在第6步获取，也认为配置完成
-                if first_frame_mode == 'use_video_snapshot':
-                    # 首帧将从视频快照获取，配置已完成
-                    segment_complete = True
-                else:
-                    segment_complete = bool(first_path)
-            elif first_frame_mode == 'use_video_snapshot':
-                # 视频快照模式：首帧在视频生成阶段获取，只需要尾帧
-                segment_complete = bool(last_path)
-            else:
-                # 普通模式（首尾帧模式）：需要首尾帧都完成
-                segment_complete = bool(first_path) and bool(last_path)
-
-            if not segment_complete:
-                all_complete = False
-                error_count += 1
-
-        if not all_complete:
-            return False
-
-        # 所有帧都已成功生成，更新步骤状态
-        # 更新 _success 字段和 error_count
-        result_data['_success'] = True
-        result_data['error_count'] = 0
-
-        now = datetime.now().isoformat()
-        result_json = json.dumps(result_data, ensure_ascii=False)
-
-        with sqlite3.connect(str(self.db_path)) as conn:
-            # 更新步骤结果
-            conn.execute("""
-                UPDATE step_results
-                SET result_data = ?, completed_at = ?
-                WHERE session_id = ? AND step_name = ?
-            """, (result_json, now, session_id, "generate_segment_frames"))
-
-            # 更新 current_step 到下一步
-            next_step = self._get_next_step("generate_segment_frames")
-            conn.execute(
-                "UPDATE sessions SET current_step = ?, updated_at = ? WHERE session_id = ?",
-                (next_step, now, session_id)
-            )
-            conn.commit()
-
-        return True
