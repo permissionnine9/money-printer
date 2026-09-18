@@ -1,11 +1,12 @@
 /**
  * 第 3 步：分集设计（左侧集时间线 + 右侧单集详情编辑；人物/场景/线索伏笔实体库 Tabs）
  */
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import { Button, Card, Empty, Input, Modal, Select, Space, Spin, Tabs, Tag, Typography, message } from 'antd'
 import {
   CheckCircleOutlined,
   DeleteOutlined,
+  DownloadOutlined,
   EditOutlined,
   ExclamationCircleOutlined,
   PlusOutlined,
@@ -25,21 +26,15 @@ import type {
 import { entityApi, scriptStepApi } from '@/api/client'
 import { useScriptSessionStore } from '@/stores/scriptSessionStore'
 import { usePolling } from '@/hooks/usePolling'
+import { ACTION_LABEL, buildScriptMarkdown, downloadTextFile, extractScriptTitle } from '@/utils/scriptMarkdown'
 import { AgentRunProgress } from './AgentRunProgress'
+import { imageSrc } from '@/utils/imageSrc'
 
 const { Text } = Typography
 const { TextArea } = Input
 
 interface StepEpisodeDesignProps {
   session: ScriptSessionDetail
-}
-
-// 线索/伏笔动作中文标签
-const ACTION_LABEL: Record<EntityRef['action'], string> = {
-  plant: '埋设',
-  develop: '发展',
-  reveal: '揭示',
-  payoff: '兑现',
 }
 
 const ACTION_OPTIONS = (Object.keys(ACTION_LABEL) as EntityRef['action'][]).map((a) => ({
@@ -64,11 +59,6 @@ const DOC_STYLE = `
 `
 
 // 图片路径 → 可访问 src（后端相对路径补 / 前缀）
-const imageSrc = (path?: string): string => {
-  if (!path) return ''
-  if (path.startsWith('http://') || path.startsWith('https://')) return path
-  return `/${path}`
-}
 
 type EpisodeDraft = Pick<
   Episode,
@@ -117,7 +107,6 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
   const [entities, setEntities] = useState<ScriptEntity[]>([])
   const [selectedId, setSelectedId] = useState('')
   const [tab, setTab] = useState('episodes')
-  const [highlight, setHighlight] = useState('')
   const [draft, setDraft] = useState<EpisodeDraft>(EMPTY_DRAFT)
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -129,8 +118,8 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
     extra: '',
   })
 
-  const cardRefs = useRef<Record<string, HTMLDivElement | null>>({})
   const [expandedId, setExpandedId] = useState('')
+  const [detailId, setDetailId] = useState('')
   const [entityRefs, setEntityRefs] = useState<Record<string, EntityReferences>>({})
   const [refsLoading, setRefsLoading] = useState<Record<string, boolean>>({})
 
@@ -156,6 +145,22 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
     void loadEpisodes()
     void loadEntities()
   }, [loadEpisodes, loadEntities])
+
+  // 实体引用集：点击实体卡/Tag 时加载（hook 必须位于 early return 之前，避免切换会话时 hooks 数量变化）
+  const loadReferences = useCallback(
+    async (entityId: string) => {
+      setRefsLoading((s) => ({ ...s, [entityId]: true }))
+      try {
+        const refs = await entityApi.getReferences(session.session_id, entityId)
+        setEntityRefs((s) => ({ ...s, [entityId]: refs }))
+      } catch {
+        // 静默失败（接口未就绪时不阻塞卡片）
+      } finally {
+        setRefsLoading((s) => ({ ...s, [entityId]: false }))
+      }
+    },
+    [session.session_id]
+  )
 
   // 生成期间 2s 轮询（agent 工具增量落库，时间线逐集点亮）
   usePolling(
@@ -195,29 +200,29 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, selected?.updated_at])
 
-  // 实体库定位：滚动到高亮实体卡片
-  useEffect(() => {
-    if (highlight && cardRefs.current[highlight]) {
-      cardRefs.current[highlight]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    }
-  }, [highlight, tab, entities])
-
   const entityName = (id: string) => entities.find((e) => e.entity_id === id)?.name || ''
 
-  // 点击实体 Tag：切换到对应实体库 Tab 并高亮
-  const jumpToEntity = (entityId: string) => {
+  // 点击实体 Tag：弹窗展示实体详情（不打断分集浏览）
+  const openEntityDetail = (entityId: string) => {
     const ent = entities.find((e) => e.entity_id === entityId)
     if (!ent) {
       message.warning(`实体 ${entityId} 不在实体库中`)
       return
     }
-    const key =
-      ent.entity_type === 'character' ? 'characters' : ent.entity_type === 'scene' ? 'scenes' : 'ref'
-    setHighlight(entityId)
-    setTab(key)
+    setDetailId(entityId)
+    if (!entityRefs[entityId] && !refsLoading[entityId]) {
+      void loadReferences(entityId)
+    }
   }
 
   const openGenerate = (episodeId = '') => setGenModal({ open: true, episodeId, extra: '' })
+
+  // 下载完整剧本（大纲 + 逐集正文，Markdown）
+  const handleDownloadScript = () => {
+    const outline: string = session.step_results?.story_outline?.result_data?.mindmap || ''
+    const content = buildScriptMarkdown(episodes, entities, outline)
+    downloadTextFile(`${extractScriptTitle(outline)} 完整剧本.md`, content)
+  }
 
   const executeGenerate = async (episodeId: string, extra: string) => {
     setGenModal((m) => ({ ...m, open: false }))
@@ -302,22 +307,6 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
     (e) => e.entity_type === 'clue' || e.entity_type === 'foreshadow'
   )
 
-  // 实体引用集：点击实体卡展开时加载
-  const loadReferences = useCallback(
-    async (entityId: string) => {
-      setRefsLoading((s) => ({ ...s, [entityId]: true }))
-      try {
-        const refs = await entityApi.getReferences(session.session_id, entityId)
-        setEntityRefs((s) => ({ ...s, [entityId]: refs }))
-      } catch {
-        // 静默失败（接口未就绪时不阻塞卡片）
-      } finally {
-        setRefsLoading((s) => ({ ...s, [entityId]: false }))
-      }
-    },
-    [session.session_id]
-  )
-
   const toggleExpand = (entityId: string) => {
     setExpandedId((cur) => {
       const next = cur === entityId ? '' : entityId
@@ -328,19 +317,67 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
     })
   }
 
-  const renderEntityCard = (e: ScriptEntity) => {
-    const isHighlighted = highlight === e.entity_id
-    const expanded = expandedId === e.entity_id
+  // 引用集渲染：线索/伏笔按集排序展示 plant→payoff 时间线，人物/场景展示分集列表
+  const renderEntityRefs = (e: ScriptEntity) => {
     const refs = entityRefs[e.entity_id]
+    const isRefEntity = e.entity_type === 'clue' || e.entity_type === 'foreshadow'
+    if (refsLoading[e.entity_id]) {
+      return (
+        <Space>
+          <Spin size="small" />
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            加载中…
+          </Text>
+        </Space>
+      )
+    }
+    if (refs && refs.episodes.length > 0) {
+      return isRefEntity ? (
+        <div>
+          {[...refs.episodes]
+            .sort((a, b) => a.episode_id.localeCompare(b.episode_id))
+            .map((ep) => (
+              <div key={ep.episode_id} style={{ display: 'flex', gap: 4, alignItems: 'center', marginBottom: 4 }}>
+                <Text style={{ fontSize: 12, flexShrink: 0 }}>{ep.episode_id}</Text>
+                <div style={{ width: 1, height: 12, background: '#d9d9d9' }} />
+                {ep.actions.map((a) => (
+                  <Tag
+                    key={a}
+                    style={{ marginRight: 0, fontSize: 11 }}
+                    color={a === 'payoff' ? 'green' : a === 'plant' ? 'orange' : 'blue'}
+                  >
+                    {ACTION_LABEL[a as EntityRef['action']] || a}
+                  </Tag>
+                ))}
+              </div>
+            ))}
+        </div>
+      ) : (
+        refs.episodes.map((ep) => (
+          <div key={ep.episode_id} style={{ marginBottom: 4 }}>
+            <Tag style={{ marginRight: 4, fontSize: 11 }}>{ep.episode_id}</Tag>
+            <Text style={{ fontSize: 12 }}>{ep.title}</Text>
+          </div>
+        ))
+      )
+    }
+    return (
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        暂无分集引用
+      </Text>
+    )
+  }
+
+  const renderEntityCard = (e: ScriptEntity) => {
+    const expanded = expandedId === e.entity_id
     const metaEntries = Object.entries(e.meta || {}).filter(
       ([, v]) => v != null && v !== '' && typeof v !== 'object'
     )
-    const isRefEntity = e.entity_type === 'clue' || e.entity_type === 'foreshadow'
     return (
-      <div key={e.entity_id} ref={(el) => { cardRefs.current[e.entity_id] = el }} style={{ width: 220 }}>
+      <div key={e.entity_id} style={{ width: 220 }}>
         <Card
           size="small"
-          style={{ border: isHighlighted ? '2px solid #1677ff' : '1px solid #f0f0f0', cursor: 'pointer' }}
+          style={{ border: '1px solid #f0f0f0', cursor: 'pointer' }}
           styles={{ body: { padding: 8 } }}
           onClick={() => toggleExpand(e.entity_id)}
         >
@@ -393,50 +430,7 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
               <Text type="secondary" style={{ fontSize: 12 }}>
                 引用集
               </Text>
-              <div style={{ marginTop: 4 }}>
-                {refsLoading[e.entity_id] ? (
-                  <Space>
-                    <Spin size="small" />
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      加载中…
-                    </Text>
-                  </Space>
-                ) : refs && refs.episodes.length > 0 ? (
-                  isRefEntity ? (
-                    // 线索/伏笔：按集排序展示 plant→payoff 时间线
-                    <div>
-                      {[...refs.episodes]
-                        .sort((a, b) => a.episode_id.localeCompare(b.episode_id))
-                        .map((ep) => (
-                          <div key={ep.episode_id} style={{ display: 'flex', gap: 4, alignItems: 'center', marginBottom: 4 }}>
-                            <Text style={{ fontSize: 12, flexShrink: 0 }}>{ep.episode_id}</Text>
-                            <div style={{ width: 1, height: 12, background: '#d9d9d9' }} />
-                            {ep.actions.map((a) => (
-                              <Tag
-                                key={a}
-                                style={{ marginRight: 0, fontSize: 11 }}
-                                color={a === 'payoff' ? 'green' : a === 'plant' ? 'orange' : 'blue'}
-                              >
-                                {ACTION_LABEL[a as EntityRef['action']] || a}
-                              </Tag>
-                            ))}
-                          </div>
-                        ))}
-                    </div>
-                  ) : (
-                    refs.episodes.map((ep) => (
-                      <div key={ep.episode_id} style={{ marginBottom: 4 }}>
-                        <Tag style={{ marginRight: 4, fontSize: 11 }}>{ep.episode_id}</Tag>
-                        <Text style={{ fontSize: 12 }}>{ep.title}</Text>
-                      </div>
-                    ))
-                  )
-                ) : (
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    暂无分集引用
-                  </Text>
-                )}
-              </div>
+              <div style={{ marginTop: 4 }}>{renderEntityRefs(e)}</div>
             </div>
           )}
         </Card>
@@ -456,7 +450,7 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
   // ==================== 单集详情 ====================
 
   const entityTag = (id: string, suffix?: string) => (
-    <Tag key={`${id}-${suffix || ''}`} color="blue" style={{ cursor: 'pointer' }} onClick={() => jumpToEntity(id)}>
+    <Tag key={`${id}-${suffix || ''}`} color="blue" style={{ cursor: 'pointer' }} onClick={() => openEntityDetail(id)}>
       {id} {entityName(id)}
       {suffix ? ` · ${suffix}` : ''}
     </Tag>
@@ -678,6 +672,9 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
         >
           {episodes.length ? '重新生成分集设计' : '生成分集设计'}
         </Button>
+        <Button icon={<DownloadOutlined />} disabled={episodes.length === 0} onClick={handleDownloadScript}>
+          下载完整剧本
+        </Button>
         {episodes.length > 0 && <Text type="secondary">共 {episodes.length} 集</Text>}
         {isCompleted && <Tag color="success">已完成</Tag>}
       </Space>
@@ -760,6 +757,73 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
     </div>
   )
 
+  const detailEntity = entities.find((e) => e.entity_id === detailId)
+
+  // 实体详情弹窗（分集文档中点击实体 Tag 触发）
+  const entityModalNode = (
+    <Modal
+      open={!!detailEntity}
+      onCancel={() => setDetailId('')}
+      footer={null}
+      width={560}
+      title={
+        detailEntity && (
+          <Space>
+            <Text strong>{detailEntity.name}</Text>
+            <Tag style={{ fontSize: 11 }}>{detailEntity.entity_id}</Tag>
+          </Space>
+        )
+      }
+    >
+      {detailEntity && (
+        <div style={{ display: 'flex', gap: 16, maxHeight: '65vh', overflow: 'auto' }}>
+          {detailEntity.lookbook_image_path ? (
+            <img
+              src={imageSrc(detailEntity.lookbook_image_path)}
+              alt={detailEntity.name}
+              style={{ width: 180, height: 240, objectFit: 'cover', borderRadius: 6, flexShrink: 0 }}
+            />
+          ) : (
+            <div
+              style={{
+                width: 180,
+                height: 240,
+                background: '#fafafa',
+                border: '1px dashed #e8e8e8',
+                borderRadius: 6,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                flexShrink: 0,
+              }}
+            >
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                暂无定妆照
+              </Text>
+            </div>
+          )}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, lineHeight: 1.7 }}>{detailEntity.description}</div>
+            {Object.entries(detailEntity.meta || {})
+              .filter(([, v]) => v != null && v !== '' && typeof v !== 'object')
+              .map(([k, v]) => (
+                <div key={k} style={{ fontSize: 12, lineHeight: 1.6, marginTop: 4 }}>
+                  <Text type="secondary">{k}：</Text>
+                  <Text style={{ fontSize: 12 }}>{String(v)}</Text>
+                </div>
+              ))}
+            <div style={{ marginTop: 12, borderTop: '1px solid #f0f0f0', paddingTop: 8 }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                引用集
+              </Text>
+              <div style={{ marginTop: 4 }}>{renderEntityRefs(detailEntity)}</div>
+            </div>
+          </div>
+        </div>
+      )}
+    </Modal>
+  )
+
   const genModalNode = (
     <Modal
       title={genModal.episodeId ? `重新设计 ${genModal.episodeId}` : '生成分集设计'}
@@ -807,6 +871,7 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
         ]}
       />
       {genModalNode}
+      {entityModalNode}
     </Card>
   )
 }

@@ -1,17 +1,17 @@
 """模型配置管理 - 支持添加多个生图/chat/agent 模型（key/baseUrl/modelId 关联）"""
+import logging
 import sqlite3
 import uuid
-from datetime import datetime
-from pathlib import Path
 
-import logging
+from backend.core.persistence.base import BaseSQLiteManager
+
 logger = logging.getLogger(__name__)
 
 # 支持的模型类型
 MODEL_TYPES = ("image", "chat", "agent")
 
 
-class ModelManager:
+class ModelManager(BaseSQLiteManager):
     """模型配置管理器
 
     负责 model 配置表（image_models）的 CRUD 与默认模型查询。
@@ -19,32 +19,22 @@ class ModelManager:
     'agent'（Claude Agent SDK 端点，Anthropic 协议），每类各自独立默认。
     """
 
-    def __init__(self, db_path: str = "data/sessions.db"):
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_database()
-
-    def _init_database(self):
+    def _create_schema(self, conn):
         """初始化模型配置表"""
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS image_models (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    api_key TEXT NOT NULL DEFAULT '',
-                    base_url TEXT NOT NULL DEFAULT '',
-                    model_id TEXT NOT NULL DEFAULT '',
-                    is_default INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-            """)
-            # 旧表迁移：增加 model_type 列（已存在则忽略）
-            try:
-                conn.execute("ALTER TABLE image_models ADD COLUMN model_type TEXT NOT NULL DEFAULT 'image'")
-            except sqlite3.OperationalError:
-                pass  # 列已存在
-            conn.commit()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS image_models (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                api_key TEXT NOT NULL DEFAULT '',
+                base_url TEXT NOT NULL DEFAULT '',
+                model_id TEXT NOT NULL DEFAULT '',
+                is_default INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        # 旧表迁移：增加 model_type 列（已存在则忽略）
+        self._add_columns_if_missing(conn, "image_models", {"model_type": "TEXT NOT NULL DEFAULT 'image'"})
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
         data = dict(row)
@@ -54,8 +44,7 @@ class ModelManager:
 
     def list_models(self, model_type: str | None = None) -> list[dict]:
         """列出模型配置（默认的排前面，可按类型过滤）"""
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.row_factory = sqlite3.Row
+        with self._connect() as conn:
             if model_type:
                 cursor = conn.execute(
                     "SELECT * FROM image_models WHERE model_type = ? ORDER BY is_default DESC, created_at ASC",
@@ -69,24 +58,16 @@ class ModelManager:
 
     def get_model(self, model_id: str) -> dict | None:
         """获取单个模型配置"""
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                "SELECT * FROM image_models WHERE id = ?", (model_id,)
-            )
-            row = cursor.fetchone()
-            return self._row_to_dict(row) if row else None
+        row = self._fetch_one("SELECT * FROM image_models WHERE id = ?", (model_id,))
+        return self._row_to_dict(row) if row else None
 
     def get_default_model(self, model_type: str = "image") -> dict | None:
         """获取指定类型的默认模型配置（无默认时返回 None，使用系统内置配置）"""
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                "SELECT * FROM image_models WHERE is_default = 1 AND model_type = ? LIMIT 1",
-                (model_type,)
-            )
-            row = cursor.fetchone()
-            return self._row_to_dict(row) if row else None
+        row = self._fetch_one(
+            "SELECT * FROM image_models WHERE is_default = 1 AND model_type = ? LIMIT 1",
+            (model_type,)
+        )
+        return self._row_to_dict(row) if row else None
 
     def create_model(
         self,
@@ -102,9 +83,9 @@ class ModelManager:
             raise ValueError(f"model_type 仅支持 {MODEL_TYPES}")
 
         model_uuid = str(uuid.uuid4())
-        now = datetime.now().isoformat()
+        now = self._now()
 
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._connect() as conn:
             if is_default:
                 conn.execute(
                     "UPDATE image_models SET is_default = 0 WHERE model_type = ?",
@@ -133,8 +114,8 @@ class ModelManager:
         if model_type not in MODEL_TYPES:
             raise ValueError(f"model_type 仅支持 {MODEL_TYPES}")
 
-        now = datetime.now().isoformat()
-        with sqlite3.connect(str(self.db_path)) as conn:
+        now = self._now()
+        with self._connect() as conn:
             if is_default:
                 conn.execute(
                     "UPDATE image_models SET is_default = 0 WHERE model_type = ? AND id != ?",
@@ -157,8 +138,8 @@ class ModelManager:
         model = self.get_model(model_id)
         if not model:
             return None
-        now = datetime.now().isoformat()
-        with sqlite3.connect(str(self.db_path)) as conn:
+        now = self._now()
+        with self._connect() as conn:
             conn.execute(
                 "UPDATE image_models SET is_default = 0 WHERE model_type = ?",
                 (model["model_type"],)
@@ -172,9 +153,5 @@ class ModelManager:
 
     def delete_model(self, model_id: str) -> bool:
         """删除模型配置"""
-        with sqlite3.connect(str(self.db_path)) as conn:
-            cursor = conn.execute(
-                "DELETE FROM image_models WHERE id = ?", (model_id,)
-            )
-            conn.commit()
-            return cursor.rowcount > 0
+        return self._delete("DELETE FROM image_models WHERE id = ?", (model_id,))
+

@@ -2,6 +2,10 @@
 FastAPI 依赖注入
 """
 from functools import lru_cache
+
+from fastapi import Depends, HTTPException
+
+from backend.core.agent_sdk import get_run_registry
 from backend.core.persistence.session_manager import (
     SCRIPT_STEPS,
     VIDEO_STEPS,
@@ -52,3 +56,31 @@ def get_workflow() -> VideoCreationWorkflowV2:
     """
     session_manager = get_session_manager()
     return VideoCreationWorkflowV2(session_manager=session_manager)
+
+
+# ==================== 实体加载依赖（消除路由层「get_session → 404」样板） ====================
+
+def load_video_session(session_id: str, sm: SessionManager = Depends(get_session_manager)) -> dict:
+    """加载视频会话，不存在抛 404"""
+    info = sm.get_session(session_id)
+    if not info:
+        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
+    return info
+
+
+def load_script_session(session_id: str, sm: SessionManager = Depends(get_script_session_manager)) -> dict:
+    """加载剧本会话：不存在抛 404，类型不符抛 400"""
+    info = sm.get_session(session_id)
+    if not info:
+        raise HTTPException(status_code=404, detail=f"剧本会话 {session_id} 不存在")
+    if info.get("workflow_type") != "script":
+        raise HTTPException(status_code=400, detail=f"会话 {session_id} 不是剧本会话")
+    return info
+
+
+# ==================== agent 运行提交（统一 run_id 响应） ====================
+
+def start_agent_run(label: str, factory) -> dict:
+    """提交 agent 运行到注册表并返回统一响应 {"success": True, "data": {"run_id": ...}}"""
+    run_id = get_run_registry().start(label, factory)
+    return {"success": True, "data": {"run_id": run_id}}

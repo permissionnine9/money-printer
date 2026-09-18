@@ -1,21 +1,18 @@
 """会话资产管理 API（素材管理台：音频管理 / 素材管理）"""
 import logging
-import shutil
-import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
-from backend.deps import get_session_manager
+from backend.api.v1._upload import UPLOAD_ROOT, save_upload
+from backend.deps import get_session_manager, load_video_session
 from backend.core.persistence.session_manager import SessionManager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# 上传文件保存目录
-ASSET_UPLOAD_DIR = Path("static/uploads")
-AUDIO_DIR = ASSET_UPLOAD_DIR / "audio"
+AUDIO_DIR = UPLOAD_ROOT / "audio"
 
 # 允许的文件类型
 IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
@@ -30,12 +27,9 @@ async def list_assets(
     session_id: str,
     asset_type: str | None = None,
     session_manager: SessionManager = Depends(get_session_manager),
+    _session: dict = Depends(load_video_session),
 ):
     """列出会话资产（可选按类型过滤：audio / image）"""
-    session_info = session_manager.get_session(session_id)
-    if not session_info:
-        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
-
     if asset_type and asset_type not in ("audio", "image"):
         raise HTTPException(status_code=400, detail="asset_type 仅支持 audio 或 image")
 
@@ -49,16 +43,13 @@ async def upload_asset(
     asset_type: str,
     file: UploadFile = File(...),
     session_manager: SessionManager = Depends(get_session_manager),
+    _session: dict = Depends(load_video_session),
 ):
     """上传资产文件（音频或图片），登记到会话素材库
 
     Args:
         asset_type: 'audio' 或 'image'
     """
-    session_info = session_manager.get_session(session_id)
-    if not session_info:
-        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
-
     if asset_type not in ("audio", "image"):
         raise HTTPException(status_code=400, detail="asset_type 仅支持 audio 或 image")
 
@@ -69,20 +60,13 @@ async def upload_asset(
     if asset_type == "image" and content_type not in IMAGE_TYPES and file_ext not in IMAGE_EXTS:
         raise HTTPException(status_code=400, detail=f"只能上传图片文件（收到 {content_type or '未知类型'}）")
 
-    # 保存文件
-    target_dir = AUDIO_DIR if asset_type == "audio" else ASSET_UPLOAD_DIR
-    target_dir.mkdir(parents=True, exist_ok=True)
-    file_ext = Path(file.filename or "asset.bin").suffix or (".mp3" if asset_type == "audio" else ".png")
-    unique_filename = f"{uuid.uuid4()}{file_ext}"
-    file_path = target_dir / unique_filename
-
-    try:
-        with file_path.open("wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"文件保存失败: {str(e)}")
-    finally:
-        file.file.close()
+    # 保存文件（扩展名白名单在落盘层强制，防伪造 content-type 的危险扩展名）
+    target_dir = AUDIO_DIR if asset_type == "audio" else UPLOAD_ROOT
+    file_path = save_upload(
+        file, target_dir,
+        default_ext=".mp3" if asset_type == "audio" else ".png",
+        allowed_exts=AUDIO_EXTS if asset_type == "audio" else IMAGE_EXTS,
+    )
 
     relative_path = f"{file_path}"
     size_kb = round(file_path.stat().st_size / 1024, 1)
@@ -91,7 +75,7 @@ async def upload_asset(
     asset = session_manager.add_asset(
         session_id,
         asset_type=asset_type,
-        name=file.filename or unique_filename,
+        name=file.filename or file_path.name,
         file_path=relative_path,
         meta={"size_kb": size_kb},
     )
@@ -105,12 +89,9 @@ async def delete_asset(
     session_id: str,
     asset_id: str,
     session_manager: SessionManager = Depends(get_session_manager),
+    _session: dict = Depends(load_video_session),
 ):
     """删除会话资产记录（磁盘文件保留）"""
-    session_info = session_manager.get_session(session_id)
-    if not session_info:
-        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
-
     asset = session_manager.get_asset(asset_id)
     if not asset or asset["session_id"] != session_id:
         raise HTTPException(status_code=404, detail="资产不存在")

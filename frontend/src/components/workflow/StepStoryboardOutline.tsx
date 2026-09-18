@@ -3,8 +3,8 @@
  * 以剧本分集设计为上下文生成本集分镜导图（markmap）+ 分镜列表；
  * 预览/编辑双模式与重新生成（重生成会级联清空分镜配置、提示词与视频数据）
  */
-import React, { useState } from 'react'
-import { Button, Card, Input, Modal, Segmented, Space, Spin, Tag, Typography, message } from 'antd'
+import React, { useMemo, useState } from 'react'
+import { Button, Card, Input, Modal, Segmented, Select, Space, Spin, Tag, Typography, message } from 'antd'
 import {
   CheckCircleOutlined,
   EditFilled,
@@ -15,7 +15,7 @@ import {
   SaveOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
-import type { AgentEvent, SessionDetail } from '@/types'
+import type { AgentEvent, SessionDetail, StoryboardSegment } from '@/types'
 import { stepApi } from '@/api/client'
 import { MindmapView } from '@/components/common'
 import { AgentRunProgress } from '@/components/script/AgentRunProgress'
@@ -23,6 +23,36 @@ import { useSessionStore } from '@/stores/sessionStore'
 
 const { Text } = Typography
 const { TextArea } = Input
+
+// 常用提示词快捷选项（分镜大纲）
+const PRESET_PROMPTS = [
+  '节奏更紧凑',
+  '减少冗余分镜，突出冲突',
+  '开场用空镜交代环境',
+  '把高潮拆成 3 个分镜',
+  '多用人物特写表现情绪',
+  '控制每个分镜时长在 5 秒内',
+  '增强画面电影感与光影氛围',
+  '先抑后扬，情绪层层递进',
+  '结尾留悬念钩子',
+].map((t) => ({ label: t, value: t }))
+
+// 常用提示词下拉：选中后通过 onPick 追加到输入框，自身回到占位态以便连续叠加
+const PresetPromptSelect: React.FC<{ onPick: (text: string) => void }> = ({ onPick }) => {
+  const [sel, setSel] = useState<string | undefined>(undefined)
+  return (
+    <Select
+      value={sel}
+      options={PRESET_PROMPTS}
+      onChange={(v) => {
+        if (v) onPick(v)
+        setSel(undefined)
+      }}
+      placeholder="选择常用提示词（追加到输入框）"
+      style={{ width: '200px', float: 'right', marginBottom: 8 }}
+    />
+  )
+}
 
 interface StepStoryboardOutlineProps {
   session: SessionDetail
@@ -33,6 +63,36 @@ export const StepStoryboardOutline: React.FC<StepStoryboardOutlineProps> = ({ se
   const outlineData = session.step_results?.storyboard_outline?.result_data
   const mindmap: string = outlineData?.mindmap || ''
   const segmentCount: number = outlineData?.segment_count || 0
+  const segments: StoryboardSegment[] = useMemo(() => outlineData?.segments || [], [outlineData])
+
+  // 拼接导图：分镜内容（outline）拼为 ### 分镜标题下的 `- ` 列表子节点；
+  // withDuration 控制是否把建议时长/overlap 拼到标题行上（仅预览拼接）。
+  // 预览与编辑共用，编辑保存这份文本、由后端解析同步回 mindmap 与 segments。
+  // segments 与导图 ### 行按序对应
+  const buildMindmap = (withDuration: boolean): string => {
+    if (!mindmap || !segments.length) return mindmap
+    let i = 0
+    return mindmap
+      .split("\n")
+      .flatMap((line) => {
+        if (/^###\s/.test(line) && i < segments.length) {
+          const seg = segments[i++]
+          let titled = line
+          if (withDuration) {
+            const parts = [seg.duration ? `${seg.duration}s` : ""]
+            if (seg.index > 0 && seg.overlap > 0) parts.push(`overlap ${seg.overlap}s`)
+            const suffix = parts.filter(Boolean).join(" · ")
+            if (suffix) titled = `${line} · ${suffix}`
+          }
+          const outline = (seg.outline || "").replace(/\s*\n\s*/g, " ").trim()
+          return outline ? [titled, `- ${outline}`] : [titled]
+        }
+        return [line]
+      })
+      .join("\n")
+  }
+  const previewMindmap = useMemo(() => buildMindmap(true), [mindmap, segments])
+  const editableMindmap = useMemo(() => buildMindmap(false), [mindmap, segments])
   const canExecute = session.completed_steps?.includes('select_episode')
   const isCompleted = session.completed_steps?.includes('storyboard_outline')
   const hasDownstream = session.completed_steps?.some(
@@ -45,12 +105,18 @@ export const StepStoryboardOutline: React.FC<StepStoryboardOutlineProps> = ({ se
   const [saving, setSaving] = useState(false)
   const [starting, setStarting] = useState(false)
   const [run, setRun] = useState<{ id: string; active: boolean } | null>(null)
+  const [promptModal, setPromptModal] = useState<{ open: boolean; extraPrompt: string }>({
+    open: false,
+    extraPrompt: '',
+  })
 
   // 发起生成（POST storyboard-outline/generate → run_id → 观流）
-  const executeGenerate = async () => {
+  const executeGenerate = async (prompt: string) => {
     setStarting(true)
+    setExtraPrompt(prompt)
+    setPromptModal({ open: false, extraPrompt: '' })
     try {
-      const runId = await stepApi.generateStoryboardOutline(session.session_id, extraPrompt || undefined)
+      const runId = await stepApi.generateStoryboardOutline(session.session_id, prompt || undefined)
       setRun({ id: runId, active: true })
     } catch (e) {
       message.error((e as Error).message)
@@ -59,15 +125,17 @@ export const StepStoryboardOutline: React.FC<StepStoryboardOutlineProps> = ({ se
     }
   }
 
-  const handleRegenerate = () => {
+  // 已有大纲时重新生成需二次确认级联清空；无大纲（失败重试）直接执行
+  const handleModalOk = () => {
+    if (!mindmap) {
+      void executeGenerate(promptModal.extraPrompt)
+      return
+    }
     Modal.confirm({
       title: '确认重新生成分镜大纲？',
       icon: <ExclamationCircleOutlined />,
       content: '重新生成将清空分镜配置、已生成的分镜提示词与视频数据，此操作不可撤销。是否继续？',
-      onOk: () => {
-        setExtraPrompt('')
-        void executeGenerate()
-      },
+      onOk: () => executeGenerate(promptModal.extraPrompt),
     })
   }
 
@@ -109,6 +177,7 @@ export const StepStoryboardOutline: React.FC<StepStoryboardOutlineProps> = ({ se
   }
 
   return (
+    <>
     <Card
       title={
         <span>
@@ -132,7 +201,7 @@ export const StepStoryboardOutline: React.FC<StepStoryboardOutlineProps> = ({ se
               value={viewMode}
               onChange={(v) => {
                 const mode = v as 'preview' | 'edit'
-                if (mode === 'edit') setEditingMarkdown(mindmap)
+                if (mode === 'edit') setEditingMarkdown(editableMindmap)
                 setViewMode(mode)
               }}
               options={[
@@ -140,7 +209,11 @@ export const StepStoryboardOutline: React.FC<StepStoryboardOutlineProps> = ({ se
                 { value: 'edit', icon: <EditFilled />, label: '编辑' },
               ]}
             />
-            <Button icon={<RedoOutlined />} disabled={run?.active} onClick={handleRegenerate}>
+            <Button
+              icon={<RedoOutlined />}
+              disabled={run?.active}
+              onClick={() => setPromptModal({ open: true, extraPrompt })}
+            >
               重新生成
             </Button>
           </Space>
@@ -165,6 +238,7 @@ export const StepStoryboardOutline: React.FC<StepStoryboardOutlineProps> = ({ se
           <div style={{ marginBottom: 4 }}>
             <Text type="secondary">补充要求（可选）</Text>
           </div>
+          <PresetPromptSelect onPick={(t) => setExtraPrompt((p) => (p ? `${p}；${t}` : t))} />
           <TextArea
             rows={3}
             value={extraPrompt}
@@ -178,7 +252,7 @@ export const StepStoryboardOutline: React.FC<StepStoryboardOutlineProps> = ({ se
                 size="large"
                 icon={<ThunderboltOutlined />}
                 loading={starting}
-                onClick={() => executeGenerate()}
+                onClick={() => executeGenerate(extraPrompt)}
               >
                 生成分镜大纲
               </Button>
@@ -189,7 +263,12 @@ export const StepStoryboardOutline: React.FC<StepStoryboardOutlineProps> = ({ se
 
       {mindmap && viewMode === 'preview' && (
         <div style={{ marginTop: 16 }}>
-          <MindmapView markdown={mindmap} height={520} />
+          {segments.length > 0 && (
+            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
+              分镜标题后的「Ns · overlap Ns」为 AI 分析的建议时长与衔接参考值，可在第 3 步「分镜管理」中调整
+            </Text>
+          )}
+          <MindmapView markdown={previewMindmap} height={520} />
         </div>
       )}
 
@@ -197,7 +276,8 @@ export const StepStoryboardOutline: React.FC<StepStoryboardOutlineProps> = ({ se
         <div style={{ marginTop: 16 }}>
           <div style={{ marginBottom: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <Text type="secondary">
-              直接编辑 markdown 层级文本（# 标题层级 / - 列表项）；保存仅更新导图，不改动分镜列表
+              直接编辑 markdown：### 分镜标题，其下 `- ` 列表行为分镜内容；保存后同步更新导图与分镜列表，
+              内容有变化或增删的分镜需在第 3 步重新生成提示词
             </Text>
             <Space>
               <Button onClick={() => setViewMode('preview')}>取消</Button>
@@ -226,12 +306,49 @@ export const StepStoryboardOutline: React.FC<StepStoryboardOutlineProps> = ({ se
 
       {!mindmap && run?.active === false && (
         <div style={{ marginTop: 16 }}>
-          <Button icon={<EditOutlined />} onClick={() => executeGenerate()}>
+          <Button
+            icon={<EditOutlined />}
+            onClick={() => setPromptModal({ open: true, extraPrompt })}
+          >
             重试生成
           </Button>
         </div>
       )}
     </Card>
+    <Modal
+      title={
+        <span>
+          <EditOutlined style={{ marginRight: 8 }} />
+          重新生成分镜大纲 - 补充要求
+        </span>
+      }
+      open={promptModal.open}
+      onOk={handleModalOk}
+      onCancel={() => setPromptModal({ open: false, extraPrompt: '' })}
+      okText="开始重新生成"
+      cancelText="取消"
+      width={600}
+    >
+      <div style={{ marginBottom: 16 }}>
+        <Text type="secondary">
+          {mindmap
+            ? '重新生成将级联清空分镜配置、分镜提示词与视频数据；可输入补充要求（可选）。'
+            : '上次生成失败，可调整补充要求后重试（可选）。'}
+        </Text>
+      </div>
+      <PresetPromptSelect
+        onPick={(t) =>
+          setPromptModal((m) => ({ ...m, extraPrompt: m.extraPrompt ? `${m.extraPrompt}；${t}` : t }))
+        }
+      />
+      <TextArea
+        rows={4}
+        value={promptModal.extraPrompt}
+        onChange={(e) => setPromptModal((m) => ({ ...m, extraPrompt: e.target.value }))}
+        placeholder="例如：节奏更紧凑；开场用空镜；把高潮拆成 3 个分镜"
+      />
+    </Modal>
+    </>
   )
 }
 

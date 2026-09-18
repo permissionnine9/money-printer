@@ -9,6 +9,7 @@ import type {
   VideoParams,
   StoryboardSegment,
   SegmentPromptContext,
+  MaterialPoolGroup,
   SessionAsset,
   ImageModelConfig,
   PromptTemplate,
@@ -109,6 +110,47 @@ export const stepApi = {
     return data
   },
 
+  // 步骤3：素材池（选择弹窗分组数据：定妆照 / 本集素材 / 其他集素材）
+  getMaterialPool: async (
+    sessionId: string
+  ): Promise<MaterialPoolGroup[]> => {
+    const { data } = await client.get(`/steps/${sessionId}/material-pool`)
+    return data?.data?.groups ?? []
+  },
+
+  // 步骤3：保存分镜参考素材图（全量覆盖；换图会清空该分镜已生成的提示词）
+  updateSegmentReferenceImages: async (
+    sessionId: string,
+    index: number,
+    referenceImages: { image_id: string; description: string }[]
+  ): Promise<{ success: boolean; data: { segment: StoryboardSegment } }> => {
+    const { data } = await client.put(
+      `/steps/${sessionId}/storyboard-segments/${index}/reference-images`,
+      { reference_images: referenceImages }
+    )
+    return data
+  },
+
+  // 步骤3：AI 生成分镜素材图 → run_id（LLM 需求理解 + 生图 + 归档 + 自动关联）
+  generateSegmentMaterial: async (
+    sessionId: string,
+    index: number,
+    payload: {
+      user_prompt: string
+      mentioned_image_ids: string[]
+      reference_paths: string[]
+      model_config_id?: string
+    }
+  ): Promise<string> => {
+    const { data } = await client.post(
+      `/steps/${sessionId}/storyboard-segments/${index}/generate-material`,
+      payload
+    )
+    const runId = data?.data?.run_id
+    if (!runId) throw new Error('未获取到 run_id')
+    return runId
+  },
+
   // 步骤3：获取分镜提示词生成弹窗的上下文
   getSegmentPromptContext: async (
     sessionId: string,
@@ -153,12 +195,6 @@ export const stepApi = {
   // 步骤4：恢复视频备份
   restoreVideosBackup: async (sessionId: string): Promise<StepResponse> => {
     const { data } = await client.post(`/steps/${sessionId}/restore-videos-backup`, {})
-    return data
-  },
-
-  // 步骤4：重新生成单个视频
-  regenerateSingleVideo: async (sessionId: string, segmentIndex: number): Promise<StepResponse> => {
-    const { data } = await client.post(`/steps/${sessionId}/regenerate-single-video/${segmentIndex}`, {})
     return data
   },
 }

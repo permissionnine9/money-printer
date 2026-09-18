@@ -1,7 +1,7 @@
 """Claude Agent SDK 集成层
 
 可复用组件，供剧本创作 / 视频生成 / 未来功能统一调用，不绑定具体业务。
-- wrapper.run_agent / run_task / run_conversation: agent 运行入口
+- wrapper.run_agent / run_conversation: agent 运行入口
 - events.AgentEvent: 归一化事件
 - registry.get_run_registry(): 后台 run 注册表（SSE 解耦）
 - model_env.build_agent_env: 模型端点环境注入
@@ -14,7 +14,6 @@ from backend.core.agent_sdk.wrapper import (
     AgentRunResult,
     run_agent,
     run_conversation,
-    run_task,
 )
 
 __all__ = [
@@ -28,5 +27,4 @@ __all__ = [
     "get_run_registry",
     "run_agent",
     "run_conversation",
-    "run_task",
 ]

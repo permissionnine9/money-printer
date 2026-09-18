@@ -1,7 +1,7 @@
 /**
  * 创作剧本工作流页面（4 步向导：故事构思 → 故事大纲 → 分集设计 → 剧本定妆照）
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type CSSProperties } from 'react'
 import { message, Steps } from 'antd'
 import {
   StepIdeationChat,
@@ -17,6 +17,9 @@ const STEPS = [
   { title: '分集设计', description: '逐集设计矛盾与因果链，维护实体库' },
   { title: '剧本定妆照', description: '为人物 / 场景生成定妆照' },
 ]
+
+// 隐藏而非卸载（keep-alive）：切步骤不断开 SSE 观流、不丢流式/生成进度
+const HIDDEN: CSSProperties = { display: 'none' }
 
 function ScriptWorkflowPage() {
   const {
@@ -92,11 +95,19 @@ function ScriptWorkflowPage() {
             style={{ marginTop: 8, marginBottom: 8 }}
           />
 
-          {/* 步骤内容区域（4 步） */}
-          {viewStep === 0 && <StepIdeationChat session={currentSession} />}
-          {viewStep === 1 && <StepOutline session={currentSession} />}
-          {viewStep === 2 && <StepEpisodeDesign session={currentSession} />}
-          {viewStep === 3 && <StepLookbook session={currentSession} />}
+          {/* 步骤内容区域（4 步，keep-alive：仅隐藏非当前步骤，SSE 与生成进度保活） */}
+          <div style={viewStep === 0 ? undefined : HIDDEN}>
+            <StepIdeationChat session={currentSession} />
+          </div>
+          <div style={viewStep === 1 ? undefined : HIDDEN}>
+            <StepOutline session={currentSession} />
+          </div>
+          <div style={viewStep === 2 ? undefined : HIDDEN}>
+            <StepEpisodeDesign session={currentSession} />
+          </div>
+          <div style={viewStep === 3 ? undefined : HIDDEN}>
+            <StepLookbook session={currentSession} />
+          </div>
         </>
       )}
 

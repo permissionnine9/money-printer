@@ -9,19 +9,19 @@ import asyncio
 import json
 import logging
 import re
-from typing import Callable, Optional
+from typing import Optional
 
 from claude_agent_sdk import create_sdk_mcp_server, tool as sdk_tool
 
-from backend.core.agent_sdk import AgentEvent, run_agent, run_conversation
-from backend.core.agent_sdk.wrapper import AgentRunOptions
-from backend.core.config import SHENGSUANYUN_IMAGE2IMAGE_REQUEST_TIME_GAP
+from backend.core.agent_sdk import AgentEvent, AgentRunOptions, run_agent, run_conversation
+from backend.core.agents.system_prompts import LOOKBOOK_PROMPTS_SYSTEM, SCRIPT_OUTLINE_SYSTEM
+from backend.core.agents.workflow_base import OnEvent, StepWorkflowBase
+from backend.core.config import IMAGE_REQUEST_TIME_GAP
 from backend.core.models import VideoParams
 from backend.core.persistence import SessionManager
 from backend.core.persistence.script_manager import ScriptManager
 from backend.core.services.image_service import build_image_service_from_model_config
-from backend.core.services.prompt_manager import get_prompt_manager
-from backend.core.utils.json_parser import parse_json_response
+from backend.core.utils.json_parser import extract_json_array, extract_markdown, is_valid_mindmap
 
 logger = logging.getLogger(__name__)
 
@@ -34,32 +34,36 @@ CONFLICT_CHAIN_MAX = 2000
 CAUSALITY_CHAIN_MAX = 2000
 STORY_PROGRESS_MAX = 600
 
-OnEvent = Callable[[AgentEvent], None]
+# get_context 中带结尾局面摘要的最近集数（更早集仅 title+logline，控制 token）
+GET_CONTEXT_RECENT_EPISODES = 3
+
+# 分集设计 max_turns 估算：每集 save+自纠 3 轮 + 固定开销 10 轮（规划/注册实体/汇报），设上下限
+EPISODE_TURNS_BASE, EPISODE_TURNS_PER = 10, 3
+EPISODE_TURNS_MIN, EPISODE_TURNS_MAX = 20, 200
 
 
 class ScriptWorkflowError(Exception):
-    """剧本工作流业务错误（返回给前端 detail）"""
+    """剧本工作流业务错误（返回给前端 detail；status_code 供全局异常 handler 使用）"""
+
+    def __init__(self, message: str, status_code: int = 400):
+        super().__init__(message)
+        self.status_code = status_code
 
 
-class ScriptWorkflow:
+class ScriptWorkflow(StepWorkflowBase):
     """剧本创作工作流"""
+
+    Error = ScriptWorkflowError
 
     def __init__(
         self,
         session_manager: SessionManager,
         script_manager: Optional[ScriptManager] = None,
     ):
-        self.sm = session_manager
+        super().__init__(session_manager)
         self.scm = script_manager or ScriptManager()
-        self.prompts = get_prompt_manager()
 
     # ==================== 通用 ====================
-
-    def _require_step_data(self, session_id: str, step_name: str) -> dict:
-        step = self.sm.get_step_result(session_id, step_name)
-        if not step or not step.get("result_data"):
-            raise ScriptWorkflowError(f"步骤尚未完成: {step_name}")
-        return step["result_data"]
 
     @staticmethod
     def _text_result(data) -> dict:
@@ -151,7 +155,7 @@ class ScriptWorkflow:
 
     def update_story_logic(self, session_id: str, story_logic: str) -> dict:
         """人工编辑故事逻辑（不推进不重置）"""
-        self._require_step_data(session_id, "story_ideation")
+        self.require_step_data(session_id, "story_ideation")
         step = self.sm.get_step_result(session_id, "story_ideation")
         self.sm.update_step_result(session_id, "story_ideation", {
             **step["result_data"], "story_logic": story_logic,
@@ -174,7 +178,7 @@ class ScriptWorkflow:
         interrupt: Optional[asyncio.Event] = None,
     ) -> dict:
         """生成故事大纲（单次 agent run）；重生成会级联清下游"""
-        story_logic = self._require_step_data(session_id, "story_ideation").get("story_logic", "")
+        story_logic = self.require_step_data(session_id, "story_ideation").get("story_logic", "")
 
         req_lines = []
         if requirements.get("episode_count"):
@@ -193,12 +197,11 @@ class ScriptWorkflow:
             "story_logic": story_logic,
             "extra_instruction": "",
         })
-        system_prompt = "你是一位资深剧集结构师。严格按用户消息中的格式要求输出 markdown 思维导图，不要输出其他内容。"
 
         result = await run_agent(
             AgentRunOptions(
                 prompt=user_prompt,
-                system_prompt=system_prompt,
+                system_prompt=SCRIPT_OUTLINE_SYSTEM,
                 max_turns=2,
                 interrupt=interrupt,
             ),
@@ -207,8 +210,8 @@ class ScriptWorkflow:
         if result.error:
             raise ScriptWorkflowError(f"大纲生成失败: {result.error}")
 
-        mindmap = _extract_markdown(result.text)
-        if not mindmap or not mindmap.lstrip().startswith("#"):
+        mindmap = extract_markdown(result.text)
+        if not is_valid_mindmap(mindmap):
             raise ScriptWorkflowError("大纲输出格式异常（未得到 markdown 层级结构），请重试")
 
         # 重生成 → 清下游（step_results + 分集/实体/定妆照）
@@ -223,7 +226,7 @@ class ScriptWorkflow:
 
     def update_outline(self, session_id: str, mindmap_markdown: str) -> dict:
         """人工编辑大纲（不推进不重置，与 update_mindmap 同语义）"""
-        self._require_step_data(session_id, "story_outline")
+        self.require_step_data(session_id, "story_outline")
         step = self.sm.get_step_result(session_id, "story_outline")
         self.sm.update_step_result(session_id, "story_outline", {
             **step["result_data"], "mindmap": mindmap_markdown, "edited": True,
@@ -366,7 +369,7 @@ class ScriptWorkflow:
         """人工编辑分集字段；refs 类字段走与 save_episode 相同的引用校验"""
         current = self.scm.get_episode(session_id, episode_id)
         if not current:
-            raise ScriptWorkflowError(f"分集不存在: {episode_id}")
+            raise ScriptWorkflowError(f"分集不存在: {episode_id}", status_code=404)
         ref_fields = {"character_ids", "scene_ids", "clue_refs", "foreshadow_refs"}
         if ref_fields & fields.keys():
             merged = {**current, **{k: v for k, v in fields.items() if v is not None}}
@@ -380,7 +383,8 @@ class ScriptWorkflow:
 
         @sdk_tool(
             "get_context",
-            "获取故事大纲与已注册的全部实体清单（人物/场景/线索/伏笔，含 entity_id）。设计前必须先调用。",
+            "获取故事大纲、已注册实体清单与已保存分集的摘要（最近几集含结尾局面，更早集含标题与梗概）。"
+            "设计前必须先调用；写后几集前可再次调用回顾。",
             {"type": "object", "properties": {}},
         )
         async def get_context(args: dict) -> dict:
@@ -388,6 +392,17 @@ class ScriptWorkflow:
             mindmap = step["result_data"].get("mindmap", "") if step else ""
             entities = self.scm.list_entities(session_id)
             episodes = self.scm.list_episodes(session_id)
+            # 最近几集带结尾局面全文摘要，更早集仅标题+梗概（list_episodes 已按集号升序）
+            recent_ids = {e["episode_id"] for e in episodes[-GET_CONTEXT_RECENT_EPISODES:]}
+            saved_episodes = [
+                {
+                    "episode_id": e["episode_id"], "title": e["title"], "logline": e["logline"],
+                    "ending_summary": e["ending_summary"],
+                }
+                if e["episode_id"] in recent_ids else
+                {"episode_id": e["episode_id"], "title": e["title"], "logline": e["logline"]}
+                for e in episodes
+            ]
             return self._text_result({
                 "ok": True,
                 "outline": mindmap,
@@ -395,7 +410,7 @@ class ScriptWorkflow:
                     {"entity_id": e["entity_id"], "entity_type": e["entity_type"], "name": e["name"]}
                     for e in entities
                 ],
-                "saved_episodes": [e["episode_id"] for e in episodes],
+                "saved_episodes": saved_episodes,
             })
 
         def _upsert(entity_type: str):
@@ -495,7 +510,7 @@ class ScriptWorkflow:
         extra_instruction: str = "",
     ) -> dict:
         """全量分集设计（或单集重设计）。regenerate_episode_id 非空时为单集覆写模式"""
-        outline_data = self._require_step_data(session_id, "story_outline")
+        outline_data = self.require_step_data(session_id, "story_outline")
         outline = outline_data.get("mindmap", "")
         episode_count = _count_outline_episodes(outline)
 
@@ -515,13 +530,15 @@ class ScriptWorkflow:
 
         system_prompt = self.prompts.render("episode_design", {})
         mcp_server = self._build_design_mcp_server(session_id, single_episode_id=regenerate_episode_id)
+        # 轮次按集数估算（每集 3 轮 + 固定开销，见常量注释），上下限兜底
+        turns = max(EPISODE_TURNS_MIN, min(EPISODE_TURNS_BASE + EPISODE_TURNS_PER * episode_count, EPISODE_TURNS_MAX))
 
         result = await run_agent(
             AgentRunOptions(
                 prompt=task_prompt,
                 system_prompt=system_prompt,
                 mcp_servers={"script_design": mcp_server},
-                max_turns=40,
+                max_turns=turns,
                 interrupt=interrupt,
             ),
             on_event,
@@ -546,8 +563,8 @@ class ScriptWorkflow:
         }
 
     def _build_single_episode_prompt(self, session_id: str, episode_id: str, extra_instruction: str) -> str:
-        """单集重设计上下文：大纲 + 实体清单 + 前一集结尾 + 后一集梗概"""
-        outline_data = self._require_step_data(session_id, "story_outline")
+        """单集重设计上下文：实体清单 + 前一集结尾与因果 + 旧版设计（含引用） + 后一集梗概与因果"""
+        outline_data = self.require_step_data(session_id, "story_outline")
         episodes = self.scm.list_episodes(session_id)
         entities = self.scm.list_entities(session_id)
         num = self._episode_number(episode_id)
@@ -558,10 +575,16 @@ class ScriptWorkflow:
         parts = [f"本次为「单集重设计」任务：只重新设计并保存 {episode_id}（工具只接受这一集）。"]
         if prev:
             parts.append(f"\n## 上一集（{prev['episode_id']}）结尾摘要（本集必须自然承接）\n{prev['ending_summary']}")
+            parts.append(f"\n## 上一集（{prev['episode_id']}）因果衔接（其结尾如何引出本集）\n{prev['causality_chain']}")
         if current:
             parts.append(f"\n## 当前 {episode_id} 设计（将被覆写）\n标题：{current['title']}\n梗概：{current['logline']}")
+            parts.append(
+                "### 旧版实体引用（可调整，但删掉某伏笔/线索的 plant 会导致后集 payoff/reveal 校验失败）\n"
+                + _format_episode_refs(current)
+            )
         if nxt:
             parts.append(f"\n## 下一集（{nxt['episode_id']}）梗概（本集结尾要为它铺垫，不可破坏其承接）\n{nxt['logline']}")
+            parts.append(f"\n## 下一集（{nxt['episode_id']}）因果衔接（其开局承接描述，供参考）\n{nxt['causality_chain']}")
         parts.append("\n## 已注册实体（直接复用这些 entity_id，不要注册重复实体）")
         parts.append("\n".join(
             f"- {e['entity_id']} {e['name']}（{e['entity_type']}）" for e in entities
@@ -583,7 +606,7 @@ class ScriptWorkflow:
         interrupt: Optional[asyncio.Event] = None,
     ) -> dict:
         """定妆照生成：agent 单轮出英文 prompt → 确定性生图（间隔提交+并发轮询）"""
-        self._require_step_data(session_id, "episode_design")
+        self.require_step_data(session_id, "episode_design")
         if not entity_ids:
             raise ScriptWorkflowError("请至少勾选一个实体")
 
@@ -598,20 +621,22 @@ class ScriptWorkflow:
             raise ScriptWorkflowError(f"仅人物/场景可生成定妆照，线索/伏笔不支持: {invalid}")
         entities = [owned[eid] for eid in entity_ids]
 
-        # 1. agent 单轮产出 prompt
+        # 1. agent 单轮产出 prompt（story_logic 供 agent 判断本剧视觉风格）
         entities_text = "\n".join(
             f"- entity_id: {e['entity_id']} | 类型: {e['entity_type']} | 名称: {e['name']} | 设定: {e['description']}"
             for e in entities
         )
+        story_logic = self.require_step_data(session_id, "story_ideation").get("story_logic", "")[:1500]
         user_prompt = self.prompts.render("lookbook_prompts", {
-            "style_prompt": style_prompt or "现代影视质感，真实写实风格",
+            "story_logic": story_logic or "（无）",
+            "style_prompt": style_prompt or "（用户未指定——请你根据剧本故事逻辑的题材与气质自行判断，并全剧统一）",
             "entities": entities_text,
         })
         on_event(AgentEvent(type="thinking", delta="正在生成定妆照 prompt..."))
         result = await run_agent(
             AgentRunOptions(
                 prompt=user_prompt,
-                system_prompt="你是 AI 视觉导演。严格按用户消息中的 JSON 格式输出，不要输出其他内容。",
+                system_prompt=LOOKBOOK_PROMPTS_SYSTEM,
                 max_turns=2,
                 interrupt=interrupt,
             ),
@@ -620,7 +645,7 @@ class ScriptWorkflow:
         if result.error:
             raise ScriptWorkflowError(f"定妆照 prompt 生成失败: {result.error}")
 
-        items = _extract_json_array(result.text)
+        items = extract_json_array(result.text)
         if not items:
             raise ScriptWorkflowError("定妆照 prompt 输出解析失败，请重试")
         # 以勾选集为准；agent 缺漏的实体用设定兜底
@@ -635,7 +660,7 @@ class ScriptWorkflow:
         for e in entities:
             if e["entity_id"] not in prompts_by_entity:
                 prompts_by_entity[e["entity_id"]] = {
-                    "prompt": f"{e['name']}, {e['description']}, cinematic lighting, high detail, photorealistic",
+                    "prompt": f"{e['name']}, {e['description']}, single subject, consistent character design, medium shot",
                     "description": f"{e['name']} 定妆照",
                 }
 
@@ -653,7 +678,7 @@ class ScriptWorkflow:
             if interrupt and interrupt.is_set():
                 raise ScriptWorkflowError("已取消")
             if i > 0:
-                await asyncio.sleep(SHENGSUANYUN_IMAGE2IMAGE_REQUEST_TIME_GAP)
+                await asyncio.sleep(IMAGE_REQUEST_TIME_GAP)
             try:
                 submit = await image_service.submit_image_task(row["prompt"], LOOKBOOK_VIDEO_PARAMS, None)
                 if submit.get("success"):
@@ -712,9 +737,7 @@ class ScriptWorkflow:
 
     def complete_lookbook(self, session_id: str) -> dict:
         """手动确认完成第 4 步（按需勾选无自然终点）"""
-        ok, reason = self.sm.can_execute_step(session_id, "lookbook_images")
-        if not ok:
-            raise ScriptWorkflowError(reason)
+        self.ensure_can_execute(session_id, "lookbook_images")
         self.sm.save_step_result(session_id, "lookbook_images", {
             "completed": True,
         }, success=True)
@@ -722,31 +745,6 @@ class ScriptWorkflow:
 
 
 # ==================== 模块级辅助 ====================
-
-
-def _extract_markdown(text: str) -> str:
-    """从 agent 输出提取 markdown（剥掉 ```fence）"""
-    text = text.strip()
-    fence = re.search(r"```(?:markdown|md)?\s*\n(.*?)```", text, re.DOTALL)
-    return fence.group(1).strip() if fence else text
-
-
-def _extract_json_array(text: str) -> Optional[list]:
-    """从 agent 输出提取 JSON 数组"""
-    parsed = parse_json_response(text, default=None)
-    if isinstance(parsed, list):
-        return parsed
-    if isinstance(parsed, dict):
-        for value in parsed.values():
-            if isinstance(value, list):
-                return value
-    fence = re.search(r"\[\s*\{.*\}\s*\]", text, re.DOTALL)
-    if fence:
-        try:
-            return json.loads(fence.group(0))
-        except json.JSONDecodeError:
-            return None
-    return None
 
 
 def _count_outline_episodes(outline: str) -> int:
@@ -758,3 +756,17 @@ def _count_outline_episodes(outline: str) -> int:
         return len(matches)
     # 兜底：取所有 ## 分支数
     return max(len(re.findall(r"^##\s+", outline, re.MULTILINE)), 1)
+
+
+def _format_episode_refs(episode: dict) -> str:
+    """把单集实体引用渲染为可读文本（人物/场景/线索/伏笔，含动作）"""
+    lines = [
+        "出场人物：" + ("、".join(episode.get("character_ids") or []) or "无"),
+        "出场场景：" + ("、".join(episode.get("scene_ids") or []) or "无"),
+    ]
+    for field, label in (("clue_refs", "线索"), ("foreshadow_refs", "伏笔")):
+        refs = episode.get(field) or []
+        lines.append(f"{label}：" + ("、".join(
+            f"{r.get('entity_id', '')}（{r.get('action', '')}）" for r in refs
+        ) or "无"))
+    return "\n".join(lines)

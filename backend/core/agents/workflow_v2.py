@@ -9,15 +9,8 @@
 import uuid
 import logging
 
-from backend.core.models import (
-    VideoParams,
-    ScriptSegment,
-    SegmentFrame,
-)
-from backend.core.config import (
-    VIDEO_SERVICE_TYPE,
-)
-from backend.core.services import get_legacy_video_service, VideoServiceComfyUI
+from backend.core.models import VideoParams
+from backend.core.services import VideoServiceComfyUI
 from backend.core.services.script_context_service import ScriptContextService
 from backend.core.persistence import SessionManager
 
@@ -46,10 +39,8 @@ class VideoCreationWorkflowV2:
         """
         # 剧本上下文装配（分集设计 → 分镜/参考图/帧 prompt 上下文）
         self.script_context = ScriptContextService()
-        # ComfyUI 整段视频服务（步骤5主链路）
+        # ComfyUI 整段视频服务（生成视频主链路）
         self.comfyui_service = VideoServiceComfyUI()
-        # 逐分片视频服务（兼容单分片重生成等 legacy 接口）
-        self.video_service = get_legacy_video_service()
         # 支持依赖注入，允许共享 SessionManager 实例
         self.session_manager = session_manager or SessionManager(db_path)
         logger.info("VideoCreationWorkflowV2 初始化完成")
@@ -94,8 +85,7 @@ class VideoCreationWorkflowV2:
             return {"success": False, "error": f"剧本会话不存在: {script_session_id}"}
         if not script_sm.is_step_completed(script_session_id, "episode_design"):
             return {"success": False, "error": "该剧本会话的分集设计尚未完成"}
-        from backend.core.persistence.script_manager import ScriptManager
-        episode = ScriptManager().get_episode(script_session_id, episode_id)
+        episode = self.script_context.scm.get_episode(script_session_id, episode_id)
         if not episode:
             return {"success": False, "error": f"分集不存在: {episode_id}"}
 
@@ -141,19 +131,33 @@ class VideoCreationWorkflowV2:
                     "index": seg.get("index", i),
                     "content": seg.get("prompt") or seg.get("outline", ""),
                     "duration": duration,
+                    # 全能参考模式的参考素材图（生成视频时作为该段参考图）
+                    "reference_images": seg.get("reference_images", []),
                 }
                 for i, seg in enumerate(outline["result_data"]["segments"])
             ]
         return []
 
+    @staticmethod
+    def _videos_snapshot(all_videos: list, total_segments: int, *, generating: bool, success: bool, **extra) -> dict:
+        """视频生成进度统一快照（中间进度/取消/最终落盘共用）"""
+        snapshot = {
+            "generated_videos": [v.model_dump() for v in all_videos],
+            "video_count": total_segments,
+            "success_count": sum(1 for v in all_videos if v.task_status == "completed"),
+            "failed_count": sum(1 for v in all_videos if v.task_status == "failed"),
+            "_generating": generating,
+            "_success": success,
+        }
+        snapshot.update(extra)
+        return snapshot
+
     # ==================== 步骤 7: 生成视频 ====================
     async def step_generate_videos(self, session_id: str, extra_prompt: str = "") -> dict:
         """步骤7：生成视频
 
-        两种链路（由 VIDEO_SERVICE_TYPE 决定）：
-        1. comfyui（默认）：上传首帧/音频素材到远程 ComfyUI，构造 timeline_data
-           整段提交生成最终长视频（远程不可用时 mock 本地合成演示视频）
-        2. legacy（doubao/jimeng/wan22）：逐分片首尾帧生成（含视频快照依赖链路）
+        上传首帧/音频素材到远程 ComfyUI，构造 timeline_data
+        整段提交生成最终长视频（远程不可用时 mock 本地合成演示视频）
 
         Args:
             session_id: 会话ID
@@ -171,11 +175,7 @@ class VideoCreationWorkflowV2:
         if not can_execute:
             return {"success": False, "error": reason}
 
-        # ComfyUI 整段时间轴生成链路
-        if VIDEO_SERVICE_TYPE == "comfyui":
-            return await self._step_generate_videos_comfyui(session_id, extra_prompt)
-
-        return await self._step_generate_videos_legacy(session_id, extra_prompt)
+        return await self._step_generate_videos_comfyui(session_id, extra_prompt)
 
     async def _step_generate_videos_comfyui(self, session_id: str, extra_prompt: str = "") -> dict:
         """步骤7（ComfyUI 链路）：上传材料 → 构造 timeline_data → 整段生成最终视频"""
@@ -199,6 +199,18 @@ class VideoCreationWorkflowV2:
                 if idx >= 0 and path:
                     frame_image_paths[idx] = path
 
+            # 收集各分镜参考素材图（全能参考模式；http(s) 外链无法直接上传，跳过）
+            reference_image_paths = {
+                seg.get("index", i): [
+                    r["image_path"] for r in seg.get("reference_images", []) if r.get("image_path")
+                ]
+                for i, seg in enumerate(segments)
+            }
+            reference_image_paths = {
+                idx: [p for p in paths if not p.startswith(("http://", "https://"))]
+                for idx, paths in reference_image_paths.items() if paths
+            }
+
             # 收集会话音频资产（参考音频）
             audio_assets = self.session_manager.list_assets(session_id, asset_type="audio")
 
@@ -207,8 +219,9 @@ class VideoCreationWorkflowV2:
                 segments = [dict(seg, content=f"{seg.get('content', '')}。{extra_prompt}") for seg in segments]
 
             logger.info(
-                f"[步骤7][ComfyUI] 材料: {len(frame_image_paths)} 张首帧, {len(audio_assets)} 个音频, "
-                f"overlap={overlap_seconds}s, mock={self.comfyui_service.mock}"
+                f"[步骤7][ComfyUI] 材料: {len(frame_image_paths)} 张首帧, "
+                f"{sum(len(v) for v in reference_image_paths.values())} 张参考图, "
+                f"{len(audio_assets)} 个音频, overlap={overlap_seconds}s, mock={self.comfyui_service.mock}"
             )
 
             # 生成最终视频（mock 模式本地合成演示视频）
@@ -217,6 +230,7 @@ class VideoCreationWorkflowV2:
                 frame_image_paths=frame_image_paths,
                 audio_assets=audio_assets,
                 overlap_seconds=overlap_seconds,
+                reference_image_paths=reference_image_paths,
             )
 
             timeline = result["timeline_data"]
@@ -274,283 +288,3 @@ class VideoCreationWorkflowV2:
             self.session_manager.save_step_result(session_id, "generate_videos", failure_data, success=False)
             return {"success": False, "error": f"视频生成失败: {str(e)}", "data": failure_data}
 
-    async def _step_generate_videos_legacy(self, session_id: str, extra_prompt: str = "") -> dict:
-        """步骤7（legacy 链路）：逐分片生成视频（支持视频快照依赖链路）"""
-
-        # 获取首尾帧、分片脚本和参数
-        frames_result = self.session_manager.get_step_result(session_id, "generate_segment_frames")
-        selected_episode = self.get_selected_episode(session_id)
-
-        # 处理 segment_frames 数据，将 None 值转换为 ""（新会话无首尾帧数据则为空列表）
-        raw_frames = frames_result['result_data'].get('segment_frames', []) if frames_result else []
-        cleaned_frames = []
-        for frame in raw_frames:
-            cleaned_frame = {}
-            for key, value in frame.items():
-                # 将 None 转换为 ""，保持其他值不变
-                cleaned_frame[key] = "" if value is None else value
-            cleaned_frames.append(cleaned_frame)
-        segment_frames = [SegmentFrame(**frame) for frame in cleaned_frames]
-        segment_scripts = [ScriptSegment(**seg) for seg in self._get_video_segments(session_id)]
-        params = selected_episode['video_params']
-
-        try:
-            video_params = VideoParams(**params)
-            total_segments = len(segment_scripts)
-
-            # 初始化完整的视频列表（包含所有分片，初始状态为 pending）
-            from backend.core.models import GeneratedVideo
-            all_videos = []
-            for segment in segment_scripts:
-                all_videos.append(GeneratedVideo(
-                    segment_index=segment.index,
-                    video_id="",
-                    video_path="",
-                    duration=0.0,
-                    prompt="",
-                    task_status="pending"
-                ))
-
-            # 识别使用视频快照模式的分片
-            snapshot_segments = set()
-            for seg in segment_scripts:
-                if seg.first_frame_mode == 'use_video_snapshot':
-                    snapshot_segments.add(seg.index)
-
-            if snapshot_segments:
-                logger.info(f"[步骤7] 发现 {len(snapshot_segments)} 个使用视频快照模式的分片: {sorted(snapshot_segments)}")
-
-            # 按顺序处理每个分片
-            for i, segment in enumerate(segment_scripts):
-                # 检查是否被取消
-                if self.session_manager.is_step_cancelled(session_id, "generate_videos"):
-                    logger.warning(f"[步骤7] 视频生成已被用户取消 - 会话: {session_id[:8]}...")
-                    # 将未处理的视频标记为 cancelled 状态
-                    for j in range(i, total_segments):
-                        all_videos[j].task_status = "cancelled"
-
-                    # 保存完整列表（包含已生成、已取消的所有视频）
-                    success_count = sum(1 for v in all_videos if v.task_status == "completed")
-                    failed_count = sum(1 for v in all_videos if v.task_status == "failed")
-                    cancelled_count = sum(1 for v in all_videos if v.task_status == "cancelled")
-
-                    result_data = {
-                        "generated_videos": [v.model_dump() for v in all_videos],
-                        "video_count": total_segments,
-                        "success_count": success_count,
-                        "failed_count": failed_count,
-                        "cancelled_count": cancelled_count,
-                        "_generating": False,
-                        "_success": False,
-                        "_cancelled": True
-                    }
-                    self.session_manager.save_step_result(session_id, "generate_videos", result_data, success=False)
-                    logger.info(f"[步骤7] 已停止 - 已生成 {success_count}/{total_segments} 个视频，{cancelled_count} 个已取消")
-
-                    return {
-                        "success": False,
-                        "error": f"视频生成已取消（已生成 {success_count}/{total_segments} 个视频）",
-                        "data": result_data
-                    }
-
-                # 找到对应的首尾帧
-                frame = next(
-                    (f for f in segment_frames if f.segment_index == segment.index),
-                    None
-                )
-
-                # 检查是否是视频快照模式
-                is_snapshot_mode = segment.first_frame_mode == 'use_video_snapshot'
-
-                if is_snapshot_mode:
-                    # 视频快照模式：需要从前一个分片的视频中截取最后一帧
-                    if i == 0:
-                        logger.error(f"[步骤7] 分片 {segment.index} 是第一个分片，无法使用视频快照模式")
-                        all_videos[i].task_status = "failed"
-                        all_videos[i].video_path = "生成失败: 第一个分片无法使用视频快照"
-                        continue
-
-                    # 获取前一个分片的视频
-                    prev_video = all_videos[i - 1]
-                    if prev_video.task_status != "completed" or not prev_video.video_path:
-                        logger.error(f"[步骤7] 分片 {segment.index} 的前一个分片视频未生成成功")
-                        all_videos[i].task_status = "failed"
-                        all_videos[i].video_path = "生成失败: 前一个分片视频未生成成功"
-                        continue
-
-                    # 截取前一个视频的最后一帧
-                    from backend.core.utils.video_utils import extract_last_frame
-                    snapshot_path = extract_last_frame(prev_video.video_path)
-
-                    if not snapshot_path:
-                        logger.error(f"[步骤7] 无法从分片 {i-1} 的视频截取快照")
-                        all_videos[i].task_status = "failed"
-                        all_videos[i].video_path = "生成失败: 无法截取视频快照"
-                        continue
-
-                    logger.info(f"[步骤7] 已从分片 {i-1} 的视频截取快照: {snapshot_path}")
-
-                    # 更新当前分片的首帧为截取的快照
-                    frame.first_image_path = snapshot_path
-                    frame.first_status = "completed"
-
-                    # 更新数据库中的首尾帧数据
-                    self._update_frame_with_snapshot(session_id, segment.index, snapshot_path)
-
-                # 检查首帧是否存在（对于非快照模式，或者快照截取失败的情况）
-                if not frame or not frame.first_image_path:
-                    # 标记为失败并继续处理下一个
-                    all_videos[i].task_status = "failed"
-                    all_videos[i].video_path = f"生成失败: 分片 {segment.index} 缺少首帧"
-                    logger.error(f"[步骤7] 分片 {segment.index} 缺少首帧，跳过")
-                    continue
-
-                # 获取前后分片（用于上下文连贯）
-                prev_segment = segment_scripts[i - 1] if i > 0 else None
-                next_segment = segment_scripts[i + 1] if i < len(segment_scripts) - 1 else None
-
-                # 根据视频生成模式选择不同的生成方法
-                video_generation_mode = getattr(segment, 'video_generation_mode', 'first_last_frame')
-
-                if video_generation_mode == 'first_frame_reference':
-                    # 首帧+参考图模式：使用豆包seedance-pro，首帧+素材参考图+提示词
-                    logger.info(f"[步骤7] 分片 {segment.index} 使用首帧+参考图模式生成视频")
-
-                    # 获取素材图作为参考
-                    material_result = self.session_manager.get_step_result(session_id, "generate_episode_reference_images")
-                    reference_images = []
-                    if material_result and 'result_data' in material_result:
-                        raw_material_images = material_result['result_data'].get('material_images', [])
-                        reference_images = [
-                            img['image_path'] for img in raw_material_images
-                            if img.get('image_path') and img.get('task_status') == 'completed'
-                        ]
-
-                    # 使用首帧+参考图模式生成视频
-                    video = await self.video_service.generate_video_from_first_frame(
-                        segment,
-                        frame.first_image_path,
-                        video_params,
-                        reference_images=reference_images if reference_images else None,
-                        total_segments=total_segments,
-                        extra_prompt=extra_prompt,
-                        prev_segment=prev_segment,
-                        next_segment=next_segment,
-                    )
-                else:
-                    # 默认：首尾帧模式
-                    logger.info(f"[步骤7] 分片 {segment.index} 使用首尾帧模式生成视频")
-                    video = await self.video_service.generate_video_from_frames(
-                        segment,
-                        frame.first_image_path,
-                        frame.last_image_path,
-                        video_params,
-                        total_segments=total_segments,
-                        extra_prompt=extra_prompt,
-                        prev_segment=prev_segment,
-                        next_segment=next_segment,
-                    )
-
-                # 确保设置 task_status
-                if not hasattr(video, 'task_status') or not video.task_status:
-                    # 根据 video_path 判断状态
-                    if video.video_path and not video.video_path.startswith("生成失败"):
-                        video.task_status = "completed"
-                    elif video.video_path and video.video_path.startswith("生成失败"):
-                        video.task_status = "failed"
-                    else:
-                        video.task_status = "pending"
-
-                # 更新对应索引的视频状态
-                all_videos[i] = video
-
-                # 每生成一个视频后，保存当前进度（包含所有视频的完整列表）
-                success_count = sum(1 for v in all_videos if v.task_status == "completed")
-                failed_count = sum(1 for v in all_videos if v.task_status == "failed")
-                pending_count = sum(1 for v in all_videos if v.task_status == "pending")
-
-                intermediate_data = {
-                    "generated_videos": [v.model_dump() for v in all_videos],
-                    "video_count": total_segments,
-                    "success_count": success_count,
-                    "failed_count": failed_count,
-                    "pending_count": pending_count,
-                    "_generating": True,  # 仍在生成中
-                    "_success": False
-                }
-                # 不推进 current_step，仅更新数据
-                self.session_manager.update_step_result(session_id, "generate_videos", intermediate_data)
-                logger.info(f"[步骤7] 进度更新: {success_count + failed_count}/{total_segments} 个视频已处理")
-
-            # 统计成功和失败
-            success_count = sum(1 for v in all_videos if v.task_status == "completed")
-            failed_count = sum(1 for v in all_videos if v.task_status == "failed")
-
-            # 保存结果（使用完整的视频列表）
-            result_data = {
-                "generated_videos": [v.model_dump() for v in all_videos],
-                "video_count": total_segments,
-                "success_count": success_count,
-                "failed_count": failed_count,
-                "_generating": False,  # 标记生成完成
-                "_success": failed_count == 0  # 根据是否有错误判断成功状态
-            }
-
-            if failed_count > 0:
-                self.session_manager.save_step_result(session_id, "generate_videos", result_data, success=False)
-                logger.error(f"[步骤7] 部分失败 - {failed_count} 个视频生成失败")
-                return {
-                    "success": False,
-                    "error": f"视频生成部分失败：{failed_count} 个视频生成失败",
-                    "data": result_data
-                }
-
-            self.session_manager.save_step_result(session_id, "generate_videos", result_data)
-
-            # 更新会话状态为已完成
-            self.session_manager.update_session_status(session_id, "completed")
-            logger.info(f"[步骤7] 完成 - 生成 {success_count} 个视频片段")
-
-            return {
-                "success": True,
-                "message": f"已生成 {success_count} 个视频片段",
-                "data": result_data
-            }
-
-        except Exception as e:
-            logger.error(f"[步骤7] 失败: {str(e)}")
-            return {"success": False, "error": f"视频生成失败: {str(e)}"}
-
-    def _update_frame_with_snapshot(self, session_id: str, segment_index: int, snapshot_path: str) -> bool:
-        """更新分片的首帧为视频快照
-
-        Args:
-            session_id: 会话ID
-            segment_index: 分片索引
-            snapshot_path: 快照图片路径
-
-        Returns:
-            是否成功
-        """
-        try:
-            frames_result = self.session_manager.get_step_result(session_id, "generate_segment_frames")
-            if not frames_result:
-                return False
-
-            segment_frames = frames_result['result_data'].get('segment_frames', [])
-            for frame in segment_frames:
-                if frame.get('segment_index') == segment_index:
-                    frame['first_image_path'] = snapshot_path
-                    frame['first_status'] = 'completed'
-                    frame['first_prompt'] = '从上一视频快照获取'
-                    import uuid
-                    frame['first_image_id'] = str(uuid.uuid4())
-                    break
-
-            frames_result['result_data']['segment_frames'] = segment_frames
-            self.session_manager.update_step_result(session_id, "generate_segment_frames", frames_result['result_data'])
-            logger.info(f"[视频快照] 已更新分片 {segment_index} 的首帧为视频快照")
-            return True
-        except Exception as e:
-            logger.error(f"[视频快照] 更新分片 {segment_index} 首帧失败: {e}")
-            return False

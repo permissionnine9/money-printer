@@ -1,8 +1,8 @@
 /**
  * 步骤 3（索引2）：分镜管理
  * 左侧分镜列表 + 右侧选中分镜详情（布局参照剧本工作流「分集设计」）。
- * 详情含：分镜大纲展示、分镜配置（分镜形式下拉框；全能参考模式时出现 overlap 滑块
- * 且「分镜提示词生成」可用）、已生成提示词展示；底部「完成分镜配置」解锁第 4 步。
+ * 详情含：分镜大纲展示、分镜配置（分镜形式下拉框；全能参考模式时出现 overlap 滑块、
+ * 参考素材图编辑区，且「分镜提示词生成」可用）、已生成提示词展示；底部「完成分镜配置」解锁第 4 步。
  */
 import React, { useMemo, useState } from 'react'
 import {
@@ -10,7 +10,10 @@ import {
   Button,
   Card,
   Empty,
+  Image,
+  Input,
   Modal,
+  Popconfirm,
   Select,
   Slider,
   Space,
@@ -23,15 +26,23 @@ import {
 import {
   CheckCircleOutlined,
   CopyOutlined,
+  DeleteOutlined,
   FileTextOutlined,
+  PictureOutlined,
+  PlusOutlined,
+  SwapOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
-import type { AgentEvent, SessionDetail, StoryboardSegment } from '@/types'
+import type { AgentEvent, SessionDetail, SegmentReferenceImage, StoryboardSegment } from '@/types'
 import { stepApi } from '@/api/client'
 import { useSessionStore } from '@/stores/sessionStore'
 import { AgentRunProgress } from '@/components/script/AgentRunProgress'
+import { MaterialPickerModal } from './material/MaterialPickerModal'
+import { MaterialGenerateModal } from './material/MaterialGenerateModal'
+import { imageSrc } from '@/utils/imageSrc'
 
 const { Text, Paragraph } = Typography
+const { TextArea } = Input
 
 // 分镜形式（仅全能参考模式实现 overlap 与提示词生成逻辑）
 const MODE_OPTIONS = [
@@ -58,6 +69,7 @@ interface PromptContextView {
   episode_context: string
   segment: StoryboardSegment
   prev_segment: StoryboardSegment | null
+  reference_images?: SegmentReferenceImage[]
   overlap: number
   effective_overlap: number
   overlap_rule: string
@@ -73,6 +85,11 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [configLoading, setConfigLoading] = useState(false)
   const [completing, setCompleting] = useState(false)
+  // 参考素材图编辑
+  const [refsSaving, setRefsSaving] = useState(false)
+  const [descDrafts, setDescDrafts] = useState<Record<string, string>>({}) // image_id → 描述草稿（onBlur 保存）
+  const [picker, setPicker] = useState<{ open: boolean; replaceIndex: number | null }>({ open: false, replaceIndex: null })
+  const [genOpen, setGenOpen] = useState(false)
   // 提示词生成弹窗
   const [promptModal, setPromptModal] = useState<{
     open: boolean
@@ -112,6 +129,62 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
     } finally {
       setConfigLoading(false)
     }
+  }
+
+  const saveReferenceImages = async (items: SegmentReferenceImage[]) => {
+    if (!selected) return
+    setRefsSaving(true)
+    try {
+      await stepApi.updateSegmentReferenceImages(
+        session.session_id,
+        selected.index,
+        items.map((r) => ({ image_id: r.image_id, description: r.description }))
+      )
+      setDescDrafts({})
+      await refreshSession()
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setRefsSaving(false)
+    }
+  }
+
+  const handlePickerConfirm = (picked: { image_id: string; image_path: string; description: string }[]) => {
+    if (!selected) return
+    const current = selected.reference_images || []
+    if (picker.replaceIndex !== null) {
+      // 更换单张：描述重置为新素材的库内默认
+      const next = [...current]
+      next[picker.replaceIndex] = {
+        image_id: picked[0].image_id,
+        image_path: picked[0].image_path,
+        description: picked[0].description,
+      }
+      saveReferenceImages(next)
+    } else {
+      // 追加（去重），描述带出库内默认
+      const existing = new Set(current.map((r) => r.image_id))
+      const additions = picked
+        .filter((p) => !existing.has(p.image_id))
+        .map((p) => ({ image_id: p.image_id, image_path: p.image_path, description: p.description }))
+      saveReferenceImages([...current, ...additions])
+    }
+  }
+
+  const removeReferenceImage = (imageId: string) => {
+    if (!selected) return
+    saveReferenceImages((selected.reference_images || []).filter((r) => r.image_id !== imageId))
+  }
+
+  const commitDescDraft = (imageId: string) => {
+    if (!selected) return
+    const draft = descDrafts[imageId]
+    if (draft === undefined) return
+    const item = (selected.reference_images || []).find((r) => r.image_id === imageId)
+    if (!item || draft === item.description) return
+    saveReferenceImages(
+      (selected.reference_images || []).map((r) => (r.image_id === imageId ? { ...r, description: draft } : r))
+    )
   }
 
   const openPromptModal = async () => {
@@ -201,9 +274,17 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
             <ContextBlock title="剧本大纲（全剧 story_outline）" content={promptModal.context.story_outline || '（无）'} />
             <ContextBlock title="本集脚本（分集设计）" content={promptModal.context.episode_context} />
             <ContextBlock
-              title="当前分镜大纲"
+              title="当前分镜内容"
               content={`【${promptModal.context.segment.title || `分镜 ${promptModal.context.segment.index + 1}`}】${promptModal.context.segment.outline}`}
             />
+            {(promptModal.context.reference_images?.length ?? 0) > 0 && (
+              <ContextBlock
+                title={`本分镜参考素材图（${promptModal.context.reference_images!.length} 张）`}
+                content={promptModal
+                  .context!.reference_images!.map((r) => `· ${r.image_id}《${r.description || '（无描述）'}》`)
+                  .join('\n')}
+              />
+            )}
             <Card size="small" style={{ marginBottom: 12, background: '#f6ffed', borderColor: '#b7eb8f' }}>
               <Text strong style={{ fontSize: 13 }}>overlap 衔接信息</Text>
               <Paragraph style={{ marginBottom: 0, marginTop: 4, fontSize: 13 }}>
@@ -257,7 +338,10 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
                   key={seg.index}
                   size="small"
                   hoverable
-                  onClick={() => setSelectedIndex(seg.index)}
+                  onClick={() => {
+                    setSelectedIndex(seg.index)
+                    setDescDrafts({})
+                  }}
                   style={{
                     marginBottom: 8,
                     ...(active
@@ -281,6 +365,9 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
                     }}
                   >
                     {seg.title || seg.outline?.substring(0, 30) || `分镜 ${seg.index + 1}`}
+                    {seg.duration ? (
+                      <span style={{ color: 'rgba(0,0,0,0.45)', fontWeight: 'normal' }}> · {seg.duration}s</span>
+                    ) : null}
                   </div>
                 </Card>
               )
@@ -322,27 +409,6 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
                         onChange={(mode) => updateConfig(selected.index, { mode })}
                         style={{ width: 280 }}
                       />
-                      <Tooltip
-                        title={
-                          selected.mode === 'all_reference'
-                            ? '基于剧本大纲、本集脚本、当前分镜大纲与 overlap 信息，调用 video-prompt skill 生成当前分镜的提示词'
-                            : '仅「全能参考模式」支持分镜提示词生成'
-                        }
-                      >
-                        <Button
-                          type="primary"
-                          icon={<ThunderboltOutlined />}
-                          disabled={selected.mode !== 'all_reference'}
-                          onClick={openPromptModal}
-                        >
-                          分镜提示词生成
-                        </Button>
-                      </Tooltip>
-                      <Tooltip title="分镜大纲阶段 AI 分析的建议时长，仅作参考">
-                        <Text type="secondary" style={{ flexShrink: 0 }}>
-                          建议时长：{selected.duration ? `${selected.duration} 秒` : '—'}
-                        </Text>
-                      </Tooltip>
                     </div>
 
                     {selected.mode === 'all_reference' && (
@@ -371,17 +437,127 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
                   </Spin>
                 </Card>
 
+                {/* 参考素材图（仅全能参考模式） */}
+                {selected.mode === 'all_reference' && (
+                  <Card
+                    size="small"
+                    title={
+                      <Space size={8}>
+                        <PictureOutlined />
+                        <span>参考素材图</span>
+                        <Text type="secondary" style={{ fontSize: 12, fontWeight: 'normal' }}>
+                          生成视频与提示词时的全能参考（{selected.reference_images?.length || 0} 张）
+                        </Text>
+                      </Space>
+                    }
+                    style={{ marginTop: 12 }}
+                    extra={
+                      <Space size={8}>
+                        <Button
+                          size="small"
+                          icon={<PlusOutlined />}
+                          loading={refsSaving}
+                          onClick={() => setPicker({ open: true, replaceIndex: null })}
+                        >
+                          从素材库选择
+                        </Button>
+                        <Button size="small" type="primary" icon={<ThunderboltOutlined />} onClick={() => setGenOpen(true)}>
+                          AI 生成素材图
+                        </Button>
+                      </Space>
+                    }
+                  >
+                    <Spin spinning={refsSaving}>
+                      {selected.reference_images?.length ? (
+                        selected.reference_images.map((r, i) => (
+                          <div
+                            key={r.image_id}
+                            style={{
+                              display: 'flex',
+                              gap: 12,
+                              alignItems: 'flex-start',
+                              padding: '8px 0',
+                              borderBottom: i < (selected.reference_images?.length || 0) - 1 ? '1px solid #f0f0f0' : 'none',
+                            }}
+                          >
+                            <Image
+                              src={imageSrc(r.image_path)}
+                              alt={r.description}
+                              width={64}
+                              height={64}
+                              style={{ objectFit: 'cover', borderRadius: 6, flexShrink: 0 }}
+                              fallback="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+                            />
+                            <TextArea
+                              value={descDrafts[r.image_id] ?? r.description}
+                              autoSize={{ minRows: 1, maxRows: 3 }}
+                              placeholder="对图片描述（生成提示词与视频时作为参考依据）"
+                              style={{ flex: 1 }}
+                              onChange={(e) => setDescDrafts((d) => ({ ...d, [r.image_id]: e.target.value }))}
+                              onBlur={() => commitDescDraft(r.image_id)}
+                            />
+                            <Space direction="vertical" size={4}>
+                              <Tooltip title="更换此张素材图">
+                                <Button
+                                  size="small"
+                                  icon={<SwapOutlined />}
+                                  onClick={() => setPicker({ open: true, replaceIndex: i })}
+                                />
+                              </Tooltip>
+                              <Popconfirm
+                                title="移除该素材图？"
+                                description="仅解除本分镜的关联，不会删除素材图文件与素材库记录"
+                                onConfirm={() => removeReferenceImage(r.image_id)}
+                              >
+                                <Button size="small" danger icon={<DeleteOutlined />} />
+                              </Popconfirm>
+                            </Space>
+                          </div>
+                        ))
+                      ) : (
+                        <Text type="secondary">
+                          尚未关联素材图。可从素材库选择（定妆照/本集素材/其他集素材），或用 AI 生成专属素材图。
+                        </Text>
+                      )}
+                    </Spin>
+                  </Card>
+                )}
+
                 {/* 已生成的提示词 */}
                 <Card
                   size="small"
                   title="分镜提示词"
                   style={{ marginTop: 12 }}
                   extra={
-                    selected.prompt ? (
-                      <Button size="small" icon={<CopyOutlined />} onClick={copyPrompt}>
-                        复制
-                      </Button>
-                    ) : undefined
+                    <Space size={12}>
+                      <Tooltip title="分镜大纲阶段 AI 分析的建议时长，仅作参考">
+                        <Text type="secondary" style={{ fontSize: 13 }}>
+                          建议时长：{selected.duration ? `${selected.duration} 秒` : '—'}
+                        </Text>
+                      </Tooltip>
+                      <Tooltip
+                        title={
+                          selected.mode === 'all_reference'
+                            ? '基于剧本大纲、本集脚本、当前分镜大纲与 overlap 信息，调用 video-prompt skill 生成当前分镜的提示词'
+                            : '仅「全能参考模式」支持分镜提示词生成'
+                        }
+                      >
+                        <Button
+                          size="small"
+                          type="primary"
+                          icon={<ThunderboltOutlined />}
+                          disabled={selected.mode !== 'all_reference'}
+                          onClick={openPromptModal}
+                        >
+                          分镜提示词生成
+                        </Button>
+                      </Tooltip>
+                      {selected.prompt && (
+                        <Button size="small" icon={<CopyOutlined />} onClick={copyPrompt}>
+                          复制
+                        </Button>
+                      )}
+                    </Space>
                   }
                 >
                   {selected.prompt ? (
@@ -404,11 +580,37 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
             type="info"
             showIcon
             style={{ marginTop: 16 }}
-            message="配置完各分镜后点击右上角「完成分镜配置」，即可进入第 4 步生成视频。修改分镜配置会清空该分镜已生成的提示词并回退完成状态。"
+            title="配置完各分镜后点击右上角「完成分镜配置」，即可进入第 4 步生成视频。修改分镜配置会清空该分镜已生成的提示词并回退完成状态。"
           />
         )}
       </Card>
       {promptModalNode}
+      <MaterialPickerModal
+        sessionId={session.session_id}
+        open={picker.open}
+        multi={picker.replaceIndex === null}
+        segmentMaterials={selected?.reference_images || []}
+        excludeImageIds={
+          picker.replaceIndex === null
+            ? (selected?.reference_images || []).map((r) => r.image_id)
+            : (selected?.reference_images || []).filter((_, i) => i !== picker.replaceIndex).map((r) => r.image_id)
+        }
+        onClose={() => setPicker({ open: false, replaceIndex: null })}
+        onConfirm={handlePickerConfirm}
+      />
+      {selected && (
+        <MaterialGenerateModal
+          sessionId={session.session_id}
+          segmentIndex={selected.index}
+          segmentTitle={selected.title}
+          segmentOutline={selected.outline}
+          episodeTitle={session.episode_title}
+          segmentMaterials={selected.reference_images || []}
+          open={genOpen}
+          onClose={() => setGenOpen(false)}
+          onGenerated={refreshSession}
+        />
+      )}
     </>
   )
 }

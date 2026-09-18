@@ -1,10 +1,11 @@
 """会话状态管理 - 持久化每个步骤的结果"""
 import json
 import logging
-import sqlite3
-from datetime import datetime
-from pathlib import Path
+import uuid
 from typing import Optional
+
+from backend.core.persistence.base import BaseSQLiteManager, row_to_dict
+from backend.core.utils.json_utils import dump_json
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ VIDEO_STEPS = [
 ]
 
 
-class SessionManager:
+class SessionManager(BaseSQLiteManager):
     """会话状态管理器
 
     负责：
@@ -45,61 +46,49 @@ class SessionManager:
             db_path: SQLite数据库路径
             steps: 本管理器管辖的步骤序列（默认视频工作流 5 步）
         """
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        super().__init__(db_path)
         self.STEPS = list(steps) if steps else VIDEO_STEPS
-        self._init_database()
 
-    def _init_database(self):
-        """初始化数据库表"""
-        with sqlite3.connect(str(self.db_path)) as conn:
-            # WAL 模式：多连接（video/script 两个 SessionManager + ModelManager）并发读写
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS sessions (
-                    session_id TEXT PRIMARY KEY,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    current_step TEXT,
-                    status TEXT DEFAULT 'active'
-                )
-            """)
-            # 新列迁移：工作流类型与剧本溯源（已存在则忽略）
-            for column, default in (
-                ("workflow_type", "'video'"),
-                ("script_session_id", "NULL"),
-                ("source_episode_id", "NULL"),
-            ):
-                try:
-                    conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} TEXT DEFAULT {default}")
-                except sqlite3.OperationalError:
-                    pass  # 列已存在
+    def _create_schema(self, conn):
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                session_id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                current_step TEXT,
+                status TEXT DEFAULT 'active'
+            )
+        """)
+        # 新列迁移：工作流类型与剧本溯源（已存在则忽略）
+        self._add_columns_if_missing(conn, "sessions", {
+            "workflow_type": "TEXT DEFAULT 'video'",
+            "script_session_id": "TEXT DEFAULT NULL",
+            "source_episode_id": "TEXT DEFAULT NULL",
+        })
 
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS step_results (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT NOT NULL,
-                    step_name TEXT NOT NULL,
-                    result_data TEXT NOT NULL,
-                    completed_at TEXT NOT NULL,
-                    FOREIGN KEY (session_id) REFERENCES sessions(session_id),
-                    UNIQUE(session_id, step_name)
-                )
-            """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS step_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                step_name TEXT NOT NULL,
+                result_data TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id),
+                UNIQUE(session_id, step_name)
+            )
+        """)
 
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS session_assets (
-                    asset_id TEXT PRIMARY KEY,
-                    session_id TEXT NOT NULL,
-                    asset_type TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    file_path TEXT NOT NULL,
-                    meta TEXT DEFAULT '{}',
-                    created_at TEXT NOT NULL
-                )
-            """)
-
-            conn.commit()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS session_assets (
+                asset_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                asset_type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                meta TEXT DEFAULT '{}',
+                created_at TEXT NOT NULL
+            )
+        """)
 
     def create_session(
         self,
@@ -119,9 +108,9 @@ class SessionManager:
         Returns:
             会话信息
         """
-        now = datetime.now().isoformat()
+        now = self._now()
 
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._connect() as conn:
             conn.execute(
                 "INSERT INTO sessions (session_id, created_at, updated_at, current_step, status, workflow_type, script_session_id, source_episode_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (session_id, now, now, self.STEPS[0], "active", workflow_type, script_session_id, source_episode_id)
@@ -148,18 +137,8 @@ class SessionManager:
         Returns:
             会话信息，不存在则返回None
         """
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                "SELECT * FROM sessions WHERE session_id = ?",
-                (session_id,)
-            )
-            row = cursor.fetchone()
-
-            if not row:
-                return None
-
-            return dict(row)
+        row = self._fetch_one("SELECT * FROM sessions WHERE session_id = ?", (session_id,))
+        return dict(row) if row else None
 
     def save_step_result(self, session_id: str, step_name: str, result_data: dict, success: bool = True) -> bool:
         """保存步骤结果
@@ -176,12 +155,12 @@ class SessionManager:
         if step_name not in self.STEPS:
             raise ValueError(f"Invalid step name: {step_name}")
 
-        now = datetime.now().isoformat()
+        now = self._now()
         # 在 result_data 中记录成功状态
         result_data_with_status = {**result_data, "_success": success}
-        result_json = json.dumps(result_data_with_status, ensure_ascii=False)
+        result_json = dump_json(result_data_with_status)
 
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._connect() as conn:
             # 保存或更新步骤结果
             conn.execute("""
                 INSERT INTO step_results (session_id, step_name, result_data, completed_at)
@@ -218,20 +197,28 @@ class SessionManager:
         Returns:
             步骤结果，不存在则返回None
         """
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                "SELECT * FROM step_results WHERE session_id = ? AND step_name = ?",
-                (session_id, step_name)
-            )
-            row = cursor.fetchone()
+        row = self._fetch_one(
+            "SELECT * FROM step_results WHERE session_id = ? AND step_name = ?",
+            (session_id, step_name)
+        )
+        if not row:
+            return None
 
-            if not row:
-                return None
+        result = dict(row)
+        result['result_data'] = json.loads(result['result_data'])
+        return result
 
-            result = dict(row)
-            result['result_data'] = json.loads(result['result_data'])
-            return result
+    def get_script_title(self, session_id: str) -> str:
+        """提取剧本会话展示名（story_outline 大纲根节点 `# 剧名`），未生成大纲返回空串"""
+        step = self.get_step_result(session_id, "story_outline")
+        if not step:
+            return ""
+        mindmap = (step.get("result_data") or {}).get("mindmap") or ""
+        for line in mindmap.splitlines():
+            line = line.strip()
+            if line.startswith("# "):
+                return line[2:].strip()
+        return ""
 
     def get_all_step_results(self, session_id: str) -> dict:
         """获取所有步骤结果
@@ -242,8 +229,7 @@ class SessionManager:
         Returns:
             所有步骤的结果字典
         """
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.row_factory = sqlite3.Row
+        with self._connect() as conn:
             cursor = conn.execute(
                 "SELECT * FROM step_results WHERE session_id = ? ORDER BY id",
                 (session_id,)
@@ -257,6 +243,15 @@ class SessionManager:
 
             return results
 
+    def get_step_results_map(self, session_id: str) -> dict:
+        """按本管理器步骤序列收集步骤结果（无结果的步骤不包含）"""
+        results = {}
+        for step_name in self.STEPS:
+            result = self.get_step_result(session_id, step_name)
+            if result:
+                results[step_name] = result
+        return results
+
     def get_completed_steps(self, session_id: str) -> list[str]:
         """获取已成功完成的步骤列表
 
@@ -266,8 +261,7 @@ class SessionManager:
         Returns:
             已成功完成的步骤名称列表（只包含 _success 为 True 的步骤）
         """
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.row_factory = sqlite3.Row
+        with self._connect() as conn:
             cursor = conn.execute(
                 "SELECT step_name, result_data FROM step_results WHERE session_id = ? ORDER BY id",
                 (session_id,)
@@ -328,11 +322,10 @@ class SessionManager:
             session_id: 会话ID
             status: 状态 (active, completed, error)
         """
-        now = datetime.now().isoformat()
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._connect() as conn:
             conn.execute(
                 "UPDATE sessions SET status = ?, updated_at = ? WHERE session_id = ?",
-                (status, now, session_id)
+                (status, self._now(), session_id)
             )
             conn.commit()
 
@@ -350,16 +343,12 @@ class SessionManager:
             return False
 
         try:
-            with sqlite3.connect(str(self.db_path)) as conn:
-                cursor = conn.execute(
-                    "DELETE FROM step_results WHERE session_id = ? AND step_name = ?",
-                    (session_id, step_name)
-                )
-                conn.commit()
-                return cursor.rowcount > 0
+            return self._delete(
+                "DELETE FROM step_results WHERE session_id = ? AND step_name = ?",
+                (session_id, step_name)
+            )
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"删除步骤结果失败: {e}")
+            logger.error(f"删除步骤结果失败: {e}")
             return False
 
     def clear_steps_after(self, session_id: str, step_name: str) -> bool:
@@ -388,7 +377,7 @@ class SessionManager:
             return True
 
         try:
-            with sqlite3.connect(str(self.db_path)) as conn:
+            with self._connect() as conn:
                 # 删除这些步骤的结果
                 placeholders = ','.join('?' * len(steps_to_clear))
                 conn.execute(
@@ -399,7 +388,7 @@ class SessionManager:
                 # 更新会话状态为 active（如果之前是 completed）
                 conn.execute(
                     "UPDATE sessions SET status = 'active', updated_at = ? WHERE session_id = ?",
-                    (datetime.now().isoformat(), session_id)
+                    (self._now(), session_id)
                 )
 
                 conn.commit()
@@ -407,8 +396,7 @@ class SessionManager:
             return True
 
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"清空后续步骤失败: {e}")
+            logger.error(f"清空后续步骤失败: {e}")
             return False
 
     def clear_step_result(self, session_id: str, step_name: str) -> bool:
@@ -422,7 +410,7 @@ class SessionManager:
             是否成功
         """
         try:
-            with sqlite3.connect(str(self.db_path)) as conn:
+            with self._connect() as conn:
                 conn.execute(
                     "DELETE FROM step_results WHERE session_id = ? AND step_name = ?",
                     (session_id, step_name)
@@ -450,19 +438,18 @@ class SessionManager:
             return False
 
         try:
-            with sqlite3.connect(str(self.db_path)) as conn:
+            with self._connect() as conn:
                 # 更新 current_step 为该步骤（即重新执行该步骤）
                 conn.execute(
                     "UPDATE sessions SET current_step = ?, updated_at = ? WHERE session_id = ?",
-                    (step_name, datetime.now().isoformat(), session_id)
+                    (step_name, self._now(), session_id)
                 )
                 conn.commit()
 
             return True
 
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"重置当前步骤失败: {e}")
+            logger.error(f"重置当前步骤失败: {e}")
             return False
 
     def update_step_result(self, session_id: str, step_name: str, result_data: dict) -> bool:
@@ -482,7 +469,7 @@ class SessionManager:
         if step_name not in self.STEPS:
             return False
 
-        now = datetime.now().isoformat()
+        now = self._now()
         # 保留原有的 _success 状态
         existing_result = self.get_step_result(session_id, step_name)
         if existing_result:
@@ -492,10 +479,10 @@ class SessionManager:
             success = True
 
         result_data_with_status = {**result_data, "_success": success}
-        result_json = json.dumps(result_data_with_status, ensure_ascii=False)
+        result_json = dump_json(result_data_with_status)
 
         try:
-            with sqlite3.connect(str(self.db_path)) as conn:
+            with self._connect() as conn:
                 conn.execute("""
                     INSERT INTO step_results (session_id, step_name, result_data, completed_at)
                     VALUES (?, ?, ?, ?)
@@ -513,8 +500,7 @@ class SessionManager:
             return True
 
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"更新步骤结果失败: {e}")
+            logger.error(f"更新步骤结果失败: {e}")
             return False
 
     def _get_next_step(self, current_step: str) -> Optional[str]:
@@ -568,12 +554,10 @@ class SessionManager:
         Returns:
             会话ID，如果没有活动会话则返回None
         """
-        with sqlite3.connect(str(self.db_path)) as conn:
-            cursor = conn.execute(
-                "SELECT session_id FROM sessions WHERE status = 'active' ORDER BY updated_at DESC LIMIT 1"
-            )
-            row = cursor.fetchone()
-            return row[0] if row else None
+        row = self._fetch_one(
+            "SELECT session_id FROM sessions WHERE status = 'active' ORDER BY updated_at DESC LIMIT 1"
+        )
+        return row[0] if row else None
 
     def list_sessions(self, workflow_type: str | None = None) -> list[dict]:
         """列出所有会话（可按工作流类型过滤）
@@ -584,8 +568,7 @@ class SessionManager:
         Returns:
             会话列表
         """
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.row_factory = sqlite3.Row
+        with self._connect() as conn:
             if workflow_type:
                 cursor = conn.execute(
                     "SELECT * FROM sessions WHERE workflow_type = ? ORDER BY updated_at DESC",
@@ -608,7 +591,7 @@ class SessionManager:
             是否删除成功
         """
         try:
-            with sqlite3.connect(str(self.db_path)) as conn:
+            with self._connect() as conn:
                 # 先删除步骤结果
                 conn.execute(
                     "DELETE FROM step_results WHERE session_id = ?",
@@ -627,8 +610,7 @@ class SessionManager:
                 conn.commit()
             return True
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"删除会话失败: {e}")
+            logger.error(f"删除会话失败: {e}")
             return False
 
     # ==================== 会话资产管理（音频/图片素材） ====================
@@ -646,14 +628,13 @@ class SessionManager:
         Returns:
             新资产记录
         """
-        import uuid as _uuid
-        asset_id = str(_uuid.uuid4())
-        now = datetime.now().isoformat()
+        asset_id = str(uuid.uuid4())
+        now = self._now()
 
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._connect() as conn:
             conn.execute(
                 "INSERT INTO session_assets (asset_id, session_id, asset_type, name, file_path, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (asset_id, session_id, asset_type, name, file_path, json.dumps(meta or {}, ensure_ascii=False), now)
+                (asset_id, session_id, asset_type, name, file_path, dump_json(meta or {}), now)
             )
             conn.commit()
 
@@ -677,8 +658,7 @@ class SessionManager:
         Returns:
             资产列表（按创建时间倒序）
         """
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.row_factory = sqlite3.Row
+        with self._connect() as conn:
             if asset_type:
                 cursor = conn.execute(
                     "SELECT * FROM session_assets WHERE session_id = ? AND asset_type = ? ORDER BY created_at DESC",
@@ -689,16 +669,7 @@ class SessionManager:
                     "SELECT * FROM session_assets WHERE session_id = ? ORDER BY created_at DESC",
                     (session_id,)
                 )
-            rows = cursor.fetchall()
-            results = []
-            for row in rows:
-                asset = dict(row)
-                try:
-                    asset['meta'] = json.loads(asset.get('meta') or '{}')
-                except (ValueError, TypeError):
-                    asset['meta'] = {}
-                results.append(asset)
-            return results
+            return [row_to_dict(row, {"meta": {}}) for row in cursor.fetchall()]
 
     def get_asset(self, asset_id: str) -> Optional[dict]:
         """获取单个资产
@@ -709,21 +680,8 @@ class SessionManager:
         Returns:
             资产记录，不存在则返回 None
         """
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                "SELECT * FROM session_assets WHERE asset_id = ?",
-                (asset_id,)
-            )
-            row = cursor.fetchone()
-            if not row:
-                return None
-            asset = dict(row)
-            try:
-                asset['meta'] = json.loads(asset.get('meta') or '{}')
-            except (ValueError, TypeError):
-                asset['meta'] = {}
-            return asset
+        row = self._fetch_one("SELECT * FROM session_assets WHERE asset_id = ?", (asset_id,))
+        return row_to_dict(row, {"meta": {}}) if row else None
 
     def delete_asset(self, session_id: str, asset_id: str) -> bool:
         """删除会话资产记录（不删除磁盘文件）
@@ -735,13 +693,10 @@ class SessionManager:
         Returns:
             是否删除成功
         """
-        with sqlite3.connect(str(self.db_path)) as conn:
-            cursor = conn.execute(
-                "DELETE FROM session_assets WHERE asset_id = ? AND session_id = ?",
-                (asset_id, session_id)
-            )
-            conn.commit()
-            return cursor.rowcount > 0
+        return self._delete(
+            "DELETE FROM session_assets WHERE asset_id = ? AND session_id = ?",
+            (asset_id, session_id)
+        )
 
     def set_step_cancelled(self, session_id: str, step_name: str, cancelled: bool = True) -> bool:
         """设置步骤的取消标志
@@ -761,11 +716,11 @@ class SessionManager:
         result_data = step_result['result_data']
         result_data['_cancelled'] = cancelled
 
-        now = datetime.now().isoformat()
-        result_json = json.dumps(result_data, ensure_ascii=False)
+        now = self._now()
+        result_json = dump_json(result_data)
 
         try:
-            with sqlite3.connect(str(self.db_path)) as conn:
+            with self._connect() as conn:
                 conn.execute("""
                     UPDATE step_results
                     SET result_data = ?, completed_at = ?
@@ -778,8 +733,7 @@ class SessionManager:
                 conn.commit()
             return True
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"设置取消标志失败: {e}")
+            logger.error(f"设置取消标志失败: {e}")
             return False
 
     def is_step_cancelled(self, session_id: str, step_name: str) -> bool:

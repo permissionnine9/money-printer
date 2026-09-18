@@ -17,53 +17,11 @@ class VideoParams(BaseModel):
 - 最大分片时长: {self.max_segment_duration}秒"""
 
 
-class ScriptSegment(BaseModel):
-    """分片脚本"""
-    index: int = Field(description="分片索引")
-    content: str = Field(description="分片内容")
-    duration: float = Field(default=15.0, description="时长（秒）")
-    action: str = Field(default="", description="动作描述")
-    camera_movement: str = Field(default="", description="相机运动")
-    composition: str = Field(default="", description="构图")
-    focus: str = Field(default="", description="对焦和镜头效果")
-    atmosphere: str = Field(default="", description="氛围")
-    transition: str = Field(default="", description="转场方式")
-    # 首尾帧生成模式
-    first_frame_mode: str = Field(
-        default="generate",
-        description="""首帧模式:
-        - 'generate': 全新生成，与前一分片无关联
-        - 'generate_continuous': 生成但需要与前一分片尾帧保持视觉连贯（会参考前一帧）
-        - 'reuse_prev': 100%复用前一分片的尾帧（同一张图）
-        - 'use_video_snapshot': 使用上一个分片视频的结尾快照作为首帧（需等待前一个视频生成完成）
-        - 'all_reference': 全能参考模式，参考图=素材图+前一分片尾帧+后一分片首帧等全部可用素材"""
-    )
-    last_frame_mode: str = Field(
-        default="generate",
-        description="""尾帧模式:
-        - 'generate': 全新生成
-        - 'generate_continuous': 生成但需要与后一分片首帧保持视觉连贯（后一帧会参考此帧）
-        - 'reuse_next': 此帧会被下一分片100%复用（标记用）
-        - 'all_reference': 全能参考模式，参考图=素材图+前一分片尾帧+后一分片首帧等全部可用素材"""
-    )
-    # 视频生成模式
-    video_generation_mode: str = Field(
-        default="first_last_frame",
-        description="""视频生成模式:
-        - 'first_last_frame': 首尾帧模式（使用首帧和尾帧控制视频生成）
-        - 'first_frame_reference': 首帧+参考图模式（使用豆包seedance-pro，首帧+素材参考图+提示词）"""
-    )
-
-    def to_video_prompt(self) -> str:
-        """转换为视频生成提示词"""
-        parts = [self.content]
-        if self.action:
-            parts.append(f"动作: {self.action}")
-        if self.camera_movement:
-            parts.append(f"镜头运动: {self.camera_movement}")
-        if self.focus:
-            parts.append(f"镜头效果: {self.focus}")
-        return ", ".join(parts)
+class SegmentReferenceImage(BaseModel):
+    """分镜引用的素材图（全能参考模式；description 为分镜侧独立副本）"""
+    image_id: str = Field(description="素材池 ID（mat_* 分集素材 / lookbook_lb_* 定妆照）")
+    image_path: str = Field(default="", description="图片本地路径或URL（保存时从素材源刷新）")
+    description: str = Field(default="", description="对图片描述（分镜侧独立编辑，默认带出库内描述）")
 
 
 class StoryboardSegment(BaseModel):
@@ -73,7 +31,7 @@ class StoryboardSegment(BaseModel):
     outline: str = Field(default="", description="分镜大纲（画面/动作/剧情概述）")
     # 分镜形式：首帧/尾帧/全能参考/首尾帧（仅全能参考模式实现 overlap 与提示词生成逻辑）
     mode: str = Field(
-        default="first_last_frame",
+        default="all_reference",
         description="""分镜形式:
         - 'first_frame': 首帧模式（关联逻辑暂未实现）
         - 'last_frame': 尾帧模式（关联逻辑暂未实现）
@@ -83,37 +41,7 @@ class StoryboardSegment(BaseModel):
     overlap: int = Field(default=1, ge=0, le=3, description="与上一分镜的重叠秒数（仅全能参考模式使用）")
     duration: int = Field(default=15, ge=5, le=30, description="建议时长（秒，大纲阶段 LLM 分析，第 3 步展示为参考）")
     prompt: str = Field(default="", description="已生成的分镜提示词（video-prompt skill 产出）")
+    reference_images: list[SegmentReferenceImage] = Field(
+        default_factory=list, description="参考素材图列表（仅全能参考模式使用）",
+    )
 
-
-class MaterialImage(BaseModel):
-    """素材图片（设定稿风格）"""
-    image_id: str = Field(description="图片ID")
-    image_path: str = Field(description="图片本地路径或URL")
-    prompt: str = Field(description="生成提示词")
-    description: str = Field(default="", description="图片描述")
-    image_type: str = Field(default="general", description="素材图类型: character/props/environment/general")
-    task_id: str = Field(default="", description="异步任务ID（如有）")
-    task_status: str = Field(default="completed", description="任务状态: pending/completed/failed")
-
-
-class SegmentFrame(BaseModel):
-    """分镜头首尾帧"""
-    segment_index: int = Field(description="分片索引")
-    first_image_id: str = Field(default="", description="首帧图片ID")
-    first_image_path: str = Field(default="", description="首帧图片路径")
-    last_image_id: str = Field(default="", description="尾帧图片ID")
-    last_image_path: str = Field(default="", description="尾帧图片路径")
-    first_prompt: str = Field(default="", description="首帧提示词")
-    last_prompt: str = Field(default="", description="尾帧提示词")
-    first_status: str = Field(default="pending", description="首帧状态: pending/completed/failed")
-    last_status: str = Field(default="pending", description="尾帧状态: pending/completed/failed")
-
-
-class GeneratedVideo(BaseModel):
-    """生成的视频"""
-    segment_index: int = Field(description="分片索引")
-    video_id: str = Field(default="", description="视频ID")
-    video_path: str = Field(default="", description="视频本地路径")
-    duration: float = Field(default=0.0, description="视频时长（秒）")
-    prompt: str = Field(default="", description="生成提示词")
-    task_status: str = Field(default="pending", description="任务状态: pending/completed/failed/cancelled")

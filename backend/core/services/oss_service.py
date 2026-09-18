@@ -67,6 +67,55 @@ class OSSService:
             logger.warning(f"Bucket不存在或无权限: {self.bucket_name}")
             return False
 
+    def _build_object_url(self, key: str) -> str:
+        """构建对象的公共 URL"""
+        endpoint_host = self.endpoint.replace('http://', '').replace('https://', '')
+        return f"https://{self.bucket_name}.{endpoint_host}/{key}"
+
+    def _upload(
+        self,
+        key: str,
+        fileobj_factory,
+        *,
+        log_label: str,
+        content_type: str,
+        use_presigned: bool,
+        presigned_expires: int,
+    ) -> str:
+        """上传文件对象到 OSS（带重试），返回预签名或公共 URL
+
+        fileobj_factory: 每次重试重新构造文件对象的工厂（boto3 异常结束时
+        会关闭传入的 fileobj，复用已关闭句柄会失败）
+        """
+        for attempt in range(3):
+            try:
+                conn = self._get_conn()
+                conn.upload_fileobj(
+                    fileobj_factory(),
+                    self.bucket_name,
+                    key,
+                    ExtraArgs={"ContentType": content_type}
+                )
+
+                # 返回预签名URL或公共URL
+                if use_presigned:
+                    url = self.get_presigned_url(key, expires=presigned_expires)
+                    if url:
+                        logger.info(f"[OSS] {log_label}成功（预签名URL）")
+                        return url
+                    else:
+                        logger.warning(f"[OSS] 获取预签名URL失败，使用公共URL")
+
+                url = self._build_object_url(key)
+                logger.info(f"[OSS] {log_label}成功: {url}")
+                return url
+            except Exception as e:
+                logger.error(f"[OSS] 上传失败 (尝试 {attempt + 1}/3): {e}")
+                self._close_conn()  # 重置连接
+                time.sleep(1)
+
+        raise RuntimeError(f"OSS上传失败: {key}")
+
     async def upload_file(
         self,
         local_path: str,
@@ -91,44 +140,15 @@ class OSSService:
         if not path.exists():
             raise FileNotFoundError(f"文件不存在: {local_path}")
 
-        # 生成唯一文件名
         ext = path.suffix or ".png"
-        filename = f"{uuid.uuid4().hex}{ext}"
-        key = f"{remote_dir}/{filename}"
-
-        # 上传文件（带重试）
-        for attempt in range(3):
-            try:
-                conn = self._get_conn()
-                with open(path, "rb") as f:
-                    conn.upload_fileobj(
-                        f,
-                        self.bucket_name,
-                        key,
-                        ExtraArgs={"ContentType": content_type}
-                    )
-
-                # 返回预签名URL或公共URL
-                if use_presigned:
-                    url = self.get_presigned_url(key, expires=presigned_expires)
-                    if url:
-                        logger.info(f"[OSS] 上传成功（预签名URL）: {local_path}")
-                        return url
-                    else:
-                        logger.warning(f"[OSS] 获取预签名URL失败，使用公共URL")
-                
-                # 构建公共URL
-                endpoint_host = self.endpoint.replace('http://', '').replace('https://', '')
-                url = f"https://{self.bucket_name}.{endpoint_host}/{key}"
-
-                logger.info(f"[OSS] 上传成功: {local_path} -> {url}")
-                return url
-            except Exception as e:
-                logger.error(f"[OSS] 上传失败 (尝试 {attempt + 1}/3): {e}")
-                self._close_conn()  # 重置连接
-                time.sleep(1)
-
-        raise RuntimeError(f"OSS上传失败: {local_path}")
+        key = f"{remote_dir}/{uuid.uuid4().hex}{ext}"
+        return self._upload(
+            key, lambda: open(path, "rb"),
+            log_label=f"上传 {local_path}",
+            content_type=content_type,
+            use_presigned=use_presigned,
+            presigned_expires=presigned_expires,
+        )
 
     async def upload_bytes(
         self,
@@ -152,42 +172,14 @@ class OSSService:
         Returns:
             上传后的文件URL（公共URL或预签名URL）
         """
-        # 生成唯一文件名
-        filename = f"{uuid.uuid4().hex}{ext}"
-        key = f"{remote_dir}/{filename}"
-
-        # 上传（带重试）
-        for attempt in range(3):
-            try:
-                conn = self._get_conn()
-                conn.upload_fileobj(
-                    BytesIO(data),
-                    self.bucket_name,
-                    key,
-                    ExtraArgs={"ContentType": content_type}
-                )
-
-                # 返回预签名URL或公共URL
-                if use_presigned:
-                    url = self.get_presigned_url(key, expires=presigned_expires)
-                    if url:
-                        logger.info(f"[OSS] 上传字节数据成功（预签名URL）")
-                        return url
-                    else:
-                        logger.warning(f"[OSS] 获取预签名URL失败，使用公共URL")
-
-                # 构建公共URL
-                endpoint_host = self.endpoint.replace('http://', '').replace('https://', '')
-                url = f"https://{self.bucket_name}.{endpoint_host}/{key}"
-
-                logger.info(f"[OSS] 上传字节数据成功: {url}")
-                return url
-            except Exception as e:
-                logger.error(f"[OSS] 上传失败 (尝试 {attempt + 1}/3): {e}")
-                self._close_conn()  # 重置连接
-                time.sleep(1)
-
-        raise RuntimeError("OSS上传字节数据失败")
+        key = f"{remote_dir}/{uuid.uuid4().hex}{ext}"
+        return self._upload(
+            key, lambda: BytesIO(data),
+            log_label="上传字节数据",
+            content_type=content_type,
+            use_presigned=use_presigned,
+            presigned_expires=presigned_expires,
+        )
 
     def delete_file(self, oss_url: str) -> bool:
         """删除OSS上的文件

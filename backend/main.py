@@ -3,8 +3,9 @@ FastAPI 主应用入口
 """
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
@@ -19,6 +20,8 @@ from backend.api.v1 import (
     agent_runs,
 )
 from backend.config import override_src_config
+from backend.core.agents.script_workflow import ScriptWorkflowError
+from backend.core.agents.storyboard import StoryboardError
 
 # 配置日志
 logging.basicConfig(
@@ -60,6 +63,15 @@ app.add_middleware(
 
 # 挂载静态文件目录
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+# 全局业务异常处理（路由层无需逐个 try/except 转 HTTPException）
+@app.exception_handler(ScriptWorkflowError)
+@app.exception_handler(StoryboardError)
+async def business_error_handler(request: Request, exc: Exception):
+    """工作流业务异常 → HTTP detail（状态码由异常携带，默认 400）"""
+    return JSONResponse(status_code=getattr(exc, "status_code", 400), content={"detail": str(exc)})
+
 
 # 注册路由
 app.include_router(sessions.router, prefix="/api/v1/sessions", tags=["会话管理"])

@@ -30,6 +30,25 @@ class SegmentConfigUpdateRequest(BaseModel):
     overlap: Optional[int] = Field(None, ge=0, le=3, description="与上一分镜的重叠秒数（0-3）")
 
 
+class SegmentReferenceImageIn(BaseModel):
+    """步骤3：分镜参考图条目（保存时从素材源刷新 image_path）"""
+    image_id: str = Field(..., description="素材池 ID（mat_* / lookbook_lb_*）")
+    description: str = Field(default="", description="对图片描述（分镜侧独立编辑；为空时带出库内描述）")
+
+
+class SegmentReferenceImagesUpdateRequest(BaseModel):
+    """步骤3：保存分镜参考图（全量覆盖）"""
+    reference_images: list[SegmentReferenceImageIn] = Field(default_factory=list, max_length=8, description="参考图列表")
+
+
+class SegmentMaterialGenerateRequest(BaseModel):
+    """步骤3：AI 生成分镜素材图"""
+    user_prompt: str = Field(default="", description="用户自定义提示词（可含 @名称 引用文本）")
+    mentioned_image_ids: list[str] = Field(default_factory=list, description="@ 引用的素材池图片 ID")
+    reference_paths: list[str] = Field(default_factory=list, description="上传的自定义参考图路径（static/uploads/...）")
+    model_config_id: Optional[str] = Field(None, description="生图模型配置ID（默认取默认生图模型）")
+
+
 class StepResponse(BaseModel):
     """步骤响应"""
     success: bool

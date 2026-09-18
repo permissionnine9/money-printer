@@ -1,1 +1,2 @@
-前端交互验证 需要用 ‘/ego-browser‘ skill完成
+- 前端交互验证 需要用 ‘/ego-browser‘ skill完成
+- 不能自己提交、不能自己暂存、不能自己操作 git记录等

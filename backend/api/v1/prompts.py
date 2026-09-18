@@ -45,6 +45,8 @@ async def get_prompt(name: str):
         "prompt": {
             "name": name,
             "description": manager.extract_description(content),
+            "category": manager.extract_category(content),
+            "step": manager.extract_step(content),
             "content": content,
         },
     }
@@ -68,5 +70,7 @@ async def update_prompt(name: str, request: PromptUpdateRequest):
         "prompt": {
             "name": name,
             "description": manager.extract_description(request.content),
+            "category": manager.extract_category(request.content),
+            "step": manager.extract_step(request.content),
         },
     }

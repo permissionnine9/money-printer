@@ -10,10 +10,11 @@ from backend.core.persistence.script_manager import ScriptManager
 
 logger = logging.getLogger(__name__)
 
-OUTLINE_MAX_CHARS = 1500        # 全局大纲摘要上限
-ENTITY_CARD_MAX_CHARS = 120     # 单个实体卡片上限
-RELATED_EPISODE_MAX_CHARS = 200 # 单个关联集摘要上限
-MOTIVATION_MAX_CHARS = 80       # 人物内在动机摘要上限
+OUTLINE_MAX_CHARS = 3500        # 全局大纲摘要上限
+# 需容纳满额实体卡：前缀~17 + 描述~80 + 动机标签~11 + MOTIVATION_MAX_CHARS(150) ≈ 258
+ENTITY_CARD_MAX_CHARS = 280     # 单个实体卡片上限
+RELATED_EPISODE_MAX_CHARS = 300 # 单个关联集摘要上限
+MOTIVATION_MAX_CHARS = 150       # 人物内在动机摘要上限
 MOTIVATION_KEYS = ("性格", "欲望", "身份", "伤口")  # meta 中优先取的动机键
 
 

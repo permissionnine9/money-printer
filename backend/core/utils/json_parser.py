@@ -1,7 +1,7 @@
-"""JSON解析工具 - 统一处理LLM响应的JSON解析"""
+"""JSON/markdown 提取工具 - 统一处理 LLM 响应的解析"""
 import json
 import re
-from typing import Any
+from typing import Any, Optional
 
 
 def parse_json_response(response_text: str, default: Any = None) -> dict:
@@ -57,3 +57,33 @@ def parse_json_response(response_text: str, default: Any = None) -> dict:
     else:
         error_msg += f"，完整文本: {text}"
     raise ValueError(error_msg)
+
+
+def extract_markdown(text: str) -> str:
+    """从 LLM 输出提取 markdown（剥掉 ```fence）"""
+    text = text.strip()
+    fence = re.search(r"```(?:markdown|md)?\s*\n(.*?)```", text, re.DOTALL)
+    return fence.group(1).strip() if fence else text
+
+
+def extract_json_array(text: str) -> Optional[list]:
+    """从 LLM 输出提取 JSON 数组（dict 值兜底 + fence 正则兜底）"""
+    parsed = parse_json_response(text, default=None)
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        for value in parsed.values():
+            if isinstance(value, list):
+                return value
+    fence = re.search(r"\[\s*\{.*\}\s*\]", text, re.DOTALL)
+    if fence:
+        try:
+            return json.loads(fence.group(0))
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def is_valid_mindmap(markdown: str) -> bool:
+    """markdown 导图有效性：非空且以 # 层级标题开头"""
+    return bool(markdown and markdown.lstrip().startswith("#"))

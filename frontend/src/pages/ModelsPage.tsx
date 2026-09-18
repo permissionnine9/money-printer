@@ -286,16 +286,17 @@ const ModelsPage: React.FC = () => {
           <Form.Item
             name="api_key"
             label="API Key"
-            extra="留空则回退服务端环境变量 SHENGSUANYUN_API_KEY"
+            rules={[{ required: true, message: '请输入 API Key' }]}
           >
             <Input.Password placeholder="sk-..." />
           </Form.Item>
           <Form.Item
             name="base_url"
             label="Base URL"
-            extra="OpenAI 兼容格式的 API 地址；留空则使用内置默认地址（盛算云网关）"
+            rules={[{ required: true, message: '请输入 API 地址' }]}
+            extra="OpenAI 兼容格式的 API 地址（如 https://api.example.com/v1）"
           >
-            <Input placeholder="https://router.shengsuanyun.com/api/v1" />
+            <Input placeholder="https://api.example.com/v1" />
           </Form.Item>
           <Form.Item
             name="model_id"

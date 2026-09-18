@@ -3,6 +3,7 @@
 """
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List
+import re
 import uuid
 
 from backend.schemas.sessions import (
@@ -11,11 +12,16 @@ from backend.schemas.sessions import (
     SessionListResponse,
 )
 from backend.schemas.script import CreateVideoSessionFromScriptRequest
-from backend.deps import get_session_manager
+from backend.deps import get_session_manager, get_script_manager, get_script_session_manager, load_video_session
 from backend.core.persistence.session_manager import SessionManager
-from backend.deps import get_script_manager, get_script_session_manager
 
 router = APIRouter()
+
+
+def _episode_number(episode_id: str | None) -> int | None:
+    """从 episode_id（如 ep_01）解析集数，格式不符返回 None"""
+    m = re.match(r"^ep_(\d+)$", episode_id or "")
+    return int(m.group(1)) if m else None
 
 
 @router.post("/from-script", response_model=SessionResponse, status_code=201)
@@ -77,9 +83,16 @@ async def list_sessions(
 ):
     """获取所有会话列表（旧版 5/7 步会话标记 legacy，前端隐藏）"""
     sessions = session_manager.list_sessions()
+    script_sm = get_script_session_manager()
+    script_title_cache: dict[str, str] = {}
 
     session_responses = []
     for session in sessions:
+
+        # 剧本会话走 /script-sessions 接口，不混入视频会话列表
+        # （全新空剧本会话 completed_steps 为空、legacy=False，不过滤会漏进前端列表）
+        if session.get("workflow_type") == "script":
+            continue
         completed_steps = session_manager.get_completed_steps(session["session_id"])
         all_results = session_manager.get_all_step_results(session["session_id"])
         # 旧版 7 步会话（无 select_episode 结果且 step_results 非空）
@@ -94,6 +107,11 @@ async def list_sessions(
             )
         )
         legacy = bool(completed_steps) and (not has_select or has_legacy_steps)
+        # 引用的剧本/分集名称（选集步骤结果 + 剧本会话大纲根节点）
+        select_result = all_results.get("select_episode") or {}
+        script_session_id = select_result.get("script_session_id")
+        if script_session_id and script_session_id not in script_title_cache:
+            script_title_cache[script_session_id] = script_sm.get_script_title(script_session_id)
         session_responses.append(
             SessionResponse(
                 session_id=session["session_id"],
@@ -103,6 +121,10 @@ async def list_sessions(
                 status=session.get("status") or "active",
                 completed_steps=completed_steps,
                 legacy=legacy,
+                script_session_id=script_session_id or "",
+                script_title=script_title_cache.get(script_session_id, "") if script_session_id else "",
+                episode_title=select_result.get("episode_title") or "",
+                episode_number=_episode_number(select_result.get("episode_id")),
             )
         )
 
@@ -113,19 +135,9 @@ async def list_sessions(
 async def get_session(
     session_id: str,
     session_manager: SessionManager = Depends(get_session_manager),
+    session_info: dict = Depends(load_video_session),
 ):
     """获取会话详情"""
-    session_info = session_manager.get_session(session_id)
-    if not session_info:
-        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
-    
-    # 获取所有步骤结果
-    step_results = {}
-    for step_name in session_manager.STEPS:
-        result = session_manager.get_step_result(session_id, step_name)
-        if result:
-            step_results[step_name] = result
-    
     return SessionDetailResponse(
         session_id=session_info["session_id"],
         created_at=session_info["created_at"],
@@ -133,7 +145,7 @@ async def get_session(
         current_step=session_info["current_step"],
         status=session_info["status"],
         completed_steps=session_manager.get_completed_steps(session_id),
-        step_results=step_results,
+        step_results=session_manager.get_step_results_map(session_id),
     )
 
 
@@ -141,11 +153,8 @@ async def get_session(
 async def delete_session(
     session_id: str,
     session_manager: SessionManager = Depends(get_session_manager),
+    _session_info: dict = Depends(load_video_session),
 ):
     """删除会话"""
-    session_info = session_manager.get_session(session_id)
-    if not session_info:
-        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
-    
     session_manager.delete_session(session_id)
     return {"success": True, "message": f"会话 {session_id} 已删除"}

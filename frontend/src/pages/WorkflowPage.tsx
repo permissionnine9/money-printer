@@ -1,7 +1,7 @@
 /**
  * 创作工作流页面（4 步向导）
  */
-import { useEffect, useCallback } from 'react'
+import { useEffect, useCallback, type CSSProperties } from 'react'
 import { message } from 'antd'
 import {
   StepNavigator,
@@ -12,6 +12,9 @@ import {
 } from '@/components/workflow'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useWorkflowStore } from '@/stores/workflowStore'
+
+// 隐藏而非卸载（keep-alive）：切步骤不断开 SSE 观流、不丢流式/生成进度
+const HIDDEN: CSSProperties = { display: 'none' }
 
 function WorkflowPage() {
   const {
@@ -86,11 +89,19 @@ function WorkflowPage() {
             onStepChange={setCurrentStep}
           />
 
-          {/* 步骤内容区域（4 步：从剧本选集 → 分镜大纲 → 分镜管理 → 视频） */}
-          {currentStep === 0 && <StepSelectEpisode session={currentSession} />}
-          {currentStep === 1 && <StepStoryboardOutline session={currentSession} />}
-          {currentStep === 2 && <StepSegmentManagement session={currentSession} />}
-          {currentStep === 3 && <Step6Videos session={currentSession} />}
+          {/* 步骤内容区域（4 步，keep-alive：仅隐藏非当前步骤，SSE 与生成进度保活） */}
+          <div style={currentStep === 0 ? undefined : HIDDEN}>
+            <StepSelectEpisode session={currentSession} />
+          </div>
+          <div style={currentStep === 1 ? undefined : HIDDEN}>
+            <StepStoryboardOutline session={currentSession} />
+          </div>
+          <div style={currentStep === 2 ? undefined : HIDDEN}>
+            <StepSegmentManagement session={currentSession} />
+          </div>
+          <div style={currentStep === 3 ? undefined : HIDDEN}>
+            <Step6Videos session={currentSession} />
+          </div>
         </>
       )}
 

@@ -115,6 +115,7 @@ export interface IdeationMessage {
 
 export interface ScriptSessionDetail {
   session_id: string
+  title?: string  // 剧本名（大纲根节点，未生成大纲时为空）
   created_at: string
   updated_at: string
   current_step: string  // 步骤名
@@ -157,19 +158,11 @@ export interface VideoParams {
   overlap_seconds?: number  // 相邻分片重叠时长（秒），用于视频生成时段间过渡
 }
 
-export interface ScriptSegment {
-  index: number  // 分片索引（必需）
-  content: string
-  duration: number
-  action?: string
-  camera_movement?: string
-  composition?: string
-  atmosphere?: string
-  transition?: string
-  focus?: string
-  first_frame_mode?: string  // generate / generate_continuous / reuse_prev / use_video_snapshot / all_reference
-  last_frame_mode?: string   // generate / generate_continuous / reuse_next / all_reference
-  video_generation_mode?: string  // 'first_last_frame' 或 'first_frame_reference'
+// 分镜引用的素材图（description 为分镜侧独立副本，默认带出库内描述）
+export interface SegmentReferenceImage {
+  image_id: string  // mat_* 分集素材 / lookbook_lb_* 定妆照
+  image_path: string
+  description: string
 }
 
 // 分镜（分镜大纲产出、分镜管理的基本单元）
@@ -179,8 +172,24 @@ export interface StoryboardSegment {
   outline: string  // 分镜大纲
   mode: 'first_frame' | 'last_frame' | 'all_reference' | 'first_last_frame'  // 分镜形式
   overlap: number  // 与上一分镜重叠秒数（0-3，仅全能参考模式使用）
-  duration?: number  // 建议时长（秒，大纲阶段 LLM 分析，仅作参考）
+  duration?: number  // 建议时长（秒，分镜大纲阶段 LLM 分析；第 2 步导图展示、第 3 步参考）
   prompt: string   // 已生成的分镜提示词
+  reference_images?: SegmentReferenceImage[]  // 参考素材图（仅全能参考模式）
+}
+
+// 素材池条目（选择弹窗 / @ 引用候选）
+export interface PoolMaterial {
+  image_id: string
+  image_path: string
+  description: string
+  title?: string  // 分集素材的素材名（定妆照无）
+}
+
+export interface MaterialPoolGroup {
+  key: string  // lookbook / current / episode_{ep_id}
+  label: string
+  episode_id?: string
+  materials: PoolMaterial[]
 }
 
 // 分镜提示词生成弹窗的上下文
@@ -191,40 +200,10 @@ export interface SegmentPromptContext {
   video_params: VideoParams
   segment: StoryboardSegment
   prev_segment: StoryboardSegment | null
+  reference_images?: SegmentReferenceImage[]
   overlap: number
   effective_overlap: number
   overlap_rule: string
-}
-
-export interface MaterialImage {
-  image_id: string
-  image_path: string
-  prompt: string
-  description: string
-  image_type?: string  // 'detail_scene' | 'aux_scene' | 'aux_character' | 'props' | 'lookbook' | ...
-  task_id?: string
-  task_status?: string
-}
-
-export interface SegmentFrame {
-  segment_index: number
-  first_image_id: string
-  first_image_path: string
-  last_image_id: string
-  last_image_path: string
-  first_prompt?: string
-  last_prompt?: string
-  first_status?: string  // pending/completed/failed
-  last_status?: string  // pending/completed/failed
-}
-
-export interface GeneratedVideo {
-  segment_index: number
-  video_id: string
-  video_path: string
-  duration: number
-  prompt?: string
-  task_status?: string  // pending/completed/failed/cancelled
 }
 
 // ComfyUI 整段生成的最终视频信息
@@ -264,6 +243,8 @@ export interface ImageModelConfig {
 export interface PromptTemplate {
   name: string
   description: string
+  category?: string  // 分类：script=剧本创作 video=视频生成，空/未知归「其他」
+  step?: number      // 组内展示顺序（升序），缺省排在最后
   updated_at?: number
   length?: number
   content?: string
@@ -279,6 +260,9 @@ export interface Session {
   legacy?: boolean  // 旧版 5/7 步会话（不兼容，隐藏或提示）
   script_session_id?: string | null
   source_episode_id?: string | null
+  script_title?: string  // 引用的剧本名（视频会话）
+  episode_title?: string // 引用的分集名（视频会话）
+  episode_number?: number // 集数（从 episode_id 解析，如 ep_01 → 1）
 }
 
 export interface SessionDetail extends Session {

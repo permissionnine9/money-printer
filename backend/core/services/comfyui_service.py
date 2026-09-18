@@ -31,11 +31,9 @@ from backend.core.config import (
     COMFYUI_WORKFLOW_PATH,
     COMFYUI_TIMELINE_FPS,
 )
+from backend.core.utils.path_utils import VIDEO_SAVE_DIR, resolve_project_path
 
 logger = logging.getLogger(__name__)
-
-# 视频保存目录（相对项目根 cwd，与 main.py 的 /static 挂载及各视频服务保持一致）
-VIDEO_SAVE_DIR = Path("static/videos")
 
 # 每段长度规则: 5 + 17n
 SEGMENT_FRAME_BASE = 5
@@ -74,22 +72,25 @@ class TimelineBuilder:
         overlap_seconds: float = 0.0,
         fps: int = COMFYUI_TIMELINE_FPS,
         uploaded_files: dict[str, dict] | None = None,
+        reference_image_paths: dict[int, list[str]] | None = None,
     ) -> dict:
         """构造 timeline_data
 
         Args:
-            segments: 分片脚本列表（ScriptSegment.model_dump()）
+            segments: 分片脚本列表（dict，含 index/content/duration 等）
             frame_image_paths: {segment_index: 首帧图片路径}
             audio_assets: 会话音频资产列表 [{asset_id, name, file_path}]
             overlap_seconds: 相邻分片重叠时长（秒）
             fps: 时间轴帧率（默认 24）
             uploaded_files: {本地路径: ComfyUI 上传返回的 {name, subfolder}}；
                 mock 模式下不传，文件名字段直接使用本地文件名
+            reference_image_paths: {segment_index: [参考素材图路径]}（全能参考模式）
 
         Returns:
             timeline_data dict（可直接 json.dumps 填入工作流）
         """
         uploaded_files = uploaded_files or {}
+        reference_image_paths = reference_image_paths or {}
         overlap_frames = _align_overlap_frames(round(overlap_seconds * fps))
 
         # 定义素材（首帧图）
@@ -105,6 +106,19 @@ class TimelineBuilder:
             file_name = upload["name"] if upload else Path(path).name
             images.append({"id": image_id, "file": file_name})
             seg_image_ids[idx] = image_id
+
+        # 定义素材（分镜参考图，全能参考模式）
+        seg_ref_ids: dict[int, list[str]] = {}
+        for idx, paths in reference_image_paths.items():
+            ids = []
+            for n, path in enumerate(paths):
+                image_id = f"ref{idx + 1}_{n + 1}"
+                upload = uploaded_files.get(path)
+                file_name = upload["name"] if upload else Path(path).name
+                images.append({"id": image_id, "file": file_name})
+                ids.append(image_id)
+            if ids:
+                seg_ref_ids[idx] = ids
 
         # 定义素材（音频）
         audios = []
@@ -132,7 +146,7 @@ class TimelineBuilder:
             prev_end = end
 
             idx = seg.get("index", i)
-            seg_images = [seg_image_ids[idx]] if idx in seg_image_ids else []
+            seg_images = ([seg_image_ids[idx]] if idx in seg_image_ids else []) + seg_ref_ids.get(idx, [])
             # 参考音频每段最多 3 个（当前策略：全部音频资产分配给每段）
             seg_audios = audio_ids[:MAX_AUDIOS_PER_SEGMENT]
 
@@ -224,11 +238,7 @@ class ComfyUIClient:
 
     async def upload_file(self, file_path: str) -> dict:
         """上传材料文件（图片/音频均可），返回 {name, subfolder}"""
-        path = Path(file_path)
-        if not path.is_absolute():
-            # 相对路径基于项目根（backend/ 的上一级）
-            root = Path(__file__).parent.parent.parent.parent
-            path = root / file_path
+        path = resolve_project_path(file_path)
 
         mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                     ".webp": "image/webp", ".mp3": "audio/mpeg", ".wav": "audio/wav",
@@ -412,6 +422,7 @@ class VideoServiceComfyUI:
         frame_image_paths: dict[int, str],
         audio_assets: list[dict] | None = None,
         overlap_seconds: float = 0.0,
+        reference_image_paths: dict[int, list[str]] | None = None,
     ) -> dict:
         """生成完整视频：上传材料 → 构造 timeline → 提交 → 轮询 → 下载
 
@@ -419,7 +430,8 @@ class VideoServiceComfyUI:
             {"success", "video_path", "timeline_data", "mock", "prompt_id"}
         """
         timeline = TimelineBuilder.build(
-            segments, frame_image_paths, audio_assets, overlap_seconds
+            segments, frame_image_paths, audio_assets, overlap_seconds,
+            reference_image_paths=reference_image_paths,
         )
 
         errors = TimelineBuilder.validate(timeline)
@@ -445,7 +457,7 @@ class VideoServiceComfyUI:
         # 1. 上传全部材料文件
         upload_paths = set(frame_image_paths.values()) | {
             a.get("file_path") for a in (audio_assets or []) if a.get("file_path")
-        }
+        } | {p for paths in (reference_image_paths or {}).values() for p in paths}
         uploaded = {}
         for path in upload_paths:
             if path:
@@ -453,7 +465,8 @@ class VideoServiceComfyUI:
 
         # 2. 用上传结果重建 timeline（图片/音频文件名替换为 ComfyUI input 目录名）
         timeline = TimelineBuilder.build(
-            segments, frame_image_paths, audio_assets, overlap_seconds, uploaded_files=uploaded
+            segments, frame_image_paths, audio_assets, overlap_seconds,
+            uploaded_files=uploaded, reference_image_paths=reference_image_paths,
         )
         errors = TimelineBuilder.validate(timeline)
         if errors:

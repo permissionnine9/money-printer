@@ -23,13 +23,6 @@ interface MainLayoutProps {
   children: React.ReactNode
 }
 
-// 会话跳转：地址栏带 session_id 并整页刷新（与现有模式一致）
-function navigateWithSession(sessionId: string) {
-  const url = new URL(window.location.href)
-  url.searchParams.set('session_id', sessionId)
-  window.location.href = url.toString()
-}
-
 export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   const location = useLocation()
   const navigate = useNavigate()
@@ -38,12 +31,16 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
 
   // 视频会话
   const currentSession = useSessionStore((state) => state.currentSession)
+  const loadVideoSession = useSessionStore((state) => state.loadSession)
+  const setVideoCurrentSession = useSessionStore((state) => state.setCurrentSession)
   const [videoSessions, setVideoSessions] = useState<Session[]>([])
   const [loadingVideoSessions, setLoadingVideoSessions] = useState(false)
   const [creatingVideoSession, setCreatingVideoSession] = useState(false)
 
   // 剧本会话
   const currentScriptSession = useScriptSessionStore((state) => state.currentSession)
+  const loadScriptSession = useScriptSessionStore((state) => state.loadSession)
+  const setScriptCurrentSession = useScriptSessionStore((state) => state.setCurrentSession)
   const [scriptSessions, setScriptSessions] = useState<ScriptSessionDetail[]>([])
   const [loadingScriptSessions, setLoadingScriptSessions] = useState(false)
   const [creatingScriptSession, setCreatingScriptSession] = useState(false)
@@ -86,19 +83,28 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     setCreatingVideoSession(true)
     try {
       const session = await sessionApi.create()
-      navigateWithSession(session.session_id)
+      await loadVideoSession(session.session_id)
     } catch {
+      // ignore
+    } finally {
       setCreatingVideoSession(false)
     }
+  }
+
+  // SPA 内切换会话：写 store 即可，页面会随 currentSession 重渲染并同步 URL
+  const handleSelectSession = (sessionId: string, loadSession: (id: string) => Promise<unknown>, currentId?: string) => {
+    if (sessionId === currentId) return
+    loadSession(sessionId)
   }
 
   const handleDeleteVideoSession = async (sessionId: string) => {
     try {
       await sessionApi.delete(sessionId)
       if (currentSession?.session_id === sessionId) {
-        const url = new URL(window.location.href)
-        url.searchParams.delete('session_id')
-        window.location.href = url.toString()
+        // 清空当前会话并清掉 URL 中的 session_id（页面显示欢迎引导）
+        setVideoCurrentSession(null)
+        navigate(location.pathname, { replace: true })
+        // 列表刷新由 currentSession 变化触发的 effect 完成
         return
       }
       await loadVideoSessions()
@@ -112,8 +118,10 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     setCreatingScriptSession(true)
     try {
       const session = await scriptSessionApi.create()
-      navigateWithSession(session.session_id)
+      await loadScriptSession(session.session_id)
     } catch {
+      // ignore
+    } finally {
       setCreatingScriptSession(false)
     }
   }
@@ -122,9 +130,8 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     try {
       await scriptSessionApi.delete(sessionId)
       if (currentScriptSession?.session_id === sessionId) {
-        const url = new URL(window.location.href)
-        url.searchParams.delete('session_id')
-        window.location.href = url.toString()
+        setScriptCurrentSession(null)
+        navigate(location.pathname, { replace: true })
         return
       }
       await loadScriptSessions()
@@ -139,6 +146,22 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     { key: '/models', icon: <AppstoreOutlined />, label: '模型管理' },
     { key: '/prompts', icon: <FileTextOutlined />, label: '提示词管理' },
   ]
+
+  // 侧边栏展示名：剧本页 = 剧本名平铺；视频页 = 按引用剧本二级分组（组头剧本名，二级「第N集·集名」按集数降序）
+  const scriptSessionItems = scriptSessions.map((s) => ({
+    ...s,
+    title: s.title?.trim() || '未命名剧本',
+  }))
+  const videoSessionItems = videoSessions.map((s) => ({
+    ...s,
+    title: s.episode_number
+      ? `第${s.episode_number}集·${s.episode_title?.trim() || ''}`
+      : s.episode_title?.trim() || '',
+    order: s.episode_number,
+    group: s.script_session_id
+      ? { key: s.script_session_id, title: s.script_title?.trim() || '未命名剧本' }
+      : undefined,
+  }))
 
   return (
     <Layout className={styles.layout}>
@@ -157,13 +180,14 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
         {isWorkflowPage && (
           <Sider width={280} theme="light" className={styles.sider}>
             <SessionSider
-              sessions={videoSessions}
+              sessions={videoSessionItems}
+              grouped
               loading={loadingVideoSessions}
               currentSessionId={currentSession?.session_id}
               totalSteps={4}
               creating={creatingVideoSession}
               onCreate={handleCreateVideoSession}
-              onSelect={navigateWithSession}
+              onSelect={(id) => handleSelectSession(id, loadVideoSession, currentSession?.session_id)}
               onDelete={handleDeleteVideoSession}
               onRefresh={loadVideoSessions}
             />
@@ -172,13 +196,13 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
         {isScriptPage && (
           <Sider width={280} theme="light" className={styles.sider}>
             <SessionSider
-              sessions={scriptSessions}
+              sessions={scriptSessionItems}
               loading={loadingScriptSessions}
               currentSessionId={currentScriptSession?.session_id}
               totalSteps={4}
               creating={creatingScriptSession}
               onCreate={handleCreateScriptSession}
-              onSelect={navigateWithSession}
+              onSelect={(id) => handleSelectSession(id, loadScriptSession, currentScriptSession?.session_id)}
               onDelete={handleDeleteScriptSession}
               onRefresh={loadScriptSessions}
             />

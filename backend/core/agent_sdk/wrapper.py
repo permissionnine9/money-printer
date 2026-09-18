@@ -264,39 +264,6 @@ def _handle_user(
 
 # ── 可复用便捷 API（剧本 / 视频 / 未来功能统一调用）─────────────────
 
-async def run_task(
-    prompt: str,
-    system_prompt: Optional[str] = None,
-    output_format: Optional[dict] = None,
-    tools: Optional[dict] = None,
-    resume: Optional[str] = None,
-    max_turns: int = DEFAULT_MAX_TURNS,
-    on_event: Optional[Callable[[AgentEvent], None]] = None,
-    extra_env: Optional[dict[str, str]] = None,
-) -> AgentRunResult:
-    """单次结构化生成任务（视频侧各 LLM 环节统一入口）
-
-    Args:
-        tools: 进程内 MCP server 字典（create_sdk_mcp_server 产物），name → server
-        output_format: JSON Schema，约束 agent 最终输出
-    """
-    env = None
-    if extra_env:
-        env = {**build_agent_env(), **extra_env}
-    return await run_agent(
-        AgentRunOptions(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            output_format=output_format,
-            mcp_servers=tools,
-            resume=resume,
-            max_turns=max_turns,
-            env=env,
-        ),
-        on_event or (lambda e: None),
-    )
-
-
 async def run_conversation(
     message: str,
     system_prompt: Optional[str] = None,
