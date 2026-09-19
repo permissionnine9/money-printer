@@ -1,0 +1,138 @@
+# project-config.yaml — 项目挂链查询清单（由 /harness-init 生成，可经 /harness-update 更新）
+#
+# 用途：code review 阶段的「挂链查询」依据。改动一个接口 / 字段 / 配置时，
+#       顺着本清单追到关联对象，定位影响面：
+#       1. 关联代码仓库   — 谁在调我 / 我依赖谁（跨仓库接口兼容性）
+#       2. 数据库         — 涉及哪些库 / 表 / 字段
+#       3. Apollo 配置    — 涉及哪些 namespace / key
+#       4. 中间件/外部服务 — 缓存 / MQ / ES / 下游 HTTP 服务等
+#
+# 顶层键对应 4 类挂链对象。数据库与中间件为列表（支持同类型多实例），
+# 每个实例用 type 区分具体类型。
+#
+# 本项目为本地单机部署的 AI 剧本/视频创作平台（前后端同仓），无 Apollo、无外部关联仓库；
+# 外部服务端点全部运行时决定：ComfyUI/OSS 走 backend/.env 环境变量（backend/core/config.py
+# 经 load_dotenv override=True 加载 backend/.env），LLM 生图与 Agent 端点存 SQLite 模型管理表。
+#
+# 注意：本文件可能包含敏感信息（如 AppId、数据库连接），提交前自行脱敏。
+#       本文件当前不含任何密钥明文，密钥实际存放于 backend/.env（勿提交）与 SQLite image_models 表。
+
+# ============== 1. Apollo 配置中心 ==============
+# 本项目不使用 Apollo。配置来源为：
+#   - backend/.env 环境变量文件（backend/core/config.py 加载，override=True）
+#   - SQLite 模型管理表 image_models（api_key/base_url/model_id 存于库内，经 /api/v1/models 维护）
+apollo:
+  app_id: "不适用"             # 本项目无 Apollo 配置中心
+  default_namespace: "不适用"
+  default_cluster: "不适用"
+  envs: []                     # 无多环境区分，本地单机部署
+
+# ============== 2. 数据库（同类型可多实例，列表）==============
+databases:
+  - type: sqlite               # 本项目仅一个 SQLite 单文件库（标准库 sqlite3，无独立服务进程）
+    name: sessions             # 实例标识：会话/任务状态 + 模型配置 主库
+    path: data/sessions.db     # 相对项目根的文件路径（默认值硬编码于 backend/core/persistence/base.py
+                               #   BaseSQLiteManager.__init__，运行时以 CWD=项目根 为前提）
+    journal_mode: WAL          # PRAGMA journal_mode=WAL，多 manager 并发读写（video/script 两个
+                               #   SessionManager + ScriptManager + ModelManager 共用同一库文件）
+    busy_timeout: 5.0          # _connect() 里 sqlite3.connect timeout=5.0 秒
+    # 备份约定：迁移脚本 cutover 前 shutil.copy2 备份为 data/sessions.db.bak-YYYYmmdd-HHMMSS
+    #           （backend/scripts/migrate_db_to_workspace.py），当前库侧已存在 sessions.db.bak-20260919-041730
+    tables:                    # 8 张表（DDL 分散于 backend/core/persistence/ 各 manager 的 _create_schema）
+      - sessions               # 会话主表：session_id PK / workflow_type('video'|'script') / current_step /
+                               #   status(active|completed|error) / workspace_path(story 目录锚点) /
+                               #   script_session_id / source_episode_id
+      - step_results           # 步骤结果：session_id+step_name UNIQUE，生成内容仅存薄 envelope
+                               #   {_artifact:'workspace', path}，真实内容在 workspace/ markdown
+      - session_assets         # 会话资产（audio|image 上传文件登记）
+      - episodes               # 旧影子表：内容权威源已迁 workspace/02-episodes/；迁移脚本 --export/--verify
+                               #   读写对账、cutover 可选 DELETE（永不 DROP）；ScriptManager 级联清理
+                               #   delete_script_data 时仍 COUNT/DELETE 本表
+      - script_entities        # 旧影子表（同上，权威源在 workspace/03-entities/）
+      - lookbook_images        # 定妆照任务状态机：lb_* / task_status(pending→completed)
+      - episode_material_images # 分集素材图任务状态机：mat_*
+      - image_models           # 模型管理：api_key/base_url/model_id/is_default/model_type('image'|'chat'|'agent')
+                               #   —— 生图与 Agent 端点的唯一权威配置，改动字段需同步
+                               #      backend/core/persistence/model_manager.py 与前端 ModelsPage
+    # 挂链提示：改 sessions.workspace_path / step_results envelope 结构会影响
+    #   backend/core/persistence/workspace_store.py（锚点回写）与
+    #   backend/core/services/workspace_projection.py（旧形状投影）
+
+# ============== 3. 当前代码仓库配置（包含 内部仓库） ==============
+current-repositorie:
+  name: money-printer                      # 从 origin URL 推导（git remote get-url origin）
+  project_type: ["backend", "frontend"]    # 前后端同仓：backend/（FastAPI + uv）+ frontend/（React 19 + Vite）
+  descript: "AI 剧本/视频创作平台单体仓库；后端 FastAPI（backend/main.py）+ 前端 React（frontend/src/main.tsx），无对外 SDK/接口供其他仓库调用"
+  prod_branch: "main"
+  feature_branch_name_prefix: "feat"       # 现行分支如 feat/create_story；近期提交信息用 'feat: ' 前缀
+  git_url: "https://github.com/permissionnine9/money-printer.git"
+
+# ============== 4. 关联代码仓库（仅外部仓库） ==============
+# 本项目无外部关联仓库（无上下游系统调用本服务，也不 clone 其他仓库编码）。
+relate-repositories:
+  default_repos_root: "/.harness/prepared-codebase"   # 保留模板默认值（当前无可克隆仓库）
+  repos: []                                           # 无
+
+# ============== 5. 中间件 / 外部服务 ==============
+middlewares:
+  # ---- 5.1 远程 ComfyUI（视频生成，httpx）----
+  - type: http
+    name: comfyui-remote                   # 视频链唯一生成后端：时间轴整段生成
+    base_url_env: COMFYUI_BASE_URL         # 默认 http://127.0.0.1:8188（backend/core/config.py）
+    mock_env: COMFYUI_MOCK                 # 默认 true：本地 OpenCV 合成演示 mp4，不发 HTTP
+    workflow_template: COMFYUI_WORKFLOW_PATH  # = backend/comfyui_workflow.json —— 注意：该模板文件
+                                              #   当前不在仓库中！mock 模式不需要；置 COMFYUI_MOCK=false
+                                              #   走真实链路时会因缺文件直接报错
+                                              #   （comfyui_service.py 启动检查抛"未找到 ComfyUI 工作流模板"）
+    fps: 24                                # COMFYUI_TIMELINE_FPS 常量（backend/core/config.py，非环境变量）
+    endpoints:                             # backend/core/services/comfyui_service.py
+      - "POST /upload/image"               # 素材（图片/音频）上传，取回 {name, subfolder}
+      - "POST /prompt"                     # 注入 timeline_data 的 workflow 提交
+      - "GET /history/{prompt_id}"         # 轮询生成结果
+      - "GET /view"                        # 流式下载生成的视频到 static/videos/
+    caller: backend/core/agents/workflow_v2.py（VideoCreationWorkflowV2.generate_videos）
+
+  # ---- 5.2 OpenAI 兼容生图服务（定妆照 / 分集素材图）----
+  - type: http
+    name: openai-image-api                 # OpenAI 标准图片协议
+    config_source: SQLite image_models 表 model_type='image' 默认模型   # 无内置默认，未配置显式报错；
+                                                                       # 经 /api/v1/models 维护
+    endpoints:                             # backend/core/services/image_service.py
+      - "POST {base_url}/images/generations"  # 文生图（JSON，同步结果 + request_id 轮询缓存）
+      - "POST {base_url}/images/edits"        # 图生图（multipart，image 字段可重复，最多 4 张参考图）
+    retry: 404/429/5xx 重试；产物 b64 落盘 static/images/，归档 static/images/{story}/{episode}/
+    rate_limit: IMAGE_REQUEST_TIME_GAP=12 秒/张（backend/core/config.py）
+
+  # ---- 5.3 Claude Agent SDK（Anthropic 协议端点，LLM 编排）----
+  - type: http
+    name: anthropic-agent-endpoint         # ClaudeSDKClient 子进程驱动本机 Claude Code CLI
+    config_source: SQLite image_models 表 model_type='agent' 默认模型
+    env_injection: backend/core/agent_sdk/model_env.py::build_agent_env()
+      # 注入 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN + ANTHROPIC_API_KEY（同一 api_key 双注入，
+      # 兼容官方 x-api-key 与网关 Bearer）/ ANTHROPIC_MODEL / CLAUDE_AGENT_SDK_CLIENT_APP=money-printer/2.0；
+      # 注入前清除本机同名变量；未配置默认 agent 模型抛 AgentModelNotConfiguredError
+    caller: backend/core/agent_sdk/wrapper.py（run_agent/run_conversation，
+      backend/core/agents/script_workflow.py、storyboard.py 等调用）
+    prerequisites: 本机需安装 Claude Code CLI（SDK 以子进程方式拉起）
+
+  # ---- 5.4 阿里云 OSS（boto3 S3 兼容）—— 预留/遗留，当前无调用方 ----
+  - type: oss
+    name: aliyun-oss
+    status: 未接线                          # grep 全 backend/ 无 OSSService 调用方，仅
+                                            # backend/core/services/oss_service.py 自身定义
+    env_keys:                              # 默认值见 backend/core/config.py（backend/.env 覆盖）
+      OSS_ACCESS_KEY: ""                   # 默认空
+      OSS_SECRET_KEY: ""                   # 默认空
+      OSS_BUCKET: ""                       # 默认空
+      OSS_ENDPOINT: "http://oss-cn-guangzhou.aliyuncs.com"
+      OSS_REGION: "cn-guangzhou"
+    note: 若后续接线需先补齐 backend/.env 中 OSS_* 配置；删除功能则连 oss_service.py 与
+          backend/core/config.py 的 OSS_* 常量、pyproject 的 boto3 依赖一并清理
+
+# ============== 本地存储挂链（非中间件，改动时同样需要追影响面） ==============
+# - workspace/          剧本/分镜 markdown 权威数据源（story 树：MAP.md + 00-ideation/01-outline/
+#                       02-episodes/03-entities/04-storyboards），由 WorkspaceStore 原子写
+# - static/images/      生图产物与归档；static/videos/ 视频产物；static/uploads/ 上传文件
+#                       三目录经 backend/main.py app.mount('/static') 对外暴露
+# - backend/prompts/    提示词模板 markdown（frontmatter 元数据 + {{var}} 渲染）
+# - backend/.env        环境变量文件（存在，含密钥，勿提交/勿回显），load_dotenv override=True 加载
