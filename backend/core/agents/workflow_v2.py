@@ -87,7 +87,10 @@ class VideoCreationWorkflowV2:
             return {"success": False, "error": f"剧本会话不存在: {script_session_id}"}
         if not script_sm.is_step_completed(script_session_id, "episode_design"):
             return {"success": False, "error": "该剧本会话的分集设计尚未完成"}
-        episode = self.store.get_episode(script_session_id, episode_id)
+        try:
+            episode = self.store.get_episode(script_session_id, episode_id)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}  # 非法 ID 格式（schema 已拦，纵深兜底）
         if not episode:
             return {"success": False, "error": f"分集不存在: {episode_id}"}
 

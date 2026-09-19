@@ -271,6 +271,58 @@ def run(store: WorkspaceStore, sm: SessionManager, tmp: Path):
     check("分镜 prompt 完整往返", sb["segments"][0]["prompt"] == seg_tricky["prompt"])
     raw = (store.storyboard_dir(sid3, "ep_01", vsid) / "seg_00-分镜.md").read_text(encoding="utf-8")
     check("文件内正文标题已转义", "\\## 分镜提示词" in raw and "\\## 分镜大纲" in raw)
+    # 双射回归：原生字面 `\## `（前一轮方案的合法转义形态）往返不再静默漂移
+    literal = "开头\n\\## 用户手打的字面反斜杠标题\n结尾"
+    ep_lit = store.upsert_episode(sid3, {
+        "episode_id": "ep_02", "title": "双射", "logline": "g", "conflict_chain": literal,
+        "causality_chain": "c", "ending_summary": literal, "story_progress": "p",
+        "character_ids": [], "scene_ids": [],
+    })
+    check("字面 \\## 行往返不漂移（双射）",
+          ep_lit["conflict_chain"] == literal and ep_lit["ending_summary"] == literal)
+
+    print("== 12b. 审查修复回归：分镜侧 episode_id 校验（路径穿越封堵） ==")
+    victim = store.root.parent / "victim_outside"
+    victim.mkdir(parents=True, exist_ok=True)
+    (victim / "keep.txt").write_text("keep", encoding="utf-8")
+    traversal = "../../../victim_outside"
+    try:
+        store.write_storyboard(sid3, traversal, vsid, "# x", [])
+        check("write_storyboard 穿越 episode_id 拒绝", False)
+    except WorkspaceStoreError:
+        check("write_storyboard 穿越 episode_id 拒绝", True)
+    check("树外目录未被 rmtree", (victim / "keep.txt").exists())
+    for method, call in (
+        ("read_storyboard", lambda: store.read_storyboard(sid3, traversal, vsid)),
+        ("storyboard_dir", lambda: store.storyboard_dir(sid3, traversal, vsid)),
+        ("episode_path", lambda: store.episode_path(sid3, traversal)),
+        ("segment_path", lambda: store.segment_path(sid3, traversal, vsid, 0)),
+        ("replace_storyboard", lambda: store.replace_storyboard(sid3, traversal, vsid, mindmap="# x")),
+        ("read_segment", lambda: store.read_segment(sid3, traversal, vsid, 0)),
+    ):
+        try:
+            call()
+            check(f"{method} 穿越 episode_id 拒绝", False)
+        except WorkspaceStoreError:
+            check(f"{method} 穿越 episode_id 拒绝", True)
+    # 正则加固：尾换行与全角数字拒绝
+    for sneaky in ("ep_01\n", "ep_０１"):
+        try:
+            store.get_episode(sid3, sneaky)
+            check(f"加固正则拒绝: {sneaky!r}", False)
+        except WorkspaceStoreError:
+            check(f"加固正则拒绝: {sneaky!r}", True)
+    # 非法 entity_id 不再产生 ensure_story 目录副作用
+    sid_ghost = "eeeeeeee-0000-0000-0000-000000000000"
+    sm.create_session(sid_ghost, workflow_type="script")
+    try:
+        store.upsert_entity(sid_ghost, "character", "幽灵", "x", entity_id="*")
+        check("非法 entity_id 校验先于建目录", False)
+    except WorkspaceStoreError:
+        check("非法 entity_id 校验先于建目录",
+              store.story_dir(sid_ghost) is None or not (store.story_dir(sid_ghost) / "03-entities").glob("*-*.md"))
+    import shutil as _shutil
+    _shutil.rmtree(victim, ignore_errors=True)
 
     print("== 13. 审查修复回归：跨会话并发 ID 分配不撞号 ==")
     ids_lock_free: list[str] = []

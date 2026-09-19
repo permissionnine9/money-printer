@@ -39,8 +39,13 @@ logger = logging.getLogger(__name__)
 
 # ID 白名单（API 路径参数直接拼 glob/文件路径，必须先过格式校验防元字符注入：
 # 如 episode_id="*" 会令 glob("*-*.md") 误匹配并触发 _replace_doc_file 清空分集）
-_EPISODE_ID_RE = re.compile(r"^ep_\d{2,}$")
-_ENTITY_ID_RE = re.compile(r"^(chr|scn|clu|fs)_\d{3,}$")
+# 正则加固：\Z 绝对锚定（$ 放行尾换行）、[0-9] 显式 ASCII（\d 放行全角数字）
+_EPISODE_ID_RE = re.compile(r"^ep_[0-9]{2,}\Z", re.ASCII)
+_ENTITY_ID_RE = re.compile(r"^(chr|scn|clu|fs)_[0-9]{3,}\Z", re.ASCII)
+# API/schema 共享的 pattern 字符串（pydantic/FastAPI 为 rust regex 引擎：
+# 其 $ 即绝对末尾、[0-9] 为 ASCII——与上方 Python re 语义一致）
+EPISODE_ID_PATTERN = r"^ep_[0-9]{2,}$"
+ENTITY_ID_PATTERN = r"^(chr|scn|clu|fs)_[0-9]{3,}$"
 
 # story 树子目录（数字前缀保证目录树浏览时的阅读顺序）
 DIR_IDEATION = "00-ideation"
@@ -84,17 +89,18 @@ SEGMENT_SECTIONS = (
 
 _SECTION_RE = re.compile(r"^##\s+(.*?)\s*$")
 # 正文字段值中的行首 `## `（LLM 自由文本可能输出 markdown 标题）会与正文小节定界符冲突：
-# 写入时转义为 `\## `，读取时反转义，保证往返保真、字段间不走私
-_ESCAPE_HEADING_RE = re.compile(r"^(#{2,}\s)", re.MULTILINE)
-_UNESCAPE_HEADING_RE = re.compile(r"^\\(#{2,}\s)", re.MULTILINE)
+# 写入时在行首标题前加一个 `\`，读取时去掉一个——按已有反斜杠数量计数，
+# 双射往返（原文 `\## x` ↔ 文件 `\\## x`），不会误解码原生转义形态
+_ESCAPE_HEADING_RE = re.compile(r"^(\\*)(#{2,}\s)", re.MULTILINE)
+_UNESCAPE_HEADING_RE = re.compile(r"^(\\+)(#{2,}\s)", re.MULTILINE)
 
 
 def _escape_headings(text: str) -> str:
-    return _ESCAPE_HEADING_RE.sub(r"\\\1", text or "")
+    return _ESCAPE_HEADING_RE.sub(lambda m: "\\" + m.group(1) + m.group(2), text or "")
 
 
 def _unescape_headings(text: str) -> str:
-    return _UNESCAPE_HEADING_RE.sub(r"\1", text or "")
+    return _UNESCAPE_HEADING_RE.sub(lambda m: "\\" * (len(m.group(1)) - 1) + m.group(2), text or "")
 
 
 def _require_episode_id(episode_id: str) -> str:
@@ -423,10 +429,11 @@ class WorkspaceStore:
         """
         if entity_type not in ENTITY_ID_PREFIXES:
             raise ValueError(f"entity_type 仅支持 {tuple(ENTITY_ID_PREFIXES)}")
+        if entity_id:
+            _require_entity_id(entity_id)  # 校验先于 ensure_story：非法 ID 不留目录副作用
         now = _now()
         story = self.ensure_story(script_session_id)
         if entity_id:
-            _require_entity_id(entity_id)
             with self._story_lock(script_session_id):
                 old_path = self._find_entity_file(script_session_id, entity_id)
                 if not old_path:
@@ -694,11 +701,13 @@ class WorkspaceStore:
 
     def storyboard_dir(self, script_session_id: str, episode_id: str, video_session_id: str) -> Path:
         """分镜目录（确定性拼出：04-storyboards/{ep}/vs-{视频会话id前8}）"""
+        _require_episode_id(episode_id)
         story = self.ensure_story(script_session_id)
         return story / DIR_STORYBOARDS / episode_id / f"vs-{video_session_id[:8]}"
 
     def episode_path(self, script_session_id: str, episode_id: str) -> Optional[Path]:
         """分集文件绝对路径（供 Agent prompt 注入；不存在返回 None）"""
+        _require_episode_id(episode_id)
         story = self.story_dir(script_session_id)
         if not story:
             return None
@@ -708,6 +717,7 @@ class WorkspaceStore:
 
     def segment_path(self, script_session_id: str, episode_id: str, video_session_id: str, index: int) -> Optional[Path]:
         """单分镜文件绝对路径（供 Agent prompt 注入）"""
+        _require_episode_id(episode_id)
         story = self.story_dir(script_session_id)
         if not story:
             return None
@@ -719,6 +729,7 @@ class WorkspaceStore:
         mindmap: str, segments: list[dict], edited: bool = False,
     ) -> dict:
         """生成分镜大纲：清空 vs 目录后整体重写（对应旧级联重置语义）"""
+        _require_episode_id(episode_id)
         now = _now()
         with self._story_lock(script_session_id):
             vs_dir = self.storyboard_dir(script_session_id, episode_id, video_session_id)
@@ -776,6 +787,7 @@ class WorkspaceStore:
 
     def read_storyboard(self, script_session_id: str, episode_id: str, video_session_id: str) -> Optional[dict]:
         """读取分镜（与旧 step_results.storyboard_outline.result_data 形状一致）"""
+        _require_episode_id(episode_id)
         story = self.story_dir(script_session_id)
         if not story:
             return None
@@ -802,6 +814,7 @@ class WorkspaceStore:
         *, mindmap: Optional[str] = None, segments: Optional[list[dict]] = None, edited: Optional[bool] = None,
     ) -> dict:
         """整体替换 mindmap 和/或 segments（人工编辑导图 reconcile 后调用；不改 created_at）"""
+        _require_episode_id(episode_id)
         with self._story_lock(script_session_id):
             current = self.read_storyboard(script_session_id, episode_id, video_session_id)
             if not current:
@@ -831,6 +844,7 @@ class WorkspaceStore:
         self, script_session_id: str, episode_id: str, video_session_id: str, index: int, fields: dict,
     ) -> Optional[dict]:
         """单分镜部分更新（mode/overlap/duration/reference_images/outline/title/prompt；整文件重写）"""
+        _require_episode_id(episode_id)
         with self._story_lock(script_session_id):
             story = self.story_dir(script_session_id)
             vs_dir = story / DIR_STORYBOARDS / episode_id / f"vs-{video_session_id[:8]}"
@@ -854,6 +868,7 @@ class WorkspaceStore:
             return self.read_segment(script_session_id, episode_id, video_session_id, index)
 
     def read_segment(self, script_session_id: str, episode_id: str, video_session_id: str, index: int) -> Optional[dict]:
+        _require_episode_id(episode_id)
         story = self.story_dir(script_session_id)
         if not story:
             return None

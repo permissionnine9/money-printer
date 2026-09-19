@@ -1,10 +1,11 @@
-"""加载 /video-prompt skill 全文（注入 agent prompt）
+"""同步 /video-prompt skill 文件到剧本工作区（渐进式披露）
 
 Agent SDK 以隔离模式运行（setting_sources=[]），无法原生加载项目级 skill，
-因此运行时读取 skill 文件全文拼进提示词，让 agent 遵循该规范生成分镜提示词。
+因此把 skill 文件复制进剧本工作区（99-references/video-prompt/），
+agent prompt 中只留目录与必读指引，由 agent 用 Read 按需读取规范全文。
 """
 import logging
-from functools import lru_cache
+import shutil
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -12,24 +13,26 @@ logger = logging.getLogger(__name__)
 # backend/.claude/skills/video-prompt/
 SKILL_DIR = Path(__file__).resolve().parents[2] / ".claude" / "skills" / "video-prompt"
 
-# references 按流水线顺序拼接（场景扩写 → 电影级脚本 → 分镜设计）
+# references 按流水线顺序必读（场景扩写 → 电影级脚本 → 分镜设计）
 _REFERENCE_ORDER = ["scene-expansion.md", "cinematic-script.md", "shot-and-sound.md"]
 
+# 工作区内目标目录（相对 story 根）
+SKILL_WORKSPACE_DIRNAME = "99-references/video-prompt"
 
-@lru_cache(maxsize=1)
-def load_video_prompt_skill() -> str:
-    """读取 SKILL.md + references/*.md 全文并拼接为一段提示词规范文本"""
+
+def sync_video_prompt_skill(story_root: Path) -> Path:
+    """把 SKILL.md + references/*.md 同步到 {story_root}/99-references/video-prompt/（幂等覆盖），返回目标目录"""
     skill_path = SKILL_DIR / "SKILL.md"
     if not skill_path.exists():
         raise FileNotFoundError(f"video-prompt skill 不存在: {skill_path}")
 
-    parts: list[str] = [skill_path.read_text(encoding="utf-8")]
-
+    target_dir = story_root / SKILL_WORKSPACE_DIRNAME
+    (target_dir / "references").mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(skill_path, target_dir / "SKILL.md")
     for name in _REFERENCE_ORDER:
         ref_path = SKILL_DIR / "references" / name
         if not ref_path.exists():
             logger.warning(f"[video-prompt] 缺少参考文件: {ref_path}")
             continue
-        parts.append(f"\n\n---\n\n# 参考文件：references/{name}\n\n" + ref_path.read_text(encoding="utf-8"))
-
-    return "".join(parts)
+        shutil.copyfile(ref_path, target_dir / "references" / name)
+    return target_dir

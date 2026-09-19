@@ -17,6 +17,7 @@ from fastapi.responses import StreamingResponse
 
 from backend.core.agent_sdk import AgentEvent
 from backend.core.agents.script_workflow import ScriptWorkflow
+from backend.core.persistence.workspace_store import ENTITY_ID_PATTERN, EPISODE_ID_PATTERN
 from backend.core.services.workspace_projection import script_step_results, script_title
 from backend.deps import (
     get_model_manager,
@@ -42,9 +43,10 @@ from backend.schemas.script import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# 路径参数 ID 白名单（store 层亦有一份纵深校验；这里 422 快速失败防 glob 元字符注入）
-EPISODE_ID_PATH = Path(pattern=r"^ep_\d{2,}$")
-ENTITY_ID_PATH = Path(pattern=r"^(chr|scn|clu|fs)_\d{3,}$")
+# 路径参数 ID 白名单（与 store 层/schema 共用同一 pattern，防多处定义漂移；
+# 这里 422 快速失败防 glob 元字符注入）
+EPISODE_ID_PATH = Path(pattern=EPISODE_ID_PATTERN)
+ENTITY_ID_PATH = Path(pattern=ENTITY_ID_PATTERN)
 
 
 def get_script_workflow() -> ScriptWorkflow:

@@ -3,10 +3,11 @@
  */
 import React, { useEffect, useRef, useState } from 'react'
 import { Button, Card, Collapse, Empty, Input, Space, Spin, Tag, Typography, message } from 'antd'
-import { CheckCircleOutlined, SaveOutlined, SendOutlined, StopOutlined } from '@ant-design/icons'
+import { CheckCircleOutlined, EyeOutlined, SaveOutlined, SendOutlined, StopOutlined } from '@ant-design/icons'
 import type { AgentEvent, IdeationMessage, ScriptSessionDetail } from '@/types'
 import { scriptStepApi } from '@/api/client'
 import { fetchSSE } from '@/api/sse'
+import { PromptViewerModal } from '@/components/common'
 import { useScriptSessionStore } from '@/stores/scriptSessionStore'
 
 const { Text } = Typography
@@ -37,6 +38,8 @@ export const StepIdeationChat: React.FC<StepIdeationChatProps> = ({ session }) =
   const [round, setRound] = useState<{ thinking: string; text: string } | null>(null)
   const [storyLogicEdit, setStoryLogicEdit] = useState(storyLogic)
   const [savingLogic, setSavingLogic] = useState(false)
+  const [lastPrompt, setLastPrompt] = useState<{ systemPrompt: string; userPrompt: string; model: string } | null>(null)
+  const [promptOpen, setPromptOpen] = useState(false)
 
   const accRef = useRef({ thinking: '', text: '' })
   const abortRef = useRef<AbortController | null>(null)
@@ -45,6 +48,7 @@ export const StepIdeationChat: React.FC<StepIdeationChatProps> = ({ session }) =
   // 会话切换时从后端还原对话历史
   useEffect(() => {
     setMessages(session.step_results?.story_ideation?.result_data?.messages || [])
+    setLastPrompt(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.session_id])
 
@@ -85,6 +89,15 @@ export const StepIdeationChat: React.FC<StepIdeationChatProps> = ({ session }) =
       kind === 'chat' ? { message: userText!.trim() } : {},
       {
         onEvent: (ev: AgentEvent) => {
+          if (ev.type === 'prompt') {
+            // 多轮会话仅含本轮 user 消息（历史轮由 agent 会话保持）
+            setLastPrompt({
+              systemPrompt: ev.system_prompt || '',
+              userPrompt: ev.user_prompt || '',
+              model: ev.model || '',
+            })
+            return
+          }
           if (ev.type === 'thinking') {
             accRef.current.thinking += ev.delta || ''
             setRound({ ...accRef.current })
@@ -256,6 +269,14 @@ export const StepIdeationChat: React.FC<StepIdeationChatProps> = ({ session }) =
           {streamingBubble}
         </div>
 
+        {lastPrompt && (
+          <div style={{ marginTop: 8, textAlign: 'right' }}>
+            <Button type="link" size="small" icon={<EyeOutlined />} onClick={() => setPromptOpen(true)}>
+              查看本轮提示词
+            </Button>
+          </div>
+        )}
+
         <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
           <TextArea
             value={input}
@@ -322,6 +343,14 @@ export const StepIdeationChat: React.FC<StepIdeationChatProps> = ({ session }) =
           </div>
         </Card>
       )}
+
+      <PromptViewerModal
+        open={promptOpen}
+        onClose={() => setPromptOpen(false)}
+        systemPrompt={lastPrompt?.systemPrompt}
+        userPrompt={lastPrompt?.userPrompt}
+        model={lastPrompt?.model}
+      />
     </>
   )
 }

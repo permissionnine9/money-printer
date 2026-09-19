@@ -14,6 +14,7 @@ from backend.schemas.sessions import (
 from backend.schemas.script import CreateVideoSessionFromScriptRequest
 from backend.deps import get_session_manager, get_script_session_manager, get_workspace_store, load_video_session
 from backend.core.persistence.session_manager import SessionManager
+from backend.core.persistence.workspace_store import WorkspaceStoreError
 from backend.core.services.workspace_projection import script_title, video_step_results
 
 router = APIRouter()
@@ -37,7 +38,10 @@ async def create_session_from_script(
         raise HTTPException(status_code=404, detail=f"剧本会话 {body.script_session_id} 不存在")
     if not script_sm.is_step_completed(body.script_session_id, "episode_design"):
         raise HTTPException(status_code=400, detail="该剧本会话的分集设计尚未完成")
-    episode = get_workspace_store().get_episode(body.script_session_id, body.episode_id)
+    try:
+        episode = get_workspace_store().get_episode(body.script_session_id, body.episode_id)
+    except WorkspaceStoreError as e:
+        raise HTTPException(status_code=400, detail=str(e))  # 非法 ID 格式（schema 已拦，纵深兜底）
     if not episode:
         raise HTTPException(status_code=404, detail=f"分集 {body.episode_id} 不存在")
 

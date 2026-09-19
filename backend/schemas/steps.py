@@ -4,11 +4,13 @@
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
 
+from backend.core.persistence.workspace_store import EPISODE_ID_PATTERN
+
 
 class SelectEpisodeRequest(BaseModel):
     """步骤1：从剧本选集"""
     script_session_id: str = Field(..., description="剧本会话ID")
-    episode_id: str = Field(..., pattern=r"^ep_\d+$", description="分集ID（如 ep_01）")
+    episode_id: str = Field(..., pattern=EPISODE_ID_PATTERN, description="分集ID（如 ep_01）")
     resolution: str = Field(default="1080p", description="分辨率")
     aspect_ratio: str = Field(default="16:9", description="宽高比")
     max_segment_duration: int = Field(default=15, ge=5, le=30, description="最大分片时长（秒），范围5-30秒。注意：当前即梦和wan2.2模型仅支持5秒或10秒视频生成，更长时长需要接入其他模型")

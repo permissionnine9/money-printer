@@ -3,6 +3,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from backend.core.persistence.workspace_store import EPISODE_ID_PATTERN
+
 
 # ==================== 会话 ====================
 
@@ -36,7 +38,7 @@ class EpisodesGenerateRequest(BaseModel):
 
 
 class EpisodeRegenerateRequest(BaseModel):
-    episode_id: str = Field(pattern=r"^ep_\d+$", description="要重设计的集（如 ep_02）")
+    episode_id: str = Field(pattern=EPISODE_ID_PATTERN, description="要重设计的集（如 ep_02）")
     extra_instruction: str = Field(default="")
 
 
@@ -90,4 +92,4 @@ class LookbookRegenerateRequest(BaseModel):
 
 class CreateVideoSessionFromScriptRequest(BaseModel):
     script_session_id: str = Field(min_length=1)
-    episode_id: str = Field(pattern=r"^ep_\d+$")
+    episode_id: str = Field(pattern=EPISODE_ID_PATTERN)

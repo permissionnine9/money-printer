@@ -23,7 +23,7 @@ from backend.core.persistence import SessionManager
 from backend.core.persistence.workspace_store import WorkspaceStore
 from backend.core.services.image_service import build_image_service_from_model_config
 from backend.core.services.script_context_service import ScriptContextService
-from backend.core.services.video_prompt_skill import load_video_prompt_skill
+from backend.core.services.video_prompt_skill import sync_video_prompt_skill
 from backend.core.utils.image_store import archive_generated_image
 from backend.core.utils.json_parser import is_valid_mindmap, parse_json_response
 from backend.core.utils.path_utils import resolve_project_path
@@ -317,8 +317,9 @@ class StoryboardWorkflow(StepWorkflowBase):
     def update_segment_config(self, session_id: str, index: int, fields: dict) -> dict:
         """更新分镜配置（分镜形式 / overlap）
 
-        mode 或 overlap 变化会清空该分镜已生成的提示词（提示词内嵌 overlap 语义）；
-        若分镜管理已完成，则回退其完成状态（配置变化需重新确认）。
+        mode 或 overlap 真实变化（与现值不同）才清空该分镜已生成的提示词
+        （提示词内嵌 overlap 语义；幂等写不清空）；若分镜管理已完成，则回退其
+        完成状态（配置变化需重新确认）。
         """
         with self._segment_lock(session_id):
             seg = self._find_segment(self._get_outline_data(session_id), index)  # 存在性校验
@@ -332,9 +333,11 @@ class StoryboardWorkflow(StepWorkflowBase):
             if overlap is not None:
                 seg_fields["overlap"] = int(overlap)
 
-            seg = self._save_segment_change(
-                session_id, index, seg_fields, stale_prompt=(mode is not None or overlap is not None),
+            changed = (
+                (mode is not None and mode != seg.get("mode"))
+                or (overlap is not None and int(overlap) != seg.get("overlap"))
             )
+            seg = self._save_segment_change(session_id, index, seg_fields, stale_prompt=changed)
 
         return {"segment": seg}
 
@@ -687,8 +690,14 @@ class StoryboardWorkflow(StepWorkflowBase):
         seg_path = self.store.segment_path(script_session_id, episode_id, session_id, index)
         episode_path = self.store.episode_path(script_session_id, episode_id)
 
-        user_prompt = f"""## 提示词生成规范（必须完整遵循）
-{load_video_prompt_skill()}
+        # 渐进式披露：skill 规范全文同步进工作区，prompt 只留必读指引
+        story_root = self.store.story_dir(script_session_id)
+        skill_rel = sync_video_prompt_skill(story_root).relative_to(story_root).as_posix()
+
+        user_prompt = f"""## 提示词生成规范（必读，完整遵循）
+目录：{skill_rel}/
+1. 先 Read {skill_rel}/SKILL.md（总体流程与规范）
+2. 再依次 Read {skill_rel}/references/ 下 scene-expansion.md、cinematic-script.md、shot-and-sound.md
 
 ## 剧本工作区（你只可在该目录内使用 Read/Grep/Glob 自主检索，禁止越界）
 {self._workspace_section(script_session_id, episode_id)}
@@ -720,10 +729,10 @@ class StoryboardWorkflow(StepWorkflowBase):
             AgentRunOptions(
                 prompt=user_prompt,
                 system_prompt=system_prompt,
-                # 剧本目录内自主检索，留足检索轮次
+                # 剧本目录内自主检索 + 必读 skill 规范文件，留足 Read 轮次
                 tools=READ_ONLY_TOOLS,
                 cwd=self.store.story_cwd(script_session_id),
-                max_turns=12,
+                max_turns=16,
                 interrupt=interrupt,
             ),
             on_event,

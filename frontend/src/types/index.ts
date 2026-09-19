@@ -128,7 +128,7 @@ export interface ScriptSessionDetail {
 // ==================== Agent 运行事件（SSE） ====================
 
 export interface AgentEvent {
-  type: 'thinking' | 'text_delta' | 'tool_use' | 'tool_result' | 'result' | 'error' | 'connected' | 'final' | 'done'
+  type: 'thinking' | 'text_delta' | 'tool_use' | 'tool_result' | 'result' | 'error' | 'connected' | 'final' | 'done' | 'prompt'
   seq?: number
   delta?: string
   id?: string
@@ -141,6 +141,10 @@ export interface AgentEvent {
   message?: string
   label?: string
   last_seq?: number
+  // prompt 事件（本次 run 最终渲染的提示词）
+  system_prompt?: string
+  user_prompt?: string
+  model?: string
   // final 事件（SSE 直跑形态）
   data?: any
   // done 事件（run 观流形态）

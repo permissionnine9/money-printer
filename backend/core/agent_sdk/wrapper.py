@@ -123,6 +123,15 @@ async def run_agent(
             accumulated_thinking += event.delta
         on_event(event)
 
+    # 提示词透明化：发起 LLM 调用前流出最终渲染后的提示词
+    # （形态 A 直跑 SSE / 形态 B registry 缓冲回放统一覆盖，含 run_conversation 多轮）
+    emit(AgentEvent(
+        type="prompt",
+        system_prompt=options.system_prompt or "",
+        user_prompt=options.prompt,
+        model=env.get("ANTHROPIC_MODEL", ""),
+    ))
+
     try:
         async with client:
             if options.interrupt is not None:

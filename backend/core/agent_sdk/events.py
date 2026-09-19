@@ -15,6 +15,7 @@ class AgentEvent:
     - tool_result: 工具结果（id/tool/result_preview）
     - result:     最终结果（text/session_id/usage）
     - error:      错误（message）
+    - prompt:     本次运行最终渲染的提示词（system_prompt/user_prompt/model）
     """
     type: str
     delta: str = ""
@@ -26,6 +27,9 @@ class AgentEvent:
     session_id: str = ""
     usage: dict = field(default_factory=dict)
     message: str = ""
+    system_prompt: str = ""
+    user_prompt: str = ""
+    model: str = ""
 
     def to_dict(self, seq: int | None = None) -> dict[str, Any]:
         """转为可 JSON 序列化的 dict（过滤空字段，减小 SSE 体积）"""
@@ -50,6 +54,12 @@ class AgentEvent:
             data["usage"] = self.usage
         if self.message:
             data["message"] = self.message
+        if self.system_prompt:
+            data["system_prompt"] = self.system_prompt
+        if self.user_prompt:
+            data["user_prompt"] = self.user_prompt
+        if self.model:
+            data["model"] = self.model
         return data
 
     def to_sse(self, seq: int) -> str:

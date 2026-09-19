@@ -3,10 +3,11 @@
  */
 import React, { useEffect, useRef, useState } from 'react'
 import { Button, Collapse, Space, Spin, Typography, message } from 'antd'
-import { CheckCircleOutlined, CloseCircleOutlined, StopOutlined } from '@ant-design/icons'
+import { CheckCircleOutlined, CloseCircleOutlined, EyeOutlined, StopOutlined } from '@ant-design/icons'
 import type { AgentEvent } from '@/types'
 import { agentRunApi } from '@/api/client'
 import { fetchSSE } from '@/api/sse'
+import { PromptViewerModal } from '@/components/common'
 
 const { Text } = Typography
 
@@ -27,6 +28,8 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
   const [status, setStatus] = useState<'running' | 'success' | 'error'>('running')
   const [errorMsg, setErrorMsg] = useState('')
   const [cancelling, setCancelling] = useState(false)
+  const [prompt, setPrompt] = useState<{ systemPrompt: string; userPrompt: string; model: string } | null>(null)
+  const [promptOpen, setPromptOpen] = useState(false)
 
   const onDoneRef = useRef(onDone)
   useEffect(() => {
@@ -41,6 +44,8 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
     setStatus('running')
     setErrorMsg('')
     setCancelling(false)
+    setPrompt(null)
+    setPromptOpen(false)
 
     let cancelled = false
     let finished = false
@@ -61,6 +66,14 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
         case 'connected':
           setLabel(ev.label || '')
           retries = 0
+          break
+        case 'prompt':
+          // 赋值替换（幂等）：断线重连回放不会重复累积
+          setPrompt({
+            systemPrompt: ev.system_prompt || '',
+            userPrompt: ev.user_prompt || '',
+            model: ev.model || '',
+          })
           break
         case 'thinking':
           setThinking((prev) => prev + (ev.delta || ''))
@@ -146,6 +159,11 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
           {status === 'error' && <CloseCircleOutlined style={{ color: '#ff4d4f' }} />}
           <Text strong>{label || 'Agent 运行'}</Text>
           <Text type="secondary">{statusText}</Text>
+          {prompt && (
+            <Button type="link" size="small" icon={<EyeOutlined />} onClick={() => setPromptOpen(true)}>
+              查看提示词
+            </Button>
+          )}
         </Space>
         {status === 'running' && (
           <Button size="small" danger icon={<StopOutlined />} loading={cancelling} onClick={handleCancel}>
@@ -197,6 +215,14 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
           {text}
         </div>
       ) : null}
+
+      <PromptViewerModal
+        open={promptOpen}
+        onClose={() => setPromptOpen(false)}
+        systemPrompt={prompt?.systemPrompt}
+        userPrompt={prompt?.userPrompt}
+        model={prompt?.model}
+      />
     </div>
   )
 }
