@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_TURNS = 40
 DEFAULT_THINKING_TOKENS = 6000
 
+# 文件化工作区的只读检索工具（配合 cwd 锁定剧本目录，释放 Agent 自主检索能力；
+# 写入仍由后端结构化落盘，Agent 无写权限）
+READ_ONLY_TOOLS = ["Read", "Grep", "Glob"]
+
 
 @dataclass
 class AgentRunOptions:
@@ -44,9 +48,12 @@ class AgentRunOptions:
     prompt: str
     system_prompt: Optional[str] = None
     max_turns: int = DEFAULT_MAX_TURNS
-    # 默认不授予任何内置工具（含联网），能力只能由 mcp_servers 显式注入
+    # 默认不授予任何内置工具（含联网），能力只能由 mcp_servers 显式注入；
+    # 传 READ_ONLY_TOOLS 可开放工作区文件检索（需配合 cwd）
     tools: Optional[list[str]] = None
     mcp_servers: Optional[dict] = None
+    # 工作目录（Agent 的 Read/Grep/Glob 边界锚点；缺省继承后端进程 cwd）
+    cwd: Optional[str] = None
     # 多轮会话：要 resume 的 agent session_id（首轮留空由 SDK 生成）
     resume: Optional[str] = None
     # 触发后调用 client.interrupt() 取消运行
@@ -88,6 +95,7 @@ async def run_agent(
         setting_sources=[],
         env=env,
         resume=options.resume,
+        cwd=options.cwd,
     )
     if options.output_format:
         sdk_options.output_format = options.output_format

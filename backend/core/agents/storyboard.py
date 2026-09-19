@@ -1,26 +1,26 @@
 """分镜工作流（视频工作流步骤 2/3）
 
-2. storyboard_outline  分镜大纲：单次 agent run 产出 markmap 导图 + 分镜列表
+2. storyboard_outline  分镜大纲：agent 在剧本工作区内自主检索（Read/Grep/Glob）
+                        产出 markmap 导图 + 分镜列表
 3. segment_management  分镜管理：分镜形式/overlap 配置 + 参考素材图管理
                         + video-prompt skill 生成分镜提示词 + 显式完成
 
-分镜配置与提示词统一存在 storyboard_outline.result_data.segments 中（单一数据源），
-本模块通过 update_step_result 修改（不推进 current_step）。
+分镜产物以 markdown 文件存于剧本工作区 04-storyboards/{ep}/vs-{会话}/ 下
+（storyboard.md 导图 + seg_NN 单镜文件，权威源为 WorkspaceStore）；
+DB step_results 只保留薄 envelope 与完成态标志。
 """
-import json
 import logging
 import re
 import threading
 from datetime import datetime
 from typing import Optional
 
-from claude_agent_sdk import create_sdk_mcp_server, tool as sdk_tool
-
-from backend.core.agent_sdk import AgentEvent, AgentRunOptions, run_agent
+from backend.core.agent_sdk import READ_ONLY_TOOLS, AgentEvent, AgentRunOptions, run_agent
 from backend.core.agents.system_prompts import MATERIAL_GENERATE_SYSTEM, SEGMENT_PROMPT_SYSTEM, STORYBOARD_OUTLINE_SYSTEM
 from backend.core.agents.workflow_base import OnEvent, StepWorkflowBase
 from backend.core.models import StoryboardSegment, VideoParams
 from backend.core.persistence import SessionManager
+from backend.core.persistence.workspace_store import WorkspaceStore
 from backend.core.services.image_service import build_image_service_from_model_config
 from backend.core.services.script_context_service import ScriptContextService
 from backend.core.services.video_prompt_skill import load_video_prompt_skill
@@ -54,10 +54,14 @@ class StoryboardWorkflow(StepWorkflowBase):
 
     Error = StoryboardError
 
-    def __init__(self, session_manager: SessionManager):
+    def __init__(self, session_manager: SessionManager, store: Optional[WorkspaceStore] = None):
         super().__init__(session_manager)
-        self.script_context = ScriptContextService()
-        # 会话级 segments 写锁（配置/参考图/提示词收尾并发写同一 JSON 时防 lost update）
+        self.script_context = ScriptContextService(store=store)
+        if store is None:
+            from backend.deps import get_workspace_store
+            store = get_workspace_store()
+        self.store = store
+        # 会话级 segments 写锁（配置/参考图/提示词收尾并发写分镜文件时防 lost update）
         self._seg_locks: dict[str, threading.Lock] = {}
         self._seg_locks_guard = threading.Lock()
 
@@ -78,12 +82,25 @@ class StoryboardWorkflow(StepWorkflowBase):
             not_started_message="会话尚未完成第 1 步：从剧本选集",
         )
 
+    def _storyboard_loc(self, session_id: str) -> tuple[str, str]:
+        """(script_session_id, episode_id)：分镜文件的定位三元组前两元"""
+        selected = self._get_selected(session_id)
+        return selected["script_session_id"], selected["episode_id"]
+
     def _get_outline_data(self, session_id: str) -> dict:
-        """读取 storyboard_outline result_data"""
-        return self.require_step_data(
-            session_id, "storyboard_outline",
-            not_started_message="分镜大纲尚未生成（第 2 步）",
-        )
+        """读取分镜大纲（工作区文件权威源；DB 行只留薄 envelope）"""
+        script_session_id, episode_id = self._storyboard_loc(session_id)
+        data = self.store.read_storyboard(script_session_id, episode_id, session_id)
+        if not data:
+            raise StoryboardError(
+                "分镜大纲尚未生成（第 2 步）", status_code=400,
+            )
+        return data
+
+    def _storyboard_envelope(self, session_id: str) -> dict:
+        script_session_id, episode_id = self._storyboard_loc(session_id)
+        vs_dir = self.store.storyboard_dir(script_session_id, episode_id, session_id)
+        return {"_artifact": "workspace", "path": (vs_dir / "storyboard.md").as_posix()}
 
     def _find_segment(self, data: dict, index: int) -> dict:
         seg = next((s for s in data.get("segments", []) if s.get("index") == index), None)
@@ -92,29 +109,34 @@ class StoryboardWorkflow(StepWorkflowBase):
         return seg
 
     def _load_story_outline(self, script_session_id: str) -> str:
-        """读取剧本会话的全剧大纲（story_outline mindmap）"""
-        from backend.deps import get_script_session_manager
-        step = get_script_session_manager().get_step_result(script_session_id, "story_outline")
-        return step["result_data"].get("mindmap", "") if step else ""
+        """读取剧本会话的全剧大纲（工作区文件）"""
+        outline = self.store.read_outline(script_session_id)
+        return outline.get("mindmap", "") if outline else ""
+
+    def _story_cwd(self, script_session_id: str) -> Optional[str]:
+        """Agent 工作目录（剧本 story 根，绝对路径）"""
+        story = self.store.story_dir(script_session_id)
+        return str(story.resolve()) if story else None
 
     # ==================== 第 2 步：分镜大纲 ====================
 
-    def _build_outline_mcp_server(self, script_session_id: str):
-        """分镜大纲生成的读侧工具集（上下文中的全剧大纲为压缩摘要，完整版按需查询）"""
-
-        @sdk_tool(
-            "get_story_outline",
-            "获取完整全剧大纲（markdown 思维导图全文）。上下文中的「全剧大纲摘要」为压缩版；"
-            "需要核对主线脉络、跨集伏笔埋设/回收或前后集剧情衔接时调用。",
-            {"type": "object", "properties": {}},
-        )
-        async def get_story_outline(args: dict) -> dict:
-            outline = self._load_story_outline(script_session_id)
-            return _mcp_text_result({"ok": True, "outline": outline})
-
-        return create_sdk_mcp_server(
-            name="storyboard_context", version="1.0.0", tools=[get_story_outline],
-        )
+    def _workspace_section(self, script_session_id: str, episode_id: str, *, must_read_episode: bool = True) -> str:
+        """Agent prompt 的「剧本工作区」段：目录路径 + MAP 摘要 + 本集文件路径（替代旧全文上下文）"""
+        entry = self.store.agent_entry(script_session_id)
+        if not entry["available"]:
+            return "（剧本工作区不可用）"
+        episode_path = self.store.episode_path(script_session_id, episode_id)
+        lines = [
+            f"剧本工作区根目录：{entry['story_root']}",
+            f"目录地图（先 Read 了解全貌）：{entry['map_path']}",
+            "全剧大纲：01-outline/outline.md（跨集伏笔与主线脉络）",
+            "人物/场景/线索/伏笔实体卡：03-entities/（按 ID Grep 或按名字 Glob）",
+            "前后集衔接：02-episodes/ 下相邻集文件的「结尾摘要」「因果链」小节",
+        ]
+        if episode_path:
+            tag = "（必读）" if must_read_episode else ""
+            lines.insert(2, f"本集分集设计{tag}：{episode_path}")
+        return "\n".join(lines)
 
     async def generate_outline(
         self,
@@ -128,13 +150,11 @@ class StoryboardWorkflow(StepWorkflowBase):
 
         selected = self._get_selected(session_id)
         video_params = VideoParams(**selected.get("video_params", {}))
-        script_context = self.script_context.build_segment_script_context(
-            selected["script_session_id"], selected["episode_id"],
-        )
+        script_session_id = selected["script_session_id"]
 
         user_prompt = self.prompts.render("storyboard_outline", {
             "video_params_context": video_params.to_prompt_context(),
-            "script_context": script_context,
+            "workspace_section": self._workspace_section(script_session_id, selected["episode_id"]),
             "extra_instruction": f"\n\n## 用户额外要求\n{extra_prompt}\n请融入分镜切分。" if extra_prompt else "",
             "max_segment_duration": video_params.max_segment_duration,
         })
@@ -143,9 +163,10 @@ class StoryboardWorkflow(StepWorkflowBase):
             AgentRunOptions(
                 prompt=user_prompt,
                 system_prompt=STORYBOARD_OUTLINE_SYSTEM,
-                mcp_servers={"storyboard_context": self._build_outline_mcp_server(selected["script_session_id"])},
-                # 留出 1-2 次工具调用（get_story_outline 查完整大纲）后仍能输出 JSON
-                max_turns=5,
+                # 剧本目录内自主检索（Read/Grep/Glob），留足检索轮次后输出 JSON
+                tools=READ_ONLY_TOOLS,
+                cwd=self._story_cwd(script_session_id),
+                max_turns=12,
                 interrupt=interrupt,
             ),
             on_event,
@@ -189,14 +210,12 @@ class StoryboardWorkflow(StepWorkflowBase):
                 overlap=overlap,
             ).model_dump())
 
-        # 重生成 → 清下游（segment_management / generate_videos）；save 覆盖旧 segments（级联重置配置与提示词）
+        # 重生成 → 清下游（segment_management / generate_videos）；write_storyboard 清目录重写（级联重置配置与提示词）
         self.sm.clear_steps_after(session_id, "storyboard_outline")
-        self.sm.save_step_result(session_id, "storyboard_outline", {
-            "mindmap": mindmap,
-            "edited": False,
-            "segments": segments,
-            "segment_count": len(segments),
-        }, success=True)
+        script_session_id, episode_id = self._storyboard_loc(session_id)
+        self.store.write_storyboard(script_session_id, episode_id, session_id, mindmap, segments)
+        self.sm.save_step_result(session_id, "storyboard_outline",
+                                 self._storyboard_envelope(session_id), success=True)
         logger.info(f"[分镜大纲] 会话 {session_id[:8]}... 生成分镜 {len(segments)} 个")
         return {"mindmap": mindmap, "segment_count": len(segments)}
 
@@ -269,24 +288,31 @@ class StoryboardWorkflow(StepWorkflowBase):
                 self.sm.clear_steps_after(session_id, "segment_management")
                 self.sm.reset_current_step(session_id, "segment_management")
 
-            self.sm.update_step_result(session_id, "storyboard_outline", {
-                **data, "mindmap": stored_mindmap, "segments": segments,
-                "segment_count": len(segments), "edited": True,
-            })
+            script_session_id, episode_id = self._storyboard_loc(session_id)
+            self.store.replace_storyboard(
+                script_session_id, episode_id, session_id,
+                mindmap=stored_mindmap, segments=segments, edited=True,
+            )
+            self.sm.update_step_result(session_id, "storyboard_outline",
+                                       self._storyboard_envelope(session_id))
         logger.info(f"[分镜大纲] 会话 {session_id[:8]}... 人工编辑导图（{len(segments)} 个分镜，变化: {changed}）")
         return {"mindmap": stored_mindmap, "segment_count": len(segments)}
 
     # ==================== 第 3 步：分镜管理 ====================
 
-    def _save_outline_change(self, session_id: str, data: dict, seg: dict, *, stale_prompt: bool) -> None:
-        """分镜变化统一收尾：提示词陈旧时清提示词并回退 segment_management 完成态，再写回"""
+    def _save_segment_change(self, session_id: str, index: int, seg_fields: dict, *, stale_prompt: bool) -> dict:
+        """分镜变化统一收尾：单文件写回；提示词陈旧时清提示词并回退 segment_management 完成态"""
         if stale_prompt:
-            seg["prompt"] = ""
-        self.sm.update_step_result(session_id, "storyboard_outline", data)
+            seg_fields["prompt"] = ""
+        script_session_id, episode_id = self._storyboard_loc(session_id)
+        seg = self.store.update_segment_fields(
+            script_session_id, episode_id, session_id, index, seg_fields,
+        )
         if stale_prompt and self.sm.is_step_completed(session_id, "segment_management"):
             self.sm.clear_step_result(session_id, "segment_management")
             self.sm.clear_steps_after(session_id, "segment_management")
             self.sm.reset_current_step(session_id, "segment_management")
+        return seg
 
     def update_segment_config(self, session_id: str, index: int, fields: dict) -> dict:
         """更新分镜配置（分镜形式 / overlap）
@@ -295,20 +321,19 @@ class StoryboardWorkflow(StepWorkflowBase):
         若分镜管理已完成，则回退其完成状态（配置变化需重新确认）。
         """
         with self._segment_lock(session_id):
-            data = self._get_outline_data(session_id)
-            seg = self._find_segment(data, index)
+            seg = self._find_segment(self._get_outline_data(session_id), index)  # 存在性校验
 
             mode = fields.get("mode")
             overlap = fields.get("overlap")
             if mode is not None:
                 if mode not in VALID_SEGMENT_MODES:
                     raise StoryboardError(f"非法的分镜形式: {mode}（可选: {', '.join(sorted(VALID_SEGMENT_MODES))}）")
-                seg["mode"] = mode
+            seg_fields = {k: v for k, v in (("mode", mode), ("overlap", overlap)) if v is not None}
             if overlap is not None:
-                seg["overlap"] = int(overlap)
+                seg_fields["overlap"] = int(overlap)
 
-            self._save_outline_change(
-                session_id, data, seg, stale_prompt=(mode is not None or overlap is not None),
+            seg = self._save_segment_change(
+                session_id, index, seg_fields, stale_prompt=(mode is not None or overlap is not None),
             )
 
         return {"segment": seg}
@@ -350,7 +375,7 @@ class StoryboardWorkflow(StepWorkflowBase):
         if lookbook:
             groups.append({"key": "lookbook", "label": "定妆照", "materials": lookbook})
 
-        episode_titles = {e["episode_id"]: (e.get("title") or "") for e in scm.list_episodes(script_session_id)}
+        episode_titles = {e["episode_id"]: (e.get("title") or "") for e in self.store.list_episodes(script_session_id)}
         by_episode: dict[str, list[dict]] = {}
         for row in scm.list_episode_materials(script_session_id, task_status="completed"):
             if not row.get("image_path"):
@@ -381,8 +406,7 @@ class StoryboardWorkflow(StepWorkflowBase):
         """
         selected = self._get_selected(session_id)
         with self._segment_lock(session_id):
-            data = self._get_outline_data(session_id)
-            seg = self._find_segment(data, index)
+            seg = self._find_segment(self._get_outline_data(session_id), index)
             if seg.get("mode") != "all_reference":
                 raise StoryboardError("请先将分镜形式切换为「全能参考模式」再编辑参考图")
 
@@ -402,8 +426,9 @@ class StoryboardWorkflow(StepWorkflowBase):
 
             old_ids = {r.get("image_id") for r in seg.get("reference_images", [])}
             stale_prompt = old_ids != seen
-            seg["reference_images"] = resolved
-            self._save_outline_change(session_id, data, seg, stale_prompt=stale_prompt)
+            seg = self._save_segment_change(
+                session_id, index, {"reference_images": resolved}, stale_prompt=stale_prompt,
+            )
 
         logger.info(f"[分镜管理] 会话 {session_id[:8]}... 分镜 {index} 参考图已保存（{len(resolved)} 张，图片集合变化: {stale_prompt}）")
         return {"segment": seg}
@@ -473,17 +498,16 @@ class StoryboardWorkflow(StepWorkflowBase):
             logger.warning(f"[素材生成] 参考图 {len(gen_refs)} 张超过上限，截断为 4 张")
             gen_refs = gen_refs[:4]
 
-        # 1. LLM 需求理解（复用提示词上下文装配）
+        # 1. LLM 需求理解（工作区路径 + 分镜上下文；Agent 可在剧本目录内自主检索）
         ctx = self.build_prompt_context(session_id, index)
         seg = ctx["segment"]
         tpl = self.prompts.render("material_generate", {
-            "story_outline": ctx["story_outline"] or "（无）",
-            "episode_context": ctx["episode_context"],
+            "workspace_section": self._workspace_section(script_session_id, episode_id),
             "segment_context": (
                 f"标题：{seg.get('title', '')}\n大纲：{seg.get('outline', '')}\n建议时长：{seg.get('duration', '')} 秒"
             ),
             "mentioned_images": "\n".join(
-                f"- {m['image_id']}《{m['description'] or '（无描述）'}》" for m in mentioned
+                f"- {m['image_id']}《{m['description'] or '（无描述）'}》{_ref_abs_path(m['image_path'])}" for m in mentioned
             ) or "（无）",
             "uploaded_refs": "\n".join(f"- {p}" for p in reference_paths) or "（无）",
             "user_prompt": (user_prompt or "").strip() or "（无自定义要求，按分镜内容自由发挥）",
@@ -493,7 +517,9 @@ class StoryboardWorkflow(StepWorkflowBase):
             AgentRunOptions(
                 prompt=tpl,
                 system_prompt=MATERIAL_GENERATE_SYSTEM,
-                max_turns=2,
+                tools=READ_ONLY_TOOLS,
+                cwd=self._story_cwd(script_session_id),
+                max_turns=8,
                 interrupt=interrupt,
             ),
             on_event,
@@ -542,9 +568,7 @@ class StoryboardWorkflow(StepWorkflowBase):
             raise StoryboardError(f"素材图生成异常: {e}")
 
         # 4. 归档图库 static/images/{story_name}/{episode_name}/
-        from backend.deps import get_script_session_manager
-        story_name = get_script_session_manager().get_script_title(script_session_id) \
-            or f"story_{script_session_id[:8]}"
+        story_name = self.store.story_title(script_session_id) or f"story_{script_session_id[:8]}"
         episode_name = selected.get("episode_title") or episode_id
         image_path = await archive_generated_image(poll["image_url"], story_name, episode_name, title, mat_id)
 
@@ -556,13 +580,13 @@ class StoryboardWorkflow(StepWorkflowBase):
                      "archived": not image_path.startswith("http")},
         })
         with self._segment_lock(session_id):
-            data = self._get_outline_data(session_id)
-            seg = self._find_segment(data, index)
-            refs = seg.get("reference_images") or []
+            seg = self._find_segment(self._get_outline_data(session_id), index)
+            refs = list(seg.get("reference_images") or [])
             if all(r.get("image_id") != mat_id for r in refs):
                 refs.append({"image_id": mat_id, "image_path": image_path, "description": description})
-            seg["reference_images"] = refs
-            self._save_outline_change(session_id, data, seg, stale_prompt=True)
+            self._save_segment_change(
+                session_id, index, {"reference_images": refs}, stale_prompt=True,
+            )
 
         logger.info(
             f"[素材生成] 会话 {session_id[:8]}... 分镜 {index} 素材 {mat_id}《{title}》完成 → {image_path}"
@@ -626,8 +650,10 @@ class StoryboardWorkflow(StepWorkflowBase):
         prev_section = ""
         if effective_overlap > 0 and prev_seg:
             prev_prompt = prev_seg.get("prompt") or "（尚未生成，仅参考大纲）"
+            prev_path = self.store.segment_path(*self._storyboard_loc(session_id), session_id, index - 1)
             prev_section = (
                 f"\n## 上一分镜（第 {index} 个）\n"
+                f"文件：{prev_path or '（无）'}\n"
                 f"标题：{prev_seg.get('title', '')}\n"
                 f"大纲：{prev_seg.get('outline', '')}\n"
                 f"已生成提示词：{prev_prompt}\n"
@@ -647,28 +673,31 @@ class StoryboardWorkflow(StepWorkflowBase):
         reference_images = ctx.get("reference_images") or []
         if reference_images:
             ref_lines = "\n".join(
-                f"- {r.get('image_id', '')}《{r.get('description', '') or '（无描述）'}》"
+                f"- {r.get('image_id', '')}《{r.get('description', '') or '（无描述）'}》{_ref_abs_path(r.get('image_path', ''))}"
                 for r in reference_images
             )
             reference_section = (
-                f"\n## 本分镜参考素材图（生成视频时将以这些图为全能参考，提示词须结合其画面内容）\n{ref_lines}\n"
+                f"\n## 本分镜参考素材图（生成视频时将以这些图为全能参考，提示词须结合其画面内容；"
+                f"本地图片可直接 Read 查看画面）\n{ref_lines}\n"
             )
         else:
             reference_section = "\n## 本分镜参考素材图\n（无素材图）\n"
 
+        script_session_id, episode_id = self._storyboard_loc(session_id)
+        seg_path = self.store.segment_path(script_session_id, episode_id, session_id, index)
+        episode_path = self.store.episode_path(script_session_id, episode_id)
+
         user_prompt = f"""## 提示词生成规范（必须完整遵循）
 {load_video_prompt_skill()}
 
-## 全剧大纲
-{ctx['story_outline'] or '（无）'}
-
-## 本集分集设计 / 脚本
-{ctx['episode_context']}
+## 剧本工作区（你只可在该目录内使用 Read/Grep/Glob 自主检索，禁止越界）
+{self._workspace_section(script_session_id, episode_id)}
 
 ## 视频参数
 {video_params.to_prompt_context()}
 
 ## 当前分镜（第 {index + 1} 个，共 {segments_count} 个）
+文件：{seg_path or '（无）'}
 标题：{seg.get('title', '')}
 大纲：{seg.get('outline', '')}
 分镜形式：全能参考模式（all_reference）
@@ -676,6 +705,12 @@ class StoryboardWorkflow(StepWorkflowBase):
 {prev_section}{reference_section}
 ## 分镜衔接规则
 {rule}
+
+## 检索指引（按需，不强制）
+- 必读本集分集设计：{episode_path or '01-outline 与 02-episodes 目录'}（梗概/矛盾链/因果链/结尾摘要）
+- 本集 frontmatter 的 character_ids/scene_ids 指向实体卡：需要人物外观细节或内在动机时 Read 对应 03-entities/ 文件
+- 追某伏笔/线索的跨集动作：Grep 该实体 ID（如 fs_001）
+- 全剧主线与前后集衔接：01-outline/outline.md 与 02-episodes/ 相邻集文件
 
 ## 输出要求
 只输出本分镜的最终提示词文本（不要 JSON、不要解释、不要分镜表索引）。"""
@@ -685,7 +720,10 @@ class StoryboardWorkflow(StepWorkflowBase):
             AgentRunOptions(
                 prompt=user_prompt,
                 system_prompt=system_prompt,
-                max_turns=4,
+                # 剧本目录内自主检索，留足检索轮次
+                tools=READ_ONLY_TOOLS,
+                cwd=self._story_cwd(script_session_id),
+                max_turns=12,
                 interrupt=interrupt,
             ),
             on_event,
@@ -698,9 +736,10 @@ class StoryboardWorkflow(StepWorkflowBase):
             raise StoryboardError("分镜提示词生成为空，请重试")
 
         with self._segment_lock(session_id):
-            data = self._get_outline_data(session_id)
-            self._find_segment(data, index)["prompt"] = prompt_text
-            self.sm.update_step_result(session_id, "storyboard_outline", data)
+            script_session_id, episode_id = self._storyboard_loc(session_id)
+            seg = self.store.update_segment_fields(
+                script_session_id, episode_id, session_id, index, {"prompt": prompt_text},
+            )
         logger.info(f"[分镜管理] 会话 {session_id[:8]}... 分镜 {index} 提示词已生成（{len(prompt_text)} 字）")
         return {"index": index, "prompt": prompt_text}
 
@@ -726,9 +765,13 @@ class StoryboardWorkflow(StepWorkflowBase):
 # ==================== 模块级辅助 ====================
 
 
-def _mcp_text_result(data) -> dict:
-    """MCP 工具统一文本返回（与 script_workflow._text_result 同构）"""
-    return {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]}
+def _ref_abs_path(image_path: str) -> str:
+    """参考图路径渲染：本地相对路径展开为绝对路径（供 Agent Read 看图），URL 原样"""
+    if not image_path:
+        return ""
+    if image_path.startswith(("http://", "https://")):
+        return f"（在线图：{image_path}）"
+    return f"（本地图：{resolve_project_path(image_path).resolve()}）"
 
 
 def _episode_number(episode_id: str) -> int:

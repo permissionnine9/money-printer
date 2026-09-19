@@ -1,5 +1,7 @@
 """剧本上下文装配器：为视频工作流（分镜脚本/参考图/帧 prompt）构建剧本侧上下文
 
+数据源：工作区文件（WorkspaceStore，markdown 产物权威源）；
+定妆照/素材图任务状态仍读 DB（scm）。
 优先级：本集分集设计全文 > 上一集结尾摘要 > 人物/场景实体卡 > 伏笔关联集摘要 > 全局大纲摘要
 各段有长度上限（超长截断），保证 prompt 总量可控。
 """
@@ -7,6 +9,7 @@ import logging
 from typing import Optional
 
 from backend.core.persistence.script_manager import ScriptManager
+from backend.core.persistence.workspace_store import WorkspaceStore
 
 logger = logging.getLogger(__name__)
 
@@ -21,17 +24,22 @@ MOTIVATION_KEYS = ("性格", "欲望", "身份", "伤口")  # meta 中优先取�
 class ScriptContextService:
     """从剧本会话装配分镜上下文"""
 
-    def __init__(self, script_manager: Optional[ScriptManager] = None):
+    def __init__(self, script_manager: Optional[ScriptManager] = None, store: Optional[WorkspaceStore] = None):
+        # scm：定妆照/素材图任务表（DB）；markdown 产物（分集/实体/大纲）读工作区文件
         self.scm = script_manager or ScriptManager()
+        if store is None:
+            from backend.deps import get_workspace_store
+            store = get_workspace_store()
+        self.store = store
 
     def build_segment_script_context(self, script_session_id: str, episode_id: str) -> str:
         """装配「本集分镜脚本生成」的完整上下文"""
-        episode = self.scm.get_episode(script_session_id, episode_id)
+        episode = self.store.get_episode(script_session_id, episode_id)
         if not episode:
             raise ValueError(f"分集不存在: {episode_id}")
 
-        entities = {e["entity_id"]: e for e in self.scm.list_entities(script_session_id)}
-        episodes = self.scm.list_episodes(script_session_id)
+        entities = {e["entity_id"]: e for e in self.store.list_entities(script_session_id)}
+        episodes = self.store.list_episodes(script_session_id)
 
         parts: list[str] = []
 
@@ -81,10 +89,10 @@ class ScriptContextService:
 
     def build_reference_images_context(self, script_session_id: str, episode_id: str) -> str:
         """装配「本集参考图生成」的上下文（分镜脚本由调用方另行拼接）"""
-        episode = self.scm.get_episode(script_session_id, episode_id)
+        episode = self.store.get_episode(script_session_id, episode_id)
         if not episode:
             raise ValueError(f"分集不存在: {episode_id}")
-        entities = {e["entity_id"]: e for e in self.scm.list_entities(script_session_id)}
+        entities = {e["entity_id"]: e for e in self.store.list_entities(script_session_id)}
 
         parts: list[str] = [f"本集：{episode_id}《{episode['title']}》"]
         # 已有定妆照的实体不再生成参考图
@@ -155,10 +163,8 @@ class ScriptContextService:
         return parts
 
     def _load_outline(self, script_session_id: str) -> str:
-        # 延迟导入避免与 deps 单例循环
-        from backend.deps import get_script_session_manager
-        step = get_script_session_manager().get_step_result(script_session_id, "story_outline")
-        return step["result_data"].get("mindmap", "") if step else ""
+        outline = self.store.read_outline(script_session_id)
+        return outline.get("mindmap", "") if outline else ""
 
 
 def _episode_num(episode_id: str) -> int:

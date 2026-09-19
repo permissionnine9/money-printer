@@ -43,6 +43,8 @@ class VideoCreationWorkflowV2:
         self.comfyui_service = VideoServiceComfyUI()
         # 支持依赖注入，允许共享 SessionManager 实例
         self.session_manager = session_manager or SessionManager(db_path)
+        from backend.deps import get_workspace_store
+        self.store = get_workspace_store()
         logger.info("VideoCreationWorkflowV2 初始化完成")
 
     def create_session(self) -> str:
@@ -85,7 +87,7 @@ class VideoCreationWorkflowV2:
             return {"success": False, "error": f"剧本会话不存在: {script_session_id}"}
         if not script_sm.is_step_completed(script_session_id, "episode_design"):
             return {"success": False, "error": "该剧本会话的分集设计尚未完成"}
-        episode = self.script_context.scm.get_episode(script_session_id, episode_id)
+        episode = self.store.get_episode(script_session_id, episode_id)
         if not episode:
             return {"success": False, "error": f"分集不存在: {episode_id}"}
 
@@ -115,16 +117,21 @@ class VideoCreationWorkflowV2:
         """读取视频生成用的分片列表（dict）
 
         优先旧 generate_segment_scripts（legacy 会话兜底）；
-        否则从 storyboard_outline.segments 映射（content=已生成提示词或分镜大纲，
+        否则从工作区分镜文件读取（content=已生成提示词或分镜大纲，
         duration=max_segment_duration）。新会话无首尾帧数据时视频链路自然进入缺数据态。
         """
         legacy = self.session_manager.get_step_result(session_id, "generate_segment_scripts")
         if legacy and legacy.get("result_data", {}).get("segment_scripts"):
             return legacy["result_data"]["segment_scripts"]
 
-        outline = self.session_manager.get_step_result(session_id, "storyboard_outline")
-        if outline and outline.get("result_data", {}).get("segments"):
+        try:
             selected = self.get_selected_episode(session_id)
+        except ValueError:
+            return []
+        sb = self.store.read_storyboard(
+            selected.get("script_session_id", ""), selected.get("episode_id", ""), session_id,
+        )
+        if sb and sb.get("segments"):
             duration = float((selected.get("video_params") or {}).get("max_segment_duration", 15))
             return [
                 {
@@ -134,7 +141,7 @@ class VideoCreationWorkflowV2:
                     # 全能参考模式的参考素材图（生成视频时作为该段参考图）
                     "reference_images": seg.get("reference_images", []),
                 }
-                for i, seg in enumerate(outline["result_data"]["segments"])
+                for i, seg in enumerate(sb["segments"])
             ]
         return []
 

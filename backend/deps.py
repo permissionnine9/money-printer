@@ -13,6 +13,7 @@ from backend.core.persistence.session_manager import (
 )
 from backend.core.persistence.model_manager import ModelManager
 from backend.core.persistence.script_manager import ScriptManager
+from backend.core.persistence.workspace_store import WorkspaceStore
 from backend.core.agents.storyboard import StoryboardWorkflow
 from backend.core.agents.workflow_v2 import VideoCreationWorkflowV2
 
@@ -26,7 +27,7 @@ def get_session_manager() -> SessionManager:
 @lru_cache()
 def get_storyboard_workflow() -> StoryboardWorkflow:
     """获取分镜工作流实例（单例，共享视频 SessionManager）"""
-    return StoryboardWorkflow(session_manager=get_session_manager())
+    return StoryboardWorkflow(session_manager=get_session_manager(), store=get_workspace_store())
 
 
 @lru_cache()
@@ -45,6 +46,12 @@ def get_script_manager() -> ScriptManager:
 def get_model_manager() -> ModelManager:
     """获取生图模型管理器实例（单例，与 SessionManager 共用同一个 SQLite）"""
     return ModelManager()
+
+
+@lru_cache()
+def get_workspace_store() -> WorkspaceStore:
+    """获取文件化工作区存储实例（单例；剧本/分镜 markdown 产物的权威数据源）"""
+    return WorkspaceStore(session_manager=get_script_session_manager())
 
 
 def get_workflow() -> VideoCreationWorkflowV2:

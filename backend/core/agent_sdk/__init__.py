@@ -10,6 +10,7 @@ from backend.core.agent_sdk.events import AgentEvent
 from backend.core.agent_sdk.model_env import AgentModelNotConfiguredError, build_agent_env
 from backend.core.agent_sdk.registry import AgentRunRegistry, RunHandle, get_run_registry
 from backend.core.agent_sdk.wrapper import (
+    READ_ONLY_TOOLS,
     AgentRunOptions,
     AgentRunResult,
     run_agent,
@@ -17,6 +18,7 @@ from backend.core.agent_sdk.wrapper import (
 )
 
 __all__ = [
+    "READ_ONLY_TOOLS",
     "AgentEvent",
     "AgentModelNotConfiguredError",
     "AgentRunOptions",

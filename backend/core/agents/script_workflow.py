@@ -13,13 +13,14 @@ from typing import Optional
 
 from claude_agent_sdk import create_sdk_mcp_server, tool as sdk_tool
 
-from backend.core.agent_sdk import AgentEvent, AgentRunOptions, run_agent, run_conversation
+from backend.core.agent_sdk import READ_ONLY_TOOLS, AgentEvent, AgentRunOptions, run_agent, run_conversation
 from backend.core.agents.system_prompts import LOOKBOOK_PROMPTS_SYSTEM, SCRIPT_OUTLINE_SYSTEM
 from backend.core.agents.workflow_base import OnEvent, StepWorkflowBase
 from backend.core.config import IMAGE_REQUEST_TIME_GAP
 from backend.core.models import VideoParams
 from backend.core.persistence import SessionManager
 from backend.core.persistence.script_manager import ScriptManager
+from backend.core.persistence.workspace_store import WorkspaceStore
 from backend.core.services.image_service import build_image_service_from_model_config
 from backend.core.utils.json_parser import extract_json_array, extract_markdown, is_valid_mindmap
 
@@ -34,8 +35,7 @@ CONFLICT_CHAIN_MAX = 2000
 CAUSALITY_CHAIN_MAX = 2000
 STORY_PROGRESS_MAX = 600
 
-# get_context 中带结尾局面摘要的最近集数（更早集仅 title+logline，控制 token）
-GET_CONTEXT_RECENT_EPISODES = 3
+# get_context 已随文件化改造移除（Agent 直接 Read 工作区文件）
 
 # 分集设计 max_turns 估算：每集 save+自纠 3 轮 + 固定开销 10 轮（规划/注册实体/汇报），设上下限
 EPISODE_TURNS_BASE, EPISODE_TURNS_PER = 10, 3
@@ -59,9 +59,21 @@ class ScriptWorkflow(StepWorkflowBase):
         self,
         session_manager: SessionManager,
         script_manager: Optional[ScriptManager] = None,
+        store: Optional[WorkspaceStore] = None,
     ):
         super().__init__(session_manager)
+        # scm 仅管 DB 侧任务表（定妆照/分集素材图状态机）；markdown 产物权威源为 store
         self.scm = script_manager or ScriptManager()
+        if store is None:
+            from backend.deps import get_workspace_store
+            store = get_workspace_store()
+        self.store = store
+
+    def _envelope(self, session_id: str, rel: str) -> dict:
+        """步骤结果薄 envelope：内容产物落 workspace 文件，DB 行只留定位指针"""
+        story = self.store.story_dir(session_id)
+        base = f"workspace/{story.name}" if story else "workspace"
+        return {"_artifact": "workspace", "path": f"{base}/{rel}"}
 
     # ==================== 通用 ====================
 
@@ -145,28 +157,30 @@ class ScriptWorkflow(StepWorkflowBase):
         story_logic = result.text.strip()
         messages = list(result_data.get("messages", []))
         messages.append({"role": "assistant", "content": story_logic, "kind": "story_logic"})
+        # story_logic 落 workspace 文件（权威源）；DB 只保留对话回放与 resume 句柄
+        self.store.write_story_logic(session_id, story_logic)
         self.sm.save_step_result(session_id, "story_ideation", {
-            **result_data,
+            **{k: v for k, v in result_data.items() if k != "story_logic"},
             "agent_session_id": result.session_id or agent_session_id,
             "messages": messages,
-            "story_logic": story_logic,
         }, success=True)
         return {"story_logic": story_logic}
 
     def update_story_logic(self, session_id: str, story_logic: str) -> dict:
-        """人工编辑故事逻辑（不推进不重置）"""
+        """人工编辑故事逻辑（不推进不重置，只写工作区文件）"""
         self.require_step_data(session_id, "story_ideation")
-        step = self.sm.get_step_result(session_id, "story_ideation")
-        self.sm.update_step_result(session_id, "story_ideation", {
-            **step["result_data"], "story_logic": story_logic,
-        })
+        self.store.write_story_logic(session_id, story_logic)
         return {"story_logic": story_logic}
 
     def get_ideation(self, session_id: str) -> dict:
         step = self.sm.get_step_result(session_id, "story_ideation")
         if not step:
             return {"messages": [], "story_logic": ""}
-        return step["result_data"]
+        return {
+            **step["result_data"],
+            "story_logic": self.store.read_story_logic(session_id)
+            or step["result_data"].get("story_logic", ""),
+        }
 
     # ==================== 第 2 步：故事大纲 ====================
 
@@ -178,7 +192,7 @@ class ScriptWorkflow(StepWorkflowBase):
         interrupt: Optional[asyncio.Event] = None,
     ) -> dict:
         """生成故事大纲（单次 agent run）；重生成会级联清下游"""
-        story_logic = self.require_step_data(session_id, "story_ideation").get("story_logic", "")
+        story_logic = self._load_story_logic(session_id)
 
         req_lines = []
         if requirements.get("episode_count"):
@@ -214,25 +228,24 @@ class ScriptWorkflow(StepWorkflowBase):
         if not is_valid_mindmap(mindmap):
             raise ScriptWorkflowError("大纲输出格式异常（未得到 markdown 层级结构），请重试")
 
-        # 重生成 → 清下游（step_results + 分集/实体/定妆照）
+        # 重生成 → 清下游（step_results + 工作区分集/实体 + DB 定妆照/素材图任务）
         self.sm.clear_steps_after(session_id, "story_outline")
+        self.store.delete_story_content(session_id)
         self.scm.delete_script_data(session_id)
-        self.sm.save_step_result(session_id, "story_outline", {
-            "mindmap": mindmap,
-            "edited": False,
-            "requirements": requirements,
-        }, success=True)
-        return {"mindmap": mindmap}
+        # 大纲落工作区文件（story 目录随剧名正名），DB 行只留薄 envelope
+        outline = self.store.write_outline(session_id, mindmap, requirements=requirements)
+        self.sm.save_step_result(session_id, "story_outline",
+                                 self._envelope(session_id, "01-outline/outline.md"), success=True)
+        return {"mindmap": outline["mindmap"]}
 
     def update_outline(self, session_id: str, mindmap_markdown: str) -> dict:
-        """人工编辑大纲（不推进不重置，与 update_mindmap 同语义）"""
+        """人工编辑大纲（不推进不重置，写工作区文件）"""
         self.require_step_data(session_id, "story_outline")
-        step = self.sm.get_step_result(session_id, "story_outline")
-        self.sm.update_step_result(session_id, "story_outline", {
-            **step["result_data"], "mindmap": mindmap_markdown, "edited": True,
-        })
+        self.store.update_outline(session_id, mindmap_markdown)
+        self.sm.update_step_result(session_id, "story_outline",
+                                   self._envelope(session_id, "01-outline/outline.md"))
         warning = ""
-        saved_episodes = self.scm.list_episodes(session_id)
+        saved_episodes = self.store.list_episodes(session_id)
         if saved_episodes:
             parsed_count = _count_outline_episodes(mindmap_markdown)
             if parsed_count != len(saved_episodes):
@@ -367,51 +380,20 @@ class ScriptWorkflow(StepWorkflowBase):
 
     def update_episode_fields(self, session_id: str, episode_id: str, fields: dict) -> dict:
         """人工编辑分集字段；refs 类字段走与 save_episode 相同的引用校验"""
-        current = self.scm.get_episode(session_id, episode_id)
+        current = self.store.get_episode(session_id, episode_id)
         if not current:
             raise ScriptWorkflowError(f"分集不存在: {episode_id}", status_code=404)
         ref_fields = {"character_ids", "scene_ids", "clue_refs", "foreshadow_refs"}
         if ref_fields & fields.keys():
             merged = {**current, **{k: v for k, v in fields.items() if v is not None}}
-            entities_by_id = {e["entity_id"]: e for e in self.scm.list_entities(session_id)}
-            others = [e for e in self.scm.list_episodes(session_id) if e["episode_id"] != episode_id]
+            entities_by_id = {e["entity_id"]: e for e in self.store.list_entities(session_id)}
+            others = [e for e in self.store.list_episodes(session_id) if e["episode_id"] != episode_id]
             self._validate_episode_refs(merged, others, entities_by_id)
-        return self.scm.update_episode_fields(session_id, episode_id, fields)
+        updated = self.store.update_episode_fields(session_id, episode_id, fields)
+        return updated or current
 
     def _build_design_mcp_server(self, session_id: str, single_episode_id: Optional[str] = None):
-        """构建分集设计工具集；single_episode_id 限定只允许覆写该集（单集重设计）"""
-
-        @sdk_tool(
-            "get_context",
-            "获取故事大纲、已注册实体清单与已保存分集的摘要（最近几集含结尾局面，更早集含标题与梗概）。"
-            "设计前必须先调用；写后几集前可再次调用回顾。",
-            {"type": "object", "properties": {}},
-        )
-        async def get_context(args: dict) -> dict:
-            step = self.sm.get_step_result(session_id, "story_outline")
-            mindmap = step["result_data"].get("mindmap", "") if step else ""
-            entities = self.scm.list_entities(session_id)
-            episodes = self.scm.list_episodes(session_id)
-            # 最近几集带结尾局面全文摘要，更早集仅标题+梗概（list_episodes 已按集号升序）
-            recent_ids = {e["episode_id"] for e in episodes[-GET_CONTEXT_RECENT_EPISODES:]}
-            saved_episodes = [
-                {
-                    "episode_id": e["episode_id"], "title": e["title"], "logline": e["logline"],
-                    "ending_summary": e["ending_summary"],
-                }
-                if e["episode_id"] in recent_ids else
-                {"episode_id": e["episode_id"], "title": e["title"], "logline": e["logline"]}
-                for e in episodes
-            ]
-            return self._text_result({
-                "ok": True,
-                "outline": mindmap,
-                "entities": [
-                    {"entity_id": e["entity_id"], "entity_type": e["entity_type"], "name": e["name"]}
-                    for e in entities
-                ],
-                "saved_episodes": saved_episodes,
-            })
+        """构建分集设计工具集（写侧 MCP；读侧走工作区文件检索）；single_episode_id 限定只允许覆写该集（单集重设计）"""
 
         def _upsert(entity_type: str):
             @sdk_tool(
@@ -431,7 +413,7 @@ class ScriptWorkflow(StepWorkflowBase):
             )
             async def upsert(args: dict) -> dict:
                 try:
-                    entity = self.scm.upsert_entity(
+                    entity = self.store.upsert_entity(
                         session_id, entity_type,
                         args.get("name", ""),
                         args.get("description") or "",
@@ -480,17 +462,16 @@ class ScriptWorkflow(StepWorkflowBase):
             try:
                 if single_episode_id and episode["episode_id"] != single_episode_id:
                     raise ScriptWorkflowError(f"本次为单集重设计，只允许保存 {single_episode_id}")
-                existing = self.scm.list_episodes(session_id)
+                existing = self.store.list_episodes(session_id)
                 if single_episode_id:
                     existing = [e for e in existing if e["episode_id"] != single_episode_id]
-                entities_by_id = {e["entity_id"]: e for e in self.scm.list_entities(session_id)}
-                outline_step = self.sm.get_step_result(session_id, "story_outline")
+                entities_by_id = {e["entity_id"]: e for e in self.store.list_entities(session_id)}
+                outline = self.store.read_outline(session_id)
                 total_episodes = (
-                    _count_outline_episodes(outline_step["result_data"].get("mindmap", ""))
-                    if outline_step else 0
+                    _count_outline_episodes(outline.get("mindmap", "")) if outline else 0
                 )
                 self._validate_episode(episode, existing, entities_by_id, total_episodes=total_episodes)
-                saved = self.scm.upsert_episode(session_id, episode)
+                saved = self.store.upsert_episode(session_id, episode)
                 return self._text_result({"ok": True, "episode": saved})
             except ScriptWorkflowError as e:
                 return self._text_error(str(e))
@@ -498,8 +479,21 @@ class ScriptWorkflow(StepWorkflowBase):
         return create_sdk_mcp_server(
             name="script_design",
             version="1.0.0",
-            tools=[get_context, _upsert("character"), _upsert("scene"), _upsert("clue"), _upsert("foreshadow"), save_episode],
+            tools=[_upsert("character"), _upsert("scene"), _upsert("clue"), _upsert("foreshadow"), save_episode],
         )
+
+    def _workspace_section(self, session_id: str) -> str:
+        """Agent prompt 的「剧本工作区」段（目录路径 + MAP）"""
+        entry = self.store.agent_entry(session_id)
+        if not entry["available"]:
+            return "（剧本工作区不可用）"
+        return "\n".join([
+            f"剧本工作区根目录：{entry['story_root']}",
+            f"目录地图（先 Read 了解全貌）：{entry['map_path']}",
+            "全剧大纲：01-outline/outline.md",
+            "已保存分集设计：02-episodes/（每集一文件，「结尾摘要」「因果链」小节供前后集衔接）",
+            "已注册实体卡：03-entities/（人物/场景/线索/伏笔，frontmatter 含 entity_id）",
+        ])
 
     async def generate_episodes(
         self,
@@ -510,21 +504,29 @@ class ScriptWorkflow(StepWorkflowBase):
         extra_instruction: str = "",
     ) -> dict:
         """全量分集设计（或单集重设计）。regenerate_episode_id 非空时为单集覆写模式"""
-        outline_data = self.require_step_data(session_id, "story_outline")
-        outline = outline_data.get("mindmap", "")
+        outline_data = self.store.read_outline(session_id)
+        outline = (outline_data or {}).get("mindmap", "")
+        if not outline:
+            raise ScriptWorkflowError("大纲尚未生成，请先完成第 2 步", status_code=400)
         episode_count = _count_outline_episodes(outline)
 
         if regenerate_episode_id:
-            if not self.scm.get_episode(session_id, regenerate_episode_id):
+            if not self.store.get_episode(session_id, regenerate_episode_id):
                 raise ScriptWorkflowError(f"分集不存在: {regenerate_episode_id}")
             task_prompt = self._build_single_episode_prompt(session_id, regenerate_episode_id, extra_instruction)
         else:
-            # 全量生成前清空旧数据（step 下游 + 实体/分集/定妆照）
+            # 全量生成前清空旧数据（step 下游 + 工作区实体/分集 + DB 定妆照/素材图任务）
             self.sm.clear_steps_after(session_id, "episode_design")
+            self.store.delete_story_content(session_id)
             self.scm.delete_script_data(session_id)
             task_prompt = (
-                "请根据大纲完成全部分集设计：先调 get_context 读大纲，规划并注册实体，"
-                f"然后从 ep_01 到 ep_{episode_count:02d} 逐集调 save_episode 保存（共 {episode_count} 集）。"
+                "请根据大纲完成全部分集设计。\n\n"
+                f"## 剧本工作区（你只可在该目录内使用 Read/Grep/Glob 自主检索，禁止越界）\n"
+                f"{self._workspace_section(session_id)}\n\n"
+                "## 任务步骤\n"
+                "1. 先 Read 目录地图 MAP.md 与全剧大纲 01-outline/outline.md，规划实体与各集设计\n"
+                f"2. 从 ep_01 到 ep_{episode_count:02d} 逐集调 save_episode 保存（共 {episode_count} 集）；"
+                "写后几集前可 Read 已保存分集的「结尾摘要」「因果链」小节保证衔接"
                 + (f"\n\n补充要求：{extra_instruction}" if extra_instruction else "")
             )
 
@@ -538,6 +540,9 @@ class ScriptWorkflow(StepWorkflowBase):
                 prompt=task_prompt,
                 system_prompt=system_prompt,
                 mcp_servers={"script_design": mcp_server},
+                # 读侧：剧本目录内自主检索；写侧：仅 save/upsert MCP 工具落盘
+                tools=READ_ONLY_TOOLS,
+                cwd=self._story_cwd(session_id),
                 max_turns=turns,
                 interrupt=interrupt,
             ),
@@ -546,7 +551,7 @@ class ScriptWorkflow(StepWorkflowBase):
         if result.error:
             raise ScriptWorkflowError(f"分集设计失败: {result.error}")
 
-        episodes = self.scm.list_episodes(session_id)
+        episodes = self.store.list_episodes(session_id)
         if not regenerate_episode_id and len(episodes) != episode_count:
             raise ScriptWorkflowError(
                 f"分集不完整：大纲要求 {episode_count} 集，实际保存 {len(episodes)} 集，请重新生成"
@@ -563,16 +568,18 @@ class ScriptWorkflow(StepWorkflowBase):
         }
 
     def _build_single_episode_prompt(self, session_id: str, episode_id: str, extra_instruction: str) -> str:
-        """单集重设计上下文：实体清单 + 前一集结尾与因果 + 旧版设计（含引用） + 后一集梗概与因果"""
-        outline_data = self.require_step_data(session_id, "story_outline")
-        episodes = self.scm.list_episodes(session_id)
-        entities = self.scm.list_entities(session_id)
+        """单集重设计上下文：工作区地图 + 实体清单 + 前一集结尾与因果 + 旧版设计（含引用） + 后一集梗概与因果"""
+        episodes = self.store.list_episodes(session_id)
+        entities = self.store.list_entities(session_id)
         num = self._episode_number(episode_id)
         prev = next((e for e in episodes if self._episode_number(e["episode_id"]) == num - 1), None)
         nxt = next((e for e in episodes if self._episode_number(e["episode_id"]) == num + 1), None)
-        current = self.scm.get_episode(session_id, episode_id)
+        current = self.store.get_episode(session_id, episode_id)
 
-        parts = [f"本次为「单集重设计」任务：只重新设计并保存 {episode_id}（工具只接受这一集）。"]
+        parts = [
+            f"本次为「单集重设计」任务：只重新设计并保存 {episode_id}（工具只接受这一集）。",
+            f"\n## 剧本工作区（你只可在该目录内使用 Read/Grep/Glob 自主检索，禁止越界）\n{self._workspace_section(session_id)}",
+        ]
         if prev:
             parts.append(f"\n## 上一集（{prev['episode_id']}）结尾摘要（本集必须自然承接）\n{prev['ending_summary']}")
             parts.append(f"\n## 上一集（{prev['episode_id']}）因果衔接（其结尾如何引出本集）\n{prev['causality_chain']}")
@@ -611,7 +618,7 @@ class ScriptWorkflow(StepWorkflowBase):
             raise ScriptWorkflowError("请至少勾选一个实体")
 
         # 校验勾选实体属于本会话
-        owned = {e["entity_id"]: e for e in self.scm.list_entities(session_id)}
+        owned = {e["entity_id"]: e for e in self.store.list_entities(session_id)}
         missing = [eid for eid in entity_ids if eid not in owned]
         if missing:
             raise ScriptWorkflowError(f"实体不存在或不属于本会话: {missing}")
@@ -626,7 +633,7 @@ class ScriptWorkflow(StepWorkflowBase):
             f"- entity_id: {e['entity_id']} | 类型: {e['entity_type']} | 名称: {e['name']} | 设定: {e['description']}"
             for e in entities
         )
-        story_logic = self.require_step_data(session_id, "story_ideation").get("story_logic", "")[:1500]
+        story_logic = self._load_story_logic(session_id)[:1500]
         user_prompt = self.prompts.render("lookbook_prompts", {
             "story_logic": story_logic or "（无）",
             "style_prompt": style_prompt or "（用户未指定——请你根据剧本故事逻辑的题材与气质自行判断，并全剧统一）",
@@ -695,7 +702,7 @@ class ScriptWorkflow(StepWorkflowBase):
             poll = await image_service.poll_i2i_task(request_id, timeout=180, poll_interval=5)
             if poll.get("success"):
                 self.scm.update_lookbook(image_id, {"image_path": poll.get("image_url", ""), "task_status": "completed"})
-                self.scm.set_entity_lookbook(
+                self.store.set_entity_lookbook(
                     self.scm.get_lookbook(image_id)["entity_id"], image_id, poll.get("image_url", "")
                 )
             else:
@@ -732,8 +739,21 @@ class ScriptWorkflow(StepWorkflowBase):
             self.scm.update_lookbook(image_id, {"task_status": "failed"})
             raise ScriptWorkflowError(f"生成失败: {poll.get('error')}")
         self.scm.update_lookbook(image_id, {"image_path": poll["image_url"], "task_status": "completed"})
-        self.scm.set_entity_lookbook(row["entity_id"], image_id, poll["image_url"])
+        self.store.set_entity_lookbook(row["entity_id"], image_id, poll["image_url"])
         return self.scm.get_lookbook(image_id)
+
+    def _load_story_logic(self, session_id: str) -> str:
+        """故事逻辑读取（工作区文件优先，DB 老数据 fallback）"""
+        logic = self.store.read_story_logic(session_id)
+        if logic:
+            return logic
+        step = self.sm.get_step_result(session_id, "story_ideation")
+        return step["result_data"].get("story_logic", "") if step else ""
+
+    def _story_cwd(self, session_id: str) -> Optional[str]:
+        """Agent 工作目录（剧本 story 根，绝对路径）"""
+        story = self.store.story_dir(session_id)
+        return str(story.resolve()) if story else None
 
     def complete_lookbook(self, session_id: str) -> dict:
         """手动确认完成第 4 步（按需勾选无自然终点）"""

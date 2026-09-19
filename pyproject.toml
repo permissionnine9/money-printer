@@ -23,6 +23,8 @@ dependencies = [
     "python-multipart>=0.0.6",
     "opencv-python>=4.8.0",
     "claude-agent-sdk>=0.2.154",
+    "python-frontmatter>=1.0.0",
+    "pyyaml>=6.0",
 ]
 
 [tool.uv]

@@ -64,6 +64,8 @@ class SessionManager(BaseSQLiteManager):
             "workflow_type": "TEXT DEFAULT 'video'",
             "script_session_id": "TEXT DEFAULT NULL",
             "source_episode_id": "TEXT DEFAULT NULL",
+            # 文件化工作区锚点：story 目录相对 workspace/ 的名字（如 剧名-1a2b3c4d）
+            "workspace_path": "TEXT DEFAULT NULL",
         })
 
         conn.execute("""
@@ -328,6 +330,16 @@ class SessionManager(BaseSQLiteManager):
                 (status, self._now(), session_id)
             )
             conn.commit()
+
+    def set_workspace_path(self, session_id: str, workspace_path: str | None) -> bool:
+        """回写剧本会话的工作区锚点（story 目录相对 workspace/ 的名字；纯锚点不影响 updated_at）"""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE sessions SET workspace_path = ? WHERE session_id = ?",
+                (workspace_path, session_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
     def delete_step_result(self, session_id: str, step_name: str) -> bool:
         """删除指定步骤的结果

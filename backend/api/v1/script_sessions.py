@@ -17,11 +17,12 @@ from fastapi.responses import StreamingResponse
 
 from backend.core.agent_sdk import AgentEvent
 from backend.core.agents.script_workflow import ScriptWorkflow
-from backend.core.persistence.script_manager import ScriptManager
+from backend.core.services.workspace_projection import script_step_results, script_title
 from backend.deps import (
     get_model_manager,
     get_script_manager,
     get_script_session_manager,
+    get_workspace_store,
     load_script_session,
     start_agent_run,
 )
@@ -46,6 +47,7 @@ def get_script_workflow() -> ScriptWorkflow:
     return ScriptWorkflow(
         session_manager=get_script_session_manager(),
         script_manager=get_script_manager(),
+        store=get_workspace_store(),
     )
 
 
@@ -56,6 +58,8 @@ async def create_script_session(body: CreateScriptSessionRequest):
     sm = get_script_session_manager()
     session_id = str(uuid.uuid4())
     info = sm.create_session(session_id, workflow_type="script")
+    # 即刻建工作区 story 树（未命名剧本，大纲生成时随剧名正名）
+    get_workspace_store().ensure_story(session_id)
     return {
         "success": True,
         "data": {
@@ -73,11 +77,12 @@ async def create_script_session(body: CreateScriptSessionRequest):
 @router.get("")
 async def list_script_sessions():
     sm = get_script_session_manager()
+    store = get_workspace_store()
     sessions = []
     for info in sm.list_sessions(workflow_type="script"):
         sessions.append({
             "session_id": info["session_id"],
-            "title": sm.get_script_title(info["session_id"]),
+            "title": script_title(sm, store, info["session_id"]),
             "created_at": info["created_at"],
             "updated_at": info["updated_at"],
             "current_step": info.get("current_step") or sm.STEPS[0],
@@ -100,7 +105,7 @@ async def get_script_session(session_id: str, info: dict = Depends(load_script_s
             "status": info.get("status") or "active",
             "workflow_type": info.get("workflow_type"),
             "completed_steps": sm.get_completed_steps(session_id),
-            "step_results": sm.get_step_results_map(session_id),
+            "step_results": script_step_results(sm, get_workspace_store(), session_id),
         },
     }
 
@@ -109,6 +114,7 @@ async def get_script_session(session_id: str, info: dict = Depends(load_script_s
 async def delete_script_session(session_id: str, _info: dict = Depends(load_script_session)):
     get_script_session_manager().delete_session(session_id)
     get_script_manager().delete_script_data(session_id)
+    get_workspace_store().delete_story(session_id)
     return {"success": True, "message": f"剧本会话 {session_id} 已删除"}
 
 
@@ -229,8 +235,10 @@ async def generate_outline(session_id: str, body: OutlineGenerateRequest, _info:
 
 @router.get("/{session_id}/outline")
 async def get_outline(session_id: str, _info: dict = Depends(load_script_session)):
-    result = get_script_session_manager().get_step_result(session_id, "story_outline")
-    return {"success": True, "data": result["result_data"] if result else {}}
+    projected = script_step_results(
+        get_script_session_manager(), get_workspace_store(), session_id,
+    ).get("story_outline")
+    return {"success": True, "data": (projected or {}).get("result_data") or {}}
 
 
 @router.put("/{session_id}/outline")
@@ -280,13 +288,13 @@ async def regenerate_episode(session_id: str, body: EpisodeRegenerateRequest, _i
 @router.get("/{session_id}/episodes")
 async def list_episodes(session_id: str, _info: dict = Depends(load_script_session)):
     """分集列表（生成期间前端 2s 轮询，时间线逐集点亮）"""
-    episodes = get_script_manager().list_episodes(session_id)
+    episodes = get_workspace_store().list_episodes(session_id)
     return {"success": True, "data": {"episodes": episodes, "total": len(episodes)}}
 
 
 @router.get("/{session_id}/episodes/{episode_id}")
 async def get_episode(session_id: str, episode_id: str, _info: dict = Depends(load_script_session)):
-    episode = get_script_manager().get_episode(session_id, episode_id)
+    episode = get_workspace_store().get_episode(session_id, episode_id)
     if not episode:
         raise HTTPException(status_code=404, detail=f"分集不存在: {episode_id}")
     return {"success": True, "data": episode}
@@ -304,11 +312,11 @@ async def update_episode(session_id: str, episode_id: str, body: EpisodeUpdateRe
 @router.delete("/{session_id}/episodes/{episode_id}")
 async def delete_episode(session_id: str, episode_id: str, _info: dict = Depends(load_script_session)):
     """删除分集（仅允许删除最后一集，保持集号连续）"""
-    scm = get_script_manager()
-    episodes = scm.list_episodes(session_id)
+    store = get_workspace_store()
+    episodes = store.list_episodes(session_id)
     if not episodes or episodes[-1]["episode_id"] != episode_id:
         raise HTTPException(status_code=400, detail="只能删除最后一集（保持集号连续）")
-    scm.delete_episode(session_id, episode_id)
+    store.delete_episode(session_id, episode_id)
     return {"success": True, "message": f"{episode_id} 已删除"}
 
 
@@ -316,7 +324,7 @@ async def delete_episode(session_id: str, episode_id: str, _info: dict = Depends
 
 @router.get("/{session_id}/entities")
 async def list_entities(session_id: str, entity_type: Optional[str] = None, _info: dict = Depends(load_script_session)):
-    entities = get_script_manager().list_entities(session_id, entity_type)
+    entities = get_workspace_store().list_entities(session_id, entity_type)
     return {"success": True, "data": {"entities": entities, "total": len(entities)}}
 
 
@@ -324,7 +332,7 @@ async def list_entities(session_id: str, entity_type: Optional[str] = None, _inf
 async def upsert_entity(session_id: str, body: EntityUpsertRequest, _info: dict = Depends(load_script_session)):
     """人工新增/更新实体（ID 由后端分配）"""
     try:
-        entity = get_script_manager().upsert_entity(
+        entity = get_workspace_store().upsert_entity(
             session_id, body.entity_type, body.name, body.description, body.meta,
         )
     except ValueError as e:
@@ -334,11 +342,11 @@ async def upsert_entity(session_id: str, body: EntityUpsertRequest, _info: dict 
 
 @router.put("/{session_id}/entities/{entity_id}")
 async def update_entity(session_id: str, entity_id: str, body: EntityUpsertRequest, _info: dict = Depends(load_script_session)):
-    scm = get_script_manager()
-    if not scm.get_entity(entity_id):
+    store = get_workspace_store()
+    if not store.get_entity(entity_id):
         raise HTTPException(status_code=404, detail=f"实体不存在: {entity_id}")
     try:
-        entity = scm.upsert_entity(
+        entity = store.upsert_entity(
             session_id, body.entity_type, body.name, body.description, body.meta,
             entity_id=entity_id,
         )
@@ -350,13 +358,13 @@ async def update_entity(session_id: str, entity_id: str, body: EntityUpsertReque
 @router.get("/{session_id}/entities/{entity_id}/references")
 async def get_entity_references(session_id: str, entity_id: str, _info: dict = Depends(load_script_session)):
     """引用反查：该实体在全部分集中的引用方式（人物/场景 → 出场；线索/伏笔 → action 值）"""
-    scm = get_script_manager()
-    entity = scm.get_entity(entity_id)
+    store = get_workspace_store()
+    entity = store.get_entity(entity_id)
     if not entity or entity["script_session_id"] != session_id:
         raise HTTPException(status_code=404, detail=f"实体不存在或不属于该会话: {entity_id}")
     entity_type = entity["entity_type"]
     episodes = []
-    for ep in scm.list_episodes(session_id):
+    for ep in store.list_episodes(session_id):
         if entity_type == "character":
             actions = ["出场"] if entity_id in ep["character_ids"] else []
         elif entity_type == "scene":
@@ -372,8 +380,8 @@ async def get_entity_references(session_id: str, entity_id: str, _info: dict = D
 @router.delete("/{session_id}/entities/{entity_id}")
 async def delete_entity(session_id: str, entity_id: str, _info: dict = Depends(load_script_session)):
     """删除实体（有分集反向引用时拒绝）"""
-    scm: ScriptManager = get_script_manager()
-    for episode in scm.list_episodes(session_id):
+    store = get_workspace_store()
+    for episode in store.list_episodes(session_id):
         referenced = (
             episode["character_ids"] + episode["scene_ids"]
             + [r.get("entity_id") for r in episode["clue_refs"]]
@@ -384,7 +392,7 @@ async def delete_entity(session_id: str, entity_id: str, _info: dict = Depends(l
                 status_code=400,
                 detail=f"实体 {entity_id} 被分集 {episode['episode_id']} 引用，先移除引用再删除",
             )
-    ok = scm.delete_entity(session_id, entity_id)
+    ok = store.delete_entity(session_id, entity_id)
     return {"success": ok, "message": f"实体 {entity_id} 已删除" if ok else "实体不存在"}
 
 

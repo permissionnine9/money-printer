@@ -15,9 +15,13 @@ STATIC_DIR = BASE_DIR / "static"
 IMAGES_DIR = STATIC_DIR / "images"
 VIDEOS_DIR = STATIC_DIR / "videos"
 
+# 文件化创作工作区（剧本/分镜 markdown 产物的权威存储，位于项目根）
+WORKSPACE_DIR = Path(__file__).parent.parent.parent / "workspace"
+
 # 确保目录存在
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
+WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
 # 视频生成服务：远程 ComfyUI 时间轴（唯一链路）
 COMFYUI_BASE_URL = os.getenv("COMFYUI_BASE_URL", "http://127.0.0.1:8188")

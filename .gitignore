@@ -46,6 +46,9 @@ data/
 *.db-shm
 *.db-wal
 
+# 文件化创作工作区（剧本/分镜 markdown 产物）
+workspace/
+
 # OS
 .DS_Store
 Thumbs.db

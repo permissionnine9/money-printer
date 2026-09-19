@@ -12,8 +12,9 @@ from backend.schemas.sessions import (
     SessionListResponse,
 )
 from backend.schemas.script import CreateVideoSessionFromScriptRequest
-from backend.deps import get_session_manager, get_script_manager, get_script_session_manager, load_video_session
+from backend.deps import get_session_manager, get_script_session_manager, get_workspace_store, load_video_session
 from backend.core.persistence.session_manager import SessionManager
+from backend.core.services.workspace_projection import script_title, video_step_results
 
 router = APIRouter()
 
@@ -36,7 +37,7 @@ async def create_session_from_script(
         raise HTTPException(status_code=404, detail=f"剧本会话 {body.script_session_id} 不存在")
     if not script_sm.is_step_completed(body.script_session_id, "episode_design"):
         raise HTTPException(status_code=400, detail="该剧本会话的分集设计尚未完成")
-    episode = get_script_manager().get_episode(body.script_session_id, body.episode_id)
+    episode = get_workspace_store().get_episode(body.script_session_id, body.episode_id)
     if not episode:
         raise HTTPException(status_code=404, detail=f"分集 {body.episode_id} 不存在")
 
@@ -111,7 +112,9 @@ async def list_sessions(
         select_result = all_results.get("select_episode") or {}
         script_session_id = select_result.get("script_session_id")
         if script_session_id and script_session_id not in script_title_cache:
-            script_title_cache[script_session_id] = script_sm.get_script_title(script_session_id)
+            script_title_cache[script_session_id] = script_title(
+                script_sm, get_workspace_store(), script_session_id,
+            )
         session_responses.append(
             SessionResponse(
                 session_id=session["session_id"],
@@ -145,7 +148,7 @@ async def get_session(
         current_step=session_info["current_step"],
         status=session_info["status"],
         completed_steps=session_manager.get_completed_steps(session_id),
-        step_results=session_manager.get_step_results_map(session_id),
+        step_results=video_step_results(session_manager, get_workspace_store(), session_id),
     )
 
 
