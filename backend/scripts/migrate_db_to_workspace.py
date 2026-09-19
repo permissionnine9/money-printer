@@ -1,25 +1,30 @@
 """存量数据迁移：SQLite step_results/episodes/script_entities → workspace/ markdown 文件
 
-用法（项目根执行）：
+用法（项目根执行，仅在 cutover 前可用；cutover 后 DB 内容行已清、文件为唯一权威源）：
   .venv/bin/python backend/scripts/migrate_db_to_workspace.py --export   # DB → 文件（幂等，可重跑）
   .venv/bin/python backend/scripts/migrate_db_to_workspace.py --verify   # DB ↔ 文件逐键对账（差异非零退出）
-  .venv/bin/python backend/scripts/migrate_db_to_workspace.py --cutover  # DB 瘦身（P6：备份后把 step_results 换薄 envelope）
+  .venv/bin/python backend/scripts/migrate_db_to_workspace.py --cutover [--purge-tables]
 
 约定：
 - 时间戳不保真（文件时间戳自导出时刻起为新的权威）；--verify 不对比时间戳
 - 留 DB 不迁：story_ideation 的 agent_session_id/messages、select_episode、generate_videos、
   lookbook/episode_material 任务表（非 markdown 内容，按改造方案保留在 DB）
+- 实体/分集直读 episodes/script_entities 表（原生 SQL；ScriptManager 的对应读写方法
+  已随文件化改造删除）
 """
 import argparse
+import json
+import sqlite3
 import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.core.persistence.script_manager import ScriptManager
 from backend.core.persistence.session_manager import SCRIPT_STEPS, VIDEO_STEPS, SessionManager
 from backend.core.persistence.workspace_store import WorkspaceStore
+
+DB_PATH = "data/sessions.db"
 
 # verify 时允许文件侧存在、DB 侧不存在的键（文件化新增的元数据/时间戳）
 EPISODE_IGNORE_KEYS = {"edited", "created_at", "updated_at"}
@@ -27,12 +32,46 @@ ENTITY_IGNORE_KEYS = {"created_at", "updated_at"}
 SEGMENT_IGNORE_KEYS = {"edited", "updated_at"}
 
 
+def _load_json_cols(row: dict, json_cols: tuple[str, ...]) -> dict:
+    """DB 行的 JSON 文本列反序列化（坏数据回退空值）"""
+    for col in json_cols:
+        try:
+            row[col] = json.loads(row.get(col) or ("{}" if col == "meta" else "[]"))
+        except (TypeError, ValueError):
+            row[col] = {} if col == "meta" else []
+    return row
+
+
+def _db_list_entities(script_session_id: str) -> list[dict]:
+    """原生 SQL 读实体表（ScriptManager.list_entities 已删除，迁移专用）"""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM script_entities WHERE script_session_id = ? ORDER BY entity_type, entity_id",
+            (script_session_id,),
+        ).fetchall()
+    return [_load_json_cols(dict(r), ("meta",)) for r in rows]
+
+
+def _db_list_episodes(script_session_id: str) -> list[dict]:
+    """原生 SQL 读分集表（ScriptManager.list_episodes 已删除，迁移专用）"""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM episodes WHERE script_session_id = ? ORDER BY episode_id",
+            (script_session_id,),
+        ).fetchall()
+    return [
+        _load_json_cols(dict(r), ("character_ids", "scene_ids", "clue_refs", "foreshadow_refs", "meta"))
+        for r in rows
+    ]
+
+
 def build_managers():
     sm_video = SessionManager(steps=VIDEO_STEPS)
     sm_script = SessionManager(steps=SCRIPT_STEPS)
-    scm = ScriptManager()
     store = WorkspaceStore(session_manager=sm_script)
-    return sm_video, sm_script, scm, store
+    return sm_video, sm_script, store
 
 
 def iter_script_sessions(sm_script: SessionManager):
@@ -48,7 +87,7 @@ def iter_video_sessions(sm_video: SessionManager):
 # ==================== export ====================
 
 def do_export() -> int:
-    sm_video, sm_script, scm, store = build_managers()
+    sm_video, sm_script, store = build_managers()
     stats = {"stories": 0, "story_logic": 0, "outlines": 0, "entities": 0, "episodes": 0, "storyboards": 0, "skipped": 0}
 
     for sid in iter_script_sessions(sm_script):
@@ -69,7 +108,7 @@ def do_export() -> int:
                                 edited=bool(rd.get("edited")))
             stats["outlines"] += 1
 
-        for entity in scm.list_entities(sid):
+        for entity in _db_list_entities(sid):
             store.upsert_entity(
                 sid, entity["entity_type"], entity["name"], entity["description"] or "",
                 meta=entity.get("meta") or {}, entity_id=entity["entity_id"],
@@ -77,11 +116,11 @@ def do_export() -> int:
             )
             if entity.get("lookbook_image_id"):
                 store.set_entity_lookbook(
-                    entity["entity_id"], entity["lookbook_image_id"], entity.get("lookbook_image_path", ""),
+                    sid, entity["entity_id"], entity["lookbook_image_id"], entity.get("lookbook_image_path", ""),
                 )
             stats["entities"] += 1
 
-        for episode in scm.list_episodes(sid):
+        for episode in _db_list_episodes(sid):
             store.upsert_episode(sid, episode)
             stats["episodes"] += 1
 
@@ -117,7 +156,7 @@ def _diff_dict(source: str, label: str, db: dict, file: dict, ignore: set, diffs
 
 
 def do_verify() -> int:
-    sm_video, sm_script, scm, store = build_managers()
+    sm_video, sm_script, store = build_managers()
     diffs: list[str] = []
 
     for sid in iter_script_sessions(sm_script):
@@ -144,14 +183,14 @@ def do_verify() -> int:
                 if db_v != file_v:
                     diffs.append(f"{sid[:8]}... outline.{key} 不一致")
 
-        for entity in scm.list_entities(sid):
-            file_entity = store.get_entity(entity["entity_id"])
+        for entity in _db_list_entities(sid):
+            file_entity = store.get_entity(sid, entity["entity_id"])
             if not file_entity:
                 diffs.append(f"{sid[:8]}... 缺少实体 {entity['entity_id']}")
                 continue
             _diff_dict(sid[:8], f"实体 {entity['entity_id']}", entity, file_entity, ENTITY_IGNORE_KEYS, diffs)
 
-        for episode in scm.list_episodes(sid):
+        for episode in _db_list_episodes(sid):
             file_ep = store.get_episode(sid, episode["episode_id"])
             if not file_ep:
                 diffs.append(f"{sid[:8]}... 缺少分集 {episode['episode_id']}")
@@ -211,13 +250,22 @@ def _has_content_rows(sm_script: SessionManager, sm_video: SessionManager) -> bo
 
 
 def do_cutover(purge_tables: bool) -> int:
-    sm_video, sm_script, scm, store = build_managers()
+    sm_video, sm_script, store = build_managers()
 
-    # 1. cutover 前置检查：必须先 export（文件齐全才可丢弃 DB 内容）
+    # 1. cutover 前置检查：必须先 export（大纲/分镜/实体/分集文件齐全才可丢弃 DB 内容；
+    #    实体/分集尤其重要——--purge-tables 会清空两张表，缺文件即永久丢失）
     missing = 0
     for sid in iter_script_sessions(sm_script):
         if sm_script.get_step_result(sid, "story_outline") and not store.read_outline(sid):
             print(f"  ✗ 剧本会话 {sid[:8]}... 的大纲未导出，请先运行 --export")
+            missing += 1
+        db_entities = _db_list_entities(sid)
+        db_episodes = _db_list_episodes(sid)
+        if len(store.list_entities(sid)) != len(db_entities):
+            print(f"  ✗ 剧本会话 {sid[:8]}... 的实体未全部导出（DB {len(db_entities)} / 文件 {len(store.list_entities(sid))}）")
+            missing += 1
+        if len(store.list_episodes(sid)) != len(db_episodes):
+            print(f"  ✗ 剧本会话 {sid[:8]}... 的分集未全部导出（DB {len(db_episodes)} / 文件 {len(store.list_episodes(sid))}）")
             missing += 1
     for vsid in iter_video_sessions(sm_video):
         step = sm_video.get_step_result(vsid, "storyboard_outline")
@@ -270,10 +318,9 @@ def do_cutover(purge_tables: bool) -> int:
         })
         stats["storyboards"] += 1
 
-    # 4. 影子表数据清理（可选；表结构永不 DROP，备份可回滚）
+    # 4. 影子表数据清理（可选；precheck 已确保文件齐全，表结构永不 DROP）
     if purge_tables:
-        import sqlite3
-        with sqlite3.connect("data/sessions.db") as conn:
+        with sqlite3.connect(DB_PATH) as conn:
             stats["episodes"] = conn.execute("DELETE FROM episodes").rowcount
             stats["entities"] = conn.execute("DELETE FROM script_entities").rowcount
             conn.commit()
@@ -291,15 +338,15 @@ def main() -> int:
     parser.add_argument("--purge-tables", action="store_true", help="cutover 时顺带清空 episodes/script_entities 影子数据（永不 DROP 表）")
     args = parser.parse_args()
 
-    sm_video, sm_script, _, _ = build_managers()
+    sm_video, sm_script, store = build_managers()
 
     if args.export:
-        if not _has_content_rows(sm_video, sm_script):
+        if not _has_content_rows(sm_script, sm_video):
             print("已 cutover：DB 无未迁移内容行，--export 停用（文件为唯一权威源）")
             return 1
         return do_export()
     if args.verify:
-        if not _has_content_rows(sm_video, sm_script):
+        if not _has_content_rows(sm_script, sm_video):
             print("已 cutover：DB 无未迁移内容行，--verify 停用（文件为唯一权威源）")
             return 1
         return do_verify()

@@ -38,7 +38,11 @@ DEFAULT_MAX_TURNS = 40
 DEFAULT_THINKING_TOKENS = 6000
 
 # 文件化工作区的只读检索工具（配合 cwd 锁定剧本目录，释放 Agent 自主检索能力；
-# 写入仍由后端结构化落盘，Agent 无写权限）
+# 写入仍由后端结构化落盘，Agent 无写权限）。
+# 信任模型说明：cwd 不是沙箱——bypassPermissions 下 Read/Grep/Glob 技术上可读任意
+# 绝对路径，「仅限工作区」由 system prompt 与 MAP.md 边界声明软约束。当前产品为
+# 单机单用户 CLI 服务（攻击者=受害者本人），此权衡可接受；若后端暴露到网络或
+# 多人共用，必须补 deny 规则或 OS 级沙箱。
 READ_ONLY_TOOLS = ["Read", "Grep", "Glob"]
 
 

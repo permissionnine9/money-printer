@@ -1,8 +1,9 @@
-"""WorkspaceStore 手工 smoke 测试（P1 存储层）
+"""WorkspaceStore 手工 smoke 测试（存储层 + 审查修复回归）
 
 运行：.venv/bin/python tests/manual/test_workspace_store.py
 覆盖：story 生命周期 / story_logic / outline（剧名正名）/ episodes / entities（全局 ID）/
-      storyboard（写读/替换/单镜更新）/ 级联清理 / MAP 渲染 / 并发写
+      storyboard（写读/替换/单镜更新）/ 级联清理 / MAP 渲染 / 并发写 /
+      审查修复回归（ID 白名单 / 正文 ## 转义往返 / 并发 ID 不撞号 / 跨会话隔离）
 """
 import shutil
 import sys
@@ -132,9 +133,14 @@ def run(store: WorkspaceStore, sm: SessionManager, tmp: Path):
     check("list 排序（type,id）", [(e["entity_type"], e["entity_id"]) for e in store.list_entities(sid)] == [
         ("character", "chr_001"), ("scene", "scn_001")])
     check("list 按类型过滤", [e["entity_id"] for e in store.list_entities(sid, "scene")] == ["scn_001"])
-    check("set_entity_lookbook", store.set_entity_lookbook("chr_001", "lb_x", "static/images/a.png"))
-    check("lookbook 引用读回", store.get_entity("chr_001")["lookbook_image_path"] == "static/images/a.png")
-    check("delete_entity", store.delete_entity(sid, "scn_001") and store.get_entity("scn_001") is None)
+    check("set_entity_lookbook", store.set_entity_lookbook(sid, "chr_001", "lb_x", "static/images/a.png"))
+    check("lookbook 引用读回", store.get_entity(sid, "chr_001")["lookbook_image_path"] == "static/images/a.png")
+    check("delete_entity", store.delete_entity(sid, "scn_001") and store.get_entity(sid, "scn_001") is None)
+    # 跨会话隔离：sid2 查 sid 的实体必须查不到（属主限定）
+    check("跨会话 get_entity 为 None", store.get_entity(sid2, "chr_001") is None)
+    check("跨会话 set_entity_lookbook 拒绝",
+          store.set_entity_lookbook(sid2, "chr_001", "lb_y", "static/images/b.png") is False
+          and store.get_entity(sid, "chr_001")["lookbook_image_id"] == "lb_x")
 
     print("== 6. storyboard ==")
     vsid = "cccccccc-9999-8888-7777-666666666666"
@@ -216,6 +222,72 @@ def run(store: WorkspaceStore, sm: SessionManager, tmp: Path):
         check("删除后 rename 报错", False)
     except WorkspaceStoreError:
         check("删除后 rename 报错", True)
+
+    print("== 11. 审查修复回归：ID 白名单 ==")
+    sid3 = "cccccccc-1111-2222-3333-555555555555"
+    sm.create_session(sid3, workflow_type="script")
+    store.ensure_story(sid3)
+    for bad_ep in ("*", "ep_01-x", "../ep_01", "ep_", "EP_01"):
+        try:
+            store.get_episode(sid3, bad_ep)
+            check(f"非法 episode_id 拒绝: {bad_ep!r}", False)
+        except WorkspaceStoreError:
+            check(f"非法 episode_id 拒绝: {bad_ep!r}", True)
+    for bad_ent in ("*", "chr_1", "xx_001", "chr_001-x"):
+        try:
+            store.get_entity(sid3, bad_ent)
+            check(f"非法 entity_id 拒绝: {bad_ent!r}", False)
+        except WorkspaceStoreError:
+            check(f"非法 entity_id 拒绝: {bad_ent!r}", True)
+    # 注入攻击复现路径：PUT episodes/* 不再可能误删（upsert/update/delete 均先校验）
+    before = sorted(p.name for p in (store.story_dir(sid3) / "02-episodes").glob("*.md"))
+    try:
+        store.update_episode_fields(sid3, "*", {"title": "PWNED"})
+        check("update_episode_fields('*') 拒绝", False)
+    except WorkspaceStoreError:
+        after = sorted(p.name for p in (store.story_dir(sid3) / "02-episodes").glob("*.md"))
+        check("update_episode_fields('*') 拒绝且无文件变化", after == before)
+
+    print("== 12. 审查修复回归：正文 ## 标题行转义往返 ==")
+    tricky_chain = "第一阶段：发现线索\n## 内部小标题：伪装成定界符\n## 结尾摘要\nINJECTED_SPOOF\n第三阶段：收尾"
+    tricky_ending = "真实结尾\n### 三级标题安全（不转义，不构成定界）\n最后一行"
+    ep = store.upsert_episode(sid3, {
+        "episode_id": "ep_01", "title": "转义测试", "logline": "梗概",
+        "conflict_chain": tricky_chain, "causality_chain": "因果", "ending_summary": tricky_ending,
+        "story_progress": "进展", "character_ids": ["chr_001"], "scene_ids": ["scn_001"],
+        "clue_refs": [], "foreshadow_refs": [],
+    })
+    check("含 ## 行的矛盾链完整往返", ep["conflict_chain"] == tricky_chain)
+    check("结尾摘要不被走私污染", ep["ending_summary"] == tricky_ending)
+    # 更新另一字段后再读（读-改-写不固化截断）
+    ep2 = store.update_episode_fields(sid3, "ep_01", {"logline": "新梗概"})
+    check("读-改-写后仍完整", ep2["conflict_chain"] == tricky_chain and ep2["ending_summary"] == tricky_ending)
+    seg_tricky = {"index": 0, "title": "分镜", "outline": "开头\n## 分镜提示词\n走私内容", "duration": 8,
+                  "overlap": 0, "prompt": "提示词\n## 分镜大纲\n逆向走私"}
+    store.write_storyboard(sid3, "ep_01", vsid := "dddddddd-0000-0000-0000-000000000000",
+                           "# 导图", [seg_tricky])
+    sb = store.read_storyboard(sid3, "ep_01", vsid)
+    check("分镜 outline 完整往返", sb["segments"][0]["outline"] == seg_tricky["outline"])
+    check("分镜 prompt 完整往返", sb["segments"][0]["prompt"] == seg_tricky["prompt"])
+    raw = (store.storyboard_dir(sid3, "ep_01", vsid) / "seg_00-分镜.md").read_text(encoding="utf-8")
+    check("文件内正文标题已转义", "\\## 分镜提示词" in raw and "\\## 分镜大纲" in raw)
+
+    print("== 13. 审查修复回归：跨会话并发 ID 分配不撞号 ==")
+    ids_lock_free: list[str] = []
+    errors2 = []
+    def creator(sess: str, n: int):
+        try:
+            for _ in range(n):
+                e = store.upsert_entity(sess, "foreshadow", f"并发伏笔{sess[:4]}")
+                ids_lock_free.append(e["entity_id"])
+        except Exception as e:  # noqa: BLE001
+            errors2.append(e)
+    t1 = threading.Thread(target=creator, args=(sid3, 6))
+    t2 = threading.Thread(target=creator, args=(sid2, 6))
+    t1.start(); t2.start(); t1.join(); t2.join()
+    check("并发 12 个实体 ID 全局唯一", len(set(ids_lock_free)) == 12 and not errors2,
+          f"errors={errors2[:2]}")
+    check("ID 连续无空洞", sorted(ids_lock_free) == sorted(set(ids_lock_free)))
 
 
 if __name__ == "__main__":

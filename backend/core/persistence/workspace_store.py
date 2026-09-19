@@ -37,6 +37,11 @@ from backend.core.utils.image_store import sanitize_name
 
 logger = logging.getLogger(__name__)
 
+# ID 白名单（API 路径参数直接拼 glob/文件路径，必须先过格式校验防元字符注入：
+# 如 episode_id="*" 会令 glob("*-*.md") 误匹配并触发 _replace_doc_file 清空分集）
+_EPISODE_ID_RE = re.compile(r"^ep_\d{2,}$")
+_ENTITY_ID_RE = re.compile(r"^(chr|scn|clu|fs)_\d{3,}$")
+
 # story 树子目录（数字前缀保证目录树浏览时的阅读顺序）
 DIR_IDEATION = "00-ideation"
 DIR_OUTLINE = "01-outline"
@@ -44,6 +49,10 @@ DIR_EPISODES = "02-episodes"
 DIR_ENTITIES = "03-entities"
 DIR_STORYBOARDS = "04-storyboards"
 STORY_SUBDIRS = (DIR_IDEATION, DIR_OUTLINE, DIR_EPISODES, DIR_ENTITIES, DIR_STORYBOARDS)
+
+# next_entity_id 全局唯一性锁：ID 跨 story 全局分配（glob MAX+1 非原子），
+# per-story 锁保护不到跨会话并发，须用进程级锁
+_ENTITY_ID_LOCK = threading.Lock()
 
 ENTITY_ID_PREFIXES = {
     "character": "chr",
@@ -74,10 +83,49 @@ SEGMENT_SECTIONS = (
 )
 
 _SECTION_RE = re.compile(r"^##\s+(.*?)\s*$")
+# 正文字段值中的行首 `## `（LLM 自由文本可能输出 markdown 标题）会与正文小节定界符冲突：
+# 写入时转义为 `\## `，读取时反转义，保证往返保真、字段间不走私
+_ESCAPE_HEADING_RE = re.compile(r"^(#{2,}\s)", re.MULTILINE)
+_UNESCAPE_HEADING_RE = re.compile(r"^\\(#{2,}\s)", re.MULTILINE)
 
 
-class WorkspaceStoreError(Exception):
-    """工作区存储业务错误"""
+def _escape_headings(text: str) -> str:
+    return _ESCAPE_HEADING_RE.sub(r"\\\1", text or "")
+
+
+def _unescape_headings(text: str) -> str:
+    return _UNESCAPE_HEADING_RE.sub(r"\1", text or "")
+
+
+def _require_episode_id(episode_id: str) -> str:
+    if not _EPISODE_ID_RE.match(episode_id or ""):
+        raise WorkspaceStoreError(f"非法的 episode_id（应为 ep_01 形式）: {episode_id!r}")
+    return episode_id
+
+
+def _require_entity_id(entity_id: str) -> str:
+    if not _ENTITY_ID_RE.match(entity_id or ""):
+        raise WorkspaceStoreError(f"非法的 entity_id（应为 chr_001/scn_001 形式）: {entity_id!r}")
+    return entity_id
+
+
+def _render_episode_content(episode: dict) -> str:
+    """分集正文渲染：固定小节，字段值转义行首标题（防与定界符冲突）"""
+    return "\n\n".join(
+        f"## {label}\n{_escape_headings(episode.get(key) or '')}" for label, key in EPISODE_SECTIONS
+    )
+
+
+def _render_segment_content(seg: dict) -> str:
+    """分镜正文渲染：大纲/提示词两节，值转义行首标题"""
+    content = f"## 分镜大纲\n{_escape_headings(seg.get('outline', '') or '')}"
+    if seg.get("prompt"):
+        content += f"\n\n## 分镜提示词\n{_escape_headings(seg['prompt'])}"
+    return content
+
+
+class WorkspaceStoreError(ValueError):
+    """工作区存储业务错误（含非法 ID 校验；继承 ValueError 以复用 API/MCP 层既有捕获）"""
 
 
 def _now() -> str:
@@ -216,6 +264,11 @@ class WorkspaceStore:
         story = self.story_dir(script_session_id)
         return story.name.rsplit("-", 1)[0] if story else ""
 
+    def story_cwd(self, script_session_id: str) -> Optional[str]:
+        """Agent 工作目录（剧本 story 根，绝对路径；供 run_agent 的 cwd）"""
+        story = self.story_dir(script_session_id)
+        return str(story.resolve()) if story else None
+
     # ==================== 通用文档读写 ====================
 
     def _read_doc(self, path: Path) -> Optional[tuple[dict, str]]:
@@ -226,12 +279,9 @@ class WorkspaceStore:
         return meta, post.content.strip("\n")
 
     def _write_doc(self, path: Path, meta: dict, content: str) -> None:
-        """frontmatter 文档原子写（tmp + os.replace）"""
+        """frontmatter 文档原子写（建目录 + 静态原子写）"""
         path.parent.mkdir(parents=True, exist_ok=True)
-        text = frontmatter.dumps(frontmatter.Post(content, **meta), sort_keys=False)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
+        self._static_write(path, meta, content)
 
     @staticmethod
     def _replace_doc_file(directory: Path, doc_id: str, name: str, meta: dict, content: str) -> Path:
@@ -332,7 +382,12 @@ class WorkspaceStore:
     # ==================== 实体注册表（全局实体卡） ====================
 
     def next_entity_id(self, script_session_id: str, entity_type: str) -> str:
-        """分配下一个实体 ID（跨全工作区 MAX+1，与旧 DB 全局唯一语义一致）"""
+        """查询下一个可用实体 ID（仅预览用途；并发安全的新建请走 upsert_entity）"""
+        with _ENTITY_ID_LOCK:
+            return self._scan_next_entity_id(entity_type)
+
+    def _scan_next_entity_id(self, entity_type: str) -> str:
+        """无锁扫描实现（调用方须持有 _ENTITY_ID_LOCK）；跨全工作区 MAX+1，与旧 DB 全局唯一语义一致"""
         prefix = ENTITY_ID_PREFIXES[entity_type]
         max_num = 0
         for path in self.root.glob(f"*/{DIR_ENTITIES}/{prefix}_*.md"):
@@ -341,8 +396,13 @@ class WorkspaceStore:
                 max_num = max(max_num, int(m.group(1)))
         return f"{prefix}_{max_num + 1:03d}"
 
-    def _find_entity_file(self, entity_id: str) -> Optional[Path]:
-        for path in self.root.glob(f"*/{DIR_ENTITIES}/{entity_id}-*.md"):
+    def _find_entity_file(self, script_session_id: str, entity_id: str) -> Optional[Path]:
+        """在本 story 的实体目录内查找实体文件（限定范围：ID 全局唯一但写/删不得跨会话）"""
+        _require_entity_id(entity_id)
+        story = self.story_dir(script_session_id)
+        if not story:
+            return None
+        for path in (story / DIR_ENTITIES).glob(f"{entity_id}-*.md"):
             return path
         return None
 
@@ -365,13 +425,13 @@ class WorkspaceStore:
             raise ValueError(f"entity_type 仅支持 {tuple(ENTITY_ID_PREFIXES)}")
         now = _now()
         story = self.ensure_story(script_session_id)
-        with self._story_lock(script_session_id):
-            if entity_id:
-                old_path = self._find_entity_file(entity_id)
+        if entity_id:
+            _require_entity_id(entity_id)
+            with self._story_lock(script_session_id):
+                old_path = self._find_entity_file(script_session_id, entity_id)
                 if not old_path:
                     if not create_if_missing:
                         raise ValueError(f"实体不存在: {entity_id}")
-                    old_path = None
                     old_meta = {}
                 else:
                     old_meta, _ = self._read_doc(old_path) or ({}, "")
@@ -386,15 +446,13 @@ class WorkspaceStore:
                     "created_at": old_meta.get("created_at", now),
                     "updated_at": now,
                 }
-                target = story / DIR_ENTITIES
-                if old_path is not None and old_path.parent != target:
-                    # 跨 story 更新（理论不发生）：写入新 story 并清旧
-                    old_path.unlink(missing_ok=True)
-                self._replace_doc_file(target, entity_id, name, fm, description)
+                self._replace_doc_file(story / DIR_ENTITIES, entity_id, name, fm, description)
                 self._refresh(story)
-                return self.get_entity(entity_id) or {}
+                return self.get_entity(script_session_id, entity_id) or {}
 
-            entity_id = self.next_entity_id(script_session_id, entity_type)
+        # 新建：分配与落盘须在同一全局锁内原子完成（防跨会话并发撞号）
+        with _ENTITY_ID_LOCK, self._story_lock(script_session_id):
+            entity_id = self._scan_next_entity_id(entity_type)
             self._replace_doc_file(story / DIR_ENTITIES, entity_id, name, {
                 "entity_id": entity_id,
                 "script_session_id": script_session_id,
@@ -407,7 +465,7 @@ class WorkspaceStore:
                 "updated_at": now,
             }, description)
             self._refresh(story)
-            return self.get_entity(entity_id) or {}
+            return self.get_entity(script_session_id, entity_id) or {}
 
     @staticmethod
     def _entity_from_doc(path: Path, meta: dict, content: str) -> dict:
@@ -425,8 +483,9 @@ class WorkspaceStore:
             "updated_at": meta.get("updated_at", ""),
         }
 
-    def get_entity(self, entity_id: str) -> Optional[dict]:
-        path = self._find_entity_file(entity_id)
+    def get_entity(self, script_session_id: str, entity_id: str) -> Optional[dict]:
+        """读取实体（限定本 story；不存在或不属于该会话返回 None）"""
+        path = self._find_entity_file(script_session_id, entity_id)
         if not path:
             return None
         doc = self._read_doc(path)
@@ -447,37 +506,38 @@ class WorkspaceStore:
         return result
 
     def delete_entity(self, script_session_id: str, entity_id: str) -> bool:
-        path = self._find_entity_file(entity_id)
-        if not path:
-            return False
+        """删除实体（限定本 story；调用方需先校验分集反向引用）"""
+        _require_entity_id(entity_id)
         story = self.story_dir(script_session_id)
         with self._story_lock(script_session_id):
+            path = self._find_entity_file(script_session_id, entity_id)
+            if not path:
+                return False
             path.unlink(missing_ok=True)
             if story:
                 self._refresh(story)
         return True
 
-    def set_entity_lookbook(self, entity_id: str, image_id: str, image_path: str) -> bool:
-        """回写实体的定妆照引用（定妆照任务本体仍在 DB，文件只存引用）"""
-        path = self._find_entity_file(entity_id)
-        if not path:
-            return False
-        doc = self._read_doc(path)
-        if not doc:
-            return False
-        meta, content = doc
-        meta = {**meta, "lookbook_image_id": image_id, "lookbook_image_path": image_path, "updated_at": _now()}
-        with self._story_lock(meta.get("script_session_id", "")):
+    def set_entity_lookbook(self, script_session_id: str, entity_id: str, image_id: str, image_path: str) -> bool:
+        """回写实体的定妆照引用（限定本 story；定妆照任务本体仍在 DB，文件只存引用）"""
+        _require_entity_id(entity_id)
+        with self._story_lock(script_session_id):
+            path = self._find_entity_file(script_session_id, entity_id)
+            if not path:
+                return False
+            doc = self._read_doc(path)
+            if not doc:
+                return False
+            meta, content = doc
+            meta = {**meta, "lookbook_image_id": image_id, "lookbook_image_path": image_path, "updated_at": _now()}
             self._static_write(path, meta, content)
-        return True
+            return True
 
     # ==================== 分集设计 ====================
 
     def upsert_episode(self, script_session_id: str, episode: dict) -> dict:
         """插入或覆写一集（签名与 ScriptManager.upsert_episode 一致）"""
-        episode_id = episode.get("episode_id", "")
-        if not episode_id:
-            raise ValueError("episode_id 不能为空")
+        episode_id = _require_episode_id(episode.get("episode_id", ""))
         now = _now()
         story = self.ensure_story(script_session_id)
         with self._story_lock(script_session_id):
@@ -495,10 +555,9 @@ class WorkspaceStore:
                 "created_at": (old or {}).get("created_at", now),
                 "updated_at": now,
             }
-            content = "\n\n".join(
-                f"## {label}\n{episode.get(key) or ''}" for label, key in EPISODE_SECTIONS
+            self._replace_doc_file(
+                story / DIR_EPISODES, episode_id, fm["title"], fm, _render_episode_content(episode),
             )
-            self._replace_doc_file(story / DIR_EPISODES, episode_id, fm["title"], fm, content)
             self._refresh(story)
             return self.get_episode(script_session_id, episode_id) or {}
 
@@ -529,26 +588,25 @@ class WorkspaceStore:
                 "created_at": current.get("created_at", now),
                 "updated_at": now,
             }
-            content = "\n\n".join(
-                f"## {label}\n{merged.get(key) or ''}" for label, key in EPISODE_SECTIONS
+            self._replace_doc_file(
+                story / DIR_EPISODES, episode_id, fm["title"], fm, _render_episode_content(merged),
             )
-            self._replace_doc_file(story / DIR_EPISODES, episode_id, fm["title"], fm, content)
             self._refresh(story)
             return self.get_episode(script_session_id, episode_id)
 
     @staticmethod
     def _episode_from_doc(meta: dict, content: str) -> dict:
-        """分集文件 → 旧 episodes row 形状"""
+        """分集文件 → 旧 episodes row 形状（正文小节反转义还原字段值）"""
         sections = _split_sections(content)
         return {
             "episode_id": meta.get("episode_id", ""),
             "script_session_id": meta.get("script_session_id", ""),
             "title": meta.get("title", ""),
-            "logline": sections.get("梗概", ""),
-            "conflict_chain": sections.get("矛盾链", ""),
-            "causality_chain": sections.get("因果链", ""),
-            "ending_summary": sections.get("结尾摘要", ""),
-            "story_progress": sections.get("节点进展", ""),
+            "logline": _unescape_headings(sections.get("梗概", "")),
+            "conflict_chain": _unescape_headings(sections.get("矛盾链", "")),
+            "causality_chain": _unescape_headings(sections.get("因果链", "")),
+            "ending_summary": _unescape_headings(sections.get("结尾摘要", "")),
+            "story_progress": _unescape_headings(sections.get("节点进展", "")),
             "character_ids": meta.get("character_ids") or [],
             "scene_ids": meta.get("scene_ids") or [],
             "clue_refs": meta.get("clue_refs") or [],
@@ -564,6 +622,7 @@ class WorkspaceStore:
         return sorted((story / DIR_EPISODES).glob("ep_*.md")) if story else []
 
     def get_episode(self, script_session_id: str, episode_id: str) -> Optional[dict]:
+        _require_episode_id(episode_id)
         story = self.story_dir(script_session_id)
         if not story:
             return None
@@ -581,6 +640,7 @@ class WorkspaceStore:
         return result
 
     def delete_episode(self, script_session_id: str, episode_id: str) -> bool:
+        _require_episode_id(episode_id)
         story = self.story_dir(script_session_id)
         if not story:
             return False
@@ -680,7 +740,7 @@ class WorkspaceStore:
         return self.read_storyboard(script_session_id, episode_id, video_session_id) or {}
 
     def _write_segment_file(self, vs_dir: Path, seg: dict) -> None:
-        """单个分镜落盘（frontmatter 配置 + 正文大纲/提示词两节）"""
+        """单个分镜落盘（frontmatter 配置 + 正文大纲/提示词两节，值转义行首标题）"""
         fm = {
             "index": int(seg.get("index", 0)),
             "title": seg.get("title", ""),
@@ -691,10 +751,7 @@ class WorkspaceStore:
             "reference_images": seg.get("reference_images") or [],
             "updated_at": _now(),
         }
-        content = f"## 分镜大纲\n{seg.get('outline', '') or ''}"
-        if seg.get("prompt"):
-            content += f"\n\n## 分镜提示词\n{seg['prompt']}"
-        self._replace_doc_file(vs_dir, f"seg_{fm['index']:02d}", fm["title"], fm, content)
+        self._replace_doc_file(vs_dir, f"seg_{fm['index']:02d}", fm["title"], fm, _render_segment_content(seg))
 
     @staticmethod
     def _segment_from_doc(path: Path, meta: dict, content: str) -> dict:
@@ -702,12 +759,12 @@ class WorkspaceStore:
         return {
             "index": int(meta.get("index", 0)),
             "title": meta.get("title", ""),
-            "outline": sections.get("分镜大纲", ""),
+            "outline": _unescape_headings(sections.get("分镜大纲", "")),
             "mode": meta.get("mode", "all_reference"),
             "overlap": int(meta.get("overlap", 1)),
             "duration": int(meta.get("duration", 15)),
             "edited": bool(meta.get("edited", False)),
-            "prompt": sections.get("分镜提示词", ""),
+            "prompt": _unescape_headings(sections.get("分镜提示词", "")),
             "reference_images": meta.get("reference_images") or [],
             "updated_at": meta.get("updated_at", ""),
         }
@@ -792,16 +849,9 @@ class WorkspaceStore:
                 **{k: v for k, v in seg.items() if k not in ("outline", "prompt")},
                 "edited": True,
                 "updated_at": _now(),
-            }, self._segment_content(seg))
+            }, _render_segment_content(seg))
             self._refresh(story)
             return self.read_segment(script_session_id, episode_id, video_session_id, index)
-
-    @staticmethod
-    def _segment_content(seg: dict) -> str:
-        content = f"## 分镜大纲\n{seg.get('outline', '') or ''}"
-        if seg.get("prompt"):
-            content += f"\n\n## 分镜提示词\n{seg['prompt']}"
-        return content
 
     def read_segment(self, script_session_id: str, episode_id: str, video_session_id: str, index: int) -> Optional[dict]:
         story = self.story_dir(script_session_id)
@@ -813,20 +863,6 @@ class WorkspaceStore:
             return None
         doc = self._read_doc(path)
         return self._segment_from_doc(path, doc[0], doc[1]) if doc else None
-
-    def delete_storyboards_of_story(self, script_session_id: str) -> int:
-        """删除剧本会话关联的全部分镜目录（删除剧本会话时连带清理）"""
-        story = self.story_dir(script_session_id)
-        if not story:
-            return 0
-        import shutil
-        count = 0
-        sb_dir = story / DIR_STORYBOARDS
-        if sb_dir.is_dir():
-            for vs_dir in sb_dir.glob("ep_*/vs-*"):
-                shutil.rmtree(vs_dir, ignore_errors=True)
-                count += 1
-        return count
 
     # ==================== MAP.md 渲染 ====================
 

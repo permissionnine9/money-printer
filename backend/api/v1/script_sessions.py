@@ -10,9 +10,9 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import Optional
+from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Path
 from fastapi.responses import StreamingResponse
 
 from backend.core.agent_sdk import AgentEvent
@@ -41,6 +41,10 @@ from backend.schemas.script import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# 路径参数 ID 白名单（store 层亦有一份纵深校验；这里 422 快速失败防 glob 元字符注入）
+EPISODE_ID_PATH = Path(pattern=r"^ep_\d{2,}$")
+ENTITY_ID_PATH = Path(pattern=r"^(chr|scn|clu|fs)_\d{3,}$")
 
 
 def get_script_workflow() -> ScriptWorkflow:
@@ -293,7 +297,7 @@ async def list_episodes(session_id: str, _info: dict = Depends(load_script_sessi
 
 
 @router.get("/{session_id}/episodes/{episode_id}")
-async def get_episode(session_id: str, episode_id: str, _info: dict = Depends(load_script_session)):
+async def get_episode(session_id: str, episode_id: Annotated[str, EPISODE_ID_PATH], _info: dict = Depends(load_script_session)):
     episode = get_workspace_store().get_episode(session_id, episode_id)
     if not episode:
         raise HTTPException(status_code=404, detail=f"分集不存在: {episode_id}")
@@ -301,7 +305,7 @@ async def get_episode(session_id: str, episode_id: str, _info: dict = Depends(lo
 
 
 @router.put("/{session_id}/episodes/{episode_id}")
-async def update_episode(session_id: str, episode_id: str, body: EpisodeUpdateRequest, _info: dict = Depends(load_script_session)):
+async def update_episode(session_id: str, episode_id: Annotated[str, EPISODE_ID_PATH], body: EpisodeUpdateRequest, _info: dict = Depends(load_script_session)):
     """人工编辑分集（部分字段；refs 类字段走与 save_episode 相同的引用校验）"""
     updated = get_script_workflow().update_episode_fields(
         session_id, episode_id, body.model_dump(exclude_none=True),
@@ -310,7 +314,7 @@ async def update_episode(session_id: str, episode_id: str, body: EpisodeUpdateRe
 
 
 @router.delete("/{session_id}/episodes/{episode_id}")
-async def delete_episode(session_id: str, episode_id: str, _info: dict = Depends(load_script_session)):
+async def delete_episode(session_id: str, episode_id: Annotated[str, EPISODE_ID_PATH], _info: dict = Depends(load_script_session)):
     """删除分集（仅允许删除最后一集，保持集号连续）"""
     store = get_workspace_store()
     episodes = store.list_episodes(session_id)
@@ -341,10 +345,10 @@ async def upsert_entity(session_id: str, body: EntityUpsertRequest, _info: dict 
 
 
 @router.put("/{session_id}/entities/{entity_id}")
-async def update_entity(session_id: str, entity_id: str, body: EntityUpsertRequest, _info: dict = Depends(load_script_session)):
+async def update_entity(session_id: str, entity_id: Annotated[str, ENTITY_ID_PATH], body: EntityUpsertRequest, _info: dict = Depends(load_script_session)):
     store = get_workspace_store()
-    if not store.get_entity(entity_id):
-        raise HTTPException(status_code=404, detail=f"实体不存在: {entity_id}")
+    if not store.get_entity(session_id, entity_id):
+        raise HTTPException(status_code=404, detail=f"实体不存在或不属于该会话: {entity_id}")
     try:
         entity = store.upsert_entity(
             session_id, body.entity_type, body.name, body.description, body.meta,
@@ -356,10 +360,10 @@ async def update_entity(session_id: str, entity_id: str, body: EntityUpsertReque
 
 
 @router.get("/{session_id}/entities/{entity_id}/references")
-async def get_entity_references(session_id: str, entity_id: str, _info: dict = Depends(load_script_session)):
+async def get_entity_references(session_id: str, entity_id: Annotated[str, ENTITY_ID_PATH], _info: dict = Depends(load_script_session)):
     """引用反查：该实体在全部分集中的引用方式（人物/场景 → 出场；线索/伏笔 → action 值）"""
     store = get_workspace_store()
-    entity = store.get_entity(entity_id)
+    entity = store.get_entity(session_id, entity_id)
     if not entity or entity["script_session_id"] != session_id:
         raise HTTPException(status_code=404, detail=f"实体不存在或不属于该会话: {entity_id}")
     entity_type = entity["entity_type"]
@@ -378,9 +382,11 @@ async def get_entity_references(session_id: str, entity_id: str, _info: dict = D
 
 
 @router.delete("/{session_id}/entities/{entity_id}")
-async def delete_entity(session_id: str, entity_id: str, _info: dict = Depends(load_script_session)):
-    """删除实体（有分集反向引用时拒绝）"""
+async def delete_entity(session_id: str, entity_id: Annotated[str, ENTITY_ID_PATH], _info: dict = Depends(load_script_session)):
+    """删除实体（不属于本会话或被分集反向引用时拒绝）"""
     store = get_workspace_store()
+    if not store.get_entity(session_id, entity_id):
+        raise HTTPException(status_code=404, detail=f"实体不存在或不属于该会话: {entity_id}")
     for episode in store.list_episodes(session_id):
         referenced = (
             episode["character_ids"] + episode["scene_ids"]

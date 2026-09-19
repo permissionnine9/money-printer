@@ -542,7 +542,7 @@ class ScriptWorkflow(StepWorkflowBase):
                 mcp_servers={"script_design": mcp_server},
                 # 读侧：剧本目录内自主检索；写侧：仅 save/upsert MCP 工具落盘
                 tools=READ_ONLY_TOOLS,
-                cwd=self._story_cwd(session_id),
+                cwd=self.store.story_cwd(session_id),
                 max_turns=turns,
                 interrupt=interrupt,
             ),
@@ -702,8 +702,9 @@ class ScriptWorkflow(StepWorkflowBase):
             poll = await image_service.poll_i2i_task(request_id, timeout=180, poll_interval=5)
             if poll.get("success"):
                 self.scm.update_lookbook(image_id, {"image_path": poll.get("image_url", ""), "task_status": "completed"})
+                lookbook = self.scm.get_lookbook(image_id)
                 self.store.set_entity_lookbook(
-                    self.scm.get_lookbook(image_id)["entity_id"], image_id, poll.get("image_url", "")
+                    session_id, lookbook["entity_id"], image_id, poll.get("image_url", ""),
                 )
             else:
                 self.scm.update_lookbook(image_id, {"task_status": "failed"})
@@ -739,7 +740,7 @@ class ScriptWorkflow(StepWorkflowBase):
             self.scm.update_lookbook(image_id, {"task_status": "failed"})
             raise ScriptWorkflowError(f"生成失败: {poll.get('error')}")
         self.scm.update_lookbook(image_id, {"image_path": poll["image_url"], "task_status": "completed"})
-        self.store.set_entity_lookbook(row["entity_id"], image_id, poll["image_url"])
+        self.store.set_entity_lookbook(session_id, row["entity_id"], image_id, poll["image_url"])
         return self.scm.get_lookbook(image_id)
 
     def _load_story_logic(self, session_id: str) -> str:
@@ -749,11 +750,6 @@ class ScriptWorkflow(StepWorkflowBase):
             return logic
         step = self.sm.get_step_result(session_id, "story_ideation")
         return step["result_data"].get("story_logic", "") if step else ""
-
-    def _story_cwd(self, session_id: str) -> Optional[str]:
-        """Agent 工作目录（剧本 story 根，绝对路径）"""
-        story = self.store.story_dir(session_id)
-        return str(story.resolve()) if story else None
 
     def complete_lookbook(self, session_id: str) -> dict:
         """手动确认完成第 4 步（按需勾选无自然终点）"""

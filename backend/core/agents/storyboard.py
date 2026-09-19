@@ -98,9 +98,12 @@ class StoryboardWorkflow(StepWorkflowBase):
         return data
 
     def _storyboard_envelope(self, session_id: str) -> dict:
+        """分镜步骤薄 envelope（path 为相对项目根的 workspace/... 路径，与剧本侧一致）"""
         script_session_id, episode_id = self._storyboard_loc(session_id)
+        story = self.store.story_dir(script_session_id)
         vs_dir = self.store.storyboard_dir(script_session_id, episode_id, session_id)
-        return {"_artifact": "workspace", "path": (vs_dir / "storyboard.md").as_posix()}
+        rel = f"workspace/{vs_dir.relative_to(story).as_posix()}/storyboard.md" if story else ""
+        return {"_artifact": "workspace", "path": rel}
 
     def _find_segment(self, data: dict, index: int) -> dict:
         seg = next((s for s in data.get("segments", []) if s.get("index") == index), None)
@@ -113,14 +116,9 @@ class StoryboardWorkflow(StepWorkflowBase):
         outline = self.store.read_outline(script_session_id)
         return outline.get("mindmap", "") if outline else ""
 
-    def _story_cwd(self, script_session_id: str) -> Optional[str]:
-        """Agent 工作目录（剧本 story 根，绝对路径）"""
-        story = self.store.story_dir(script_session_id)
-        return str(story.resolve()) if story else None
-
     # ==================== 第 2 步：分镜大纲 ====================
 
-    def _workspace_section(self, script_session_id: str, episode_id: str, *, must_read_episode: bool = True) -> str:
+    def _workspace_section(self, script_session_id: str, episode_id: str) -> str:
         """Agent prompt 的「剧本工作区」段：目录路径 + MAP 摘要 + 本集文件路径（替代旧全文上下文）"""
         entry = self.store.agent_entry(script_session_id)
         if not entry["available"]:
@@ -129,13 +127,14 @@ class StoryboardWorkflow(StepWorkflowBase):
         lines = [
             f"剧本工作区根目录：{entry['story_root']}",
             f"目录地图（先 Read 了解全貌）：{entry['map_path']}",
+        ]
+        if episode_path:
+            lines.append(f"本集分集设计（必读）：{episode_path}")
+        lines.extend([
             "全剧大纲：01-outline/outline.md（跨集伏笔与主线脉络）",
             "人物/场景/线索/伏笔实体卡：03-entities/（按 ID Grep 或按名字 Glob）",
             "前后集衔接：02-episodes/ 下相邻集文件的「结尾摘要」「因果链」小节",
-        ]
-        if episode_path:
-            tag = "（必读）" if must_read_episode else ""
-            lines.insert(2, f"本集分集设计{tag}：{episode_path}")
+        ])
         return "\n".join(lines)
 
     async def generate_outline(
@@ -165,7 +164,7 @@ class StoryboardWorkflow(StepWorkflowBase):
                 system_prompt=STORYBOARD_OUTLINE_SYSTEM,
                 # 剧本目录内自主检索（Read/Grep/Glob），留足检索轮次后输出 JSON
                 tools=READ_ONLY_TOOLS,
-                cwd=self._story_cwd(script_session_id),
+                cwd=self.store.story_cwd(script_session_id),
                 max_turns=12,
                 interrupt=interrupt,
             ),
@@ -283,11 +282,8 @@ class StoryboardWorkflow(StepWorkflowBase):
                     ).model_dump())
                 segments[-1]["index"] = i  # title 匹配保留的旧分镜 index 已错位，统一重排
 
-            if changed and self.sm.is_step_completed(session_id, "segment_management"):
-                self.sm.clear_step_result(session_id, "segment_management")
-                self.sm.clear_steps_after(session_id, "segment_management")
-                self.sm.reset_current_step(session_id, "segment_management")
-
+            # 统一次序：先写文件（权威源）成功，再回退 DB 完成态与 envelope——
+            # 中途失败时文件为准、DB 完成态可安全重试（与 _save_segment_change 一致）
             script_session_id, episode_id = self._storyboard_loc(session_id)
             self.store.replace_storyboard(
                 script_session_id, episode_id, session_id,
@@ -295,6 +291,10 @@ class StoryboardWorkflow(StepWorkflowBase):
             )
             self.sm.update_step_result(session_id, "storyboard_outline",
                                        self._storyboard_envelope(session_id))
+            if changed and self.sm.is_step_completed(session_id, "segment_management"):
+                self.sm.clear_step_result(session_id, "segment_management")
+                self.sm.clear_steps_after(session_id, "segment_management")
+                self.sm.reset_current_step(session_id, "segment_management")
         logger.info(f"[分镜大纲] 会话 {session_id[:8]}... 人工编辑导图（{len(segments)} 个分镜，变化: {changed}）")
         return {"mindmap": stored_mindmap, "segment_count": len(segments)}
 
@@ -518,7 +518,7 @@ class StoryboardWorkflow(StepWorkflowBase):
                 prompt=tpl,
                 system_prompt=MATERIAL_GENERATE_SYSTEM,
                 tools=READ_ONLY_TOOLS,
-                cwd=self._story_cwd(script_session_id),
+                cwd=self.store.story_cwd(script_session_id),
                 max_turns=8,
                 interrupt=interrupt,
             ),
@@ -722,7 +722,7 @@ class StoryboardWorkflow(StepWorkflowBase):
                 system_prompt=system_prompt,
                 # 剧本目录内自主检索，留足检索轮次
                 tools=READ_ONLY_TOOLS,
-                cwd=self._story_cwd(script_session_id),
+                cwd=self.store.story_cwd(script_session_id),
                 max_turns=12,
                 interrupt=interrupt,
             ),
