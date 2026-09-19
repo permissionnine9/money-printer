@@ -125,7 +125,7 @@ DEFAULT_TEMPLATES: dict[str, str] = {
 {{video_params_context}}
 
 ## 剧本上下文（本集分集设计 + 人物/场景设定 + 前后集衔接）
-{{script_context}}{{extra_instruction}}
+{{workspace_section}}{{extra_instruction}}
 
 ## 要求
 

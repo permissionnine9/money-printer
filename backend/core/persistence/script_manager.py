@@ -5,7 +5,8 @@ markdown 类产物（故事逻辑/大纲/分集设计/实体卡/分镜）已文�
 - lookbook_images:        剧本定妆照（agent 出 prompt + 确定性生图的状态机）
 - episode_material_images: 分集素材图（视频工作流分镜参考图生成的状态机）
 
-（script_entities / episodes 两张历史表结构保留用于迁移对账，读写已切至 WorkspaceStore。）
+（episodes / script_entities 两张影子表已退役：不再建 DDL、不再读写，
+仅由 migrate_db_to_workspace.py 在旧库中维护用于迁移对账。）
 """
 import logging
 import sqlite3
@@ -22,42 +23,6 @@ class ScriptManager(BaseSQLiteManager):
     """剧本数据管理器（定妆照 / 分集素材图任务状态机）"""
 
     def _create_schema(self, conn):
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS script_entities (
-                entity_id TEXT PRIMARY KEY,
-                script_session_id TEXT NOT NULL,
-                entity_type TEXT NOT NULL,
-                name TEXT NOT NULL,
-                description TEXT DEFAULT '',
-                meta TEXT DEFAULT '{}',
-                lookbook_image_id TEXT DEFAULT '',
-                lookbook_image_path TEXT DEFAULT '',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS episodes (
-                episode_id TEXT NOT NULL,
-                script_session_id TEXT NOT NULL,
-                title TEXT DEFAULT '',
-                logline TEXT DEFAULT '',
-                conflict_chain TEXT DEFAULT '',
-                causality_chain TEXT DEFAULT '',
-                ending_summary TEXT DEFAULT '',
-                story_progress TEXT DEFAULT '',
-                character_ids TEXT DEFAULT '[]',
-                scene_ids TEXT DEFAULT '[]',
-                clue_refs TEXT DEFAULT '[]',
-                foreshadow_refs TEXT DEFAULT '[]',
-                meta TEXT DEFAULT '{}',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(script_session_id, episode_id)
-            )
-        """)
-        # 旧表迁移：增加 story_progress 列（已存在则忽略）
-        self._add_columns_if_missing(conn, "episodes", {"story_progress": "TEXT NOT NULL DEFAULT ''"})
         conn.execute("""
             CREATE TABLE IF NOT EXISTS lookbook_images (
                 image_id TEXT PRIMARY KEY,
@@ -234,15 +199,11 @@ class ScriptManager(BaseSQLiteManager):
     def delete_script_data(self, script_session_id: str) -> dict:
         """清空剧本会话的全部分集/实体/定妆照/分集素材图（大纲重生成时清下游）"""
         with self._connect() as conn:
-            episodes = conn.execute("SELECT COUNT(*) FROM episodes WHERE script_session_id = ?", (script_session_id,)).fetchone()[0]
-            entities = conn.execute("SELECT COUNT(*) FROM script_entities WHERE script_session_id = ?", (script_session_id,)).fetchone()[0]
             lookbooks = conn.execute("SELECT COUNT(*) FROM lookbook_images WHERE script_session_id = ?", (script_session_id,)).fetchone()[0]
             materials = conn.execute("SELECT COUNT(*) FROM episode_material_images WHERE script_session_id = ?", (script_session_id,)).fetchone()[0]
-            conn.execute("DELETE FROM episodes WHERE script_session_id = ?", (script_session_id,))
-            conn.execute("DELETE FROM script_entities WHERE script_session_id = ?", (script_session_id,))
             conn.execute("DELETE FROM lookbook_images WHERE script_session_id = ?", (script_session_id,))
             conn.execute("DELETE FROM episode_material_images WHERE script_session_id = ?", (script_session_id,))
             conn.commit()
-        counts = {"episodes": episodes, "entities": entities, "lookbook_images": lookbooks, "episode_material_images": materials}
+        counts = {"lookbook_images": lookbooks, "episode_material_images": materials}
         logger.info(f"[剧本] 清理下游数据 {script_session_id[:8]}...: {counts}")
         return counts

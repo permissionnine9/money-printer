@@ -1,0 +1,20 @@
+"""重生成级联清理（services 层编排：跨 sm / store / scm 三个持久化组件）
+
+SessionManager 不持有 store/scm，级联清理放 services 层以避免持久化层反向依赖。
+"""
+from backend.core.persistence.script_manager import ScriptManager
+from backend.core.persistence.session_manager import SessionManager
+from backend.core.persistence.workspace_store import WorkspaceStore
+
+
+def cascade_regenerate(
+    sm: SessionManager,
+    store: WorkspaceStore,
+    scm: ScriptManager,
+    session_id: str,
+    step: str,
+) -> None:
+    """重生成级联清理：下游步骤结果（DB）+ 工作区分集/实体文件 + DB 定妆照/素材图任务"""
+    sm.clear_steps_after(session_id, step)
+    store.delete_story_content(session_id)
+    scm.delete_script_data(session_id)

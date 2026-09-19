@@ -10,7 +10,6 @@ import type {
   StoryboardSegment,
   SegmentPromptContext,
   MaterialPoolGroup,
-  SessionAsset,
   ImageModelConfig,
   PromptTemplate,
 } from '@/types'
@@ -151,6 +150,15 @@ export const stepApi = {
     return runId
   },
 
+  // 步骤3：删除素材池中的 AI 生成素材图（仅 mat_*；分镜中已引用处将失效）
+  deleteMaterial: async (
+    sessionId: string,
+    imageId: string
+  ): Promise<{ success: boolean; data: { deleted: boolean } }> => {
+    const { data } = await client.delete(`/steps/${sessionId}/materials/${imageId}`)
+    return data
+  },
+
   // 步骤3：获取分镜提示词生成弹窗的上下文
   getSegmentPromptContext: async (
     sessionId: string,
@@ -168,15 +176,15 @@ export const stepApi = {
     return runId
   },
 
-  // 步骤3：完成分镜配置（推进到步骤4）
-  completeSegmentManagement: async (sessionId: string): Promise<StepResponse> => {
-    const { data } = await client.post(`/steps/${sessionId}/segment-management/complete`, {})
+  // 步骤3：完成/取消完成单个分镜的配置（≥1 个分镜完成即可进入步骤4）
+  completeSegment: async (sessionId: string, index: number, completed = true): Promise<StepResponse> => {
+    const { data } = await client.post(`/steps/${sessionId}/storyboard-segments/${index}/complete`, { completed })
     return data
   },
 
-  // 步骤4：生成视频
-  generateVideos: async (sessionId: string): Promise<StepResponse> => {
-    const { data } = await client.post(`/steps/${sessionId}/videos`, {})
+  // 步骤4：生成视频（勾选分镜子集拼接 timeline；缺省=全部已配置分镜）
+  generateVideos: async (sessionId: string, segmentIndexes?: number[]): Promise<StepResponse> => {
+    const { data } = await client.post(`/steps/${sessionId}/videos`, segmentIndexes ? { segment_indexes: segmentIndexes } : {})
     return data
   },
 
@@ -199,49 +207,12 @@ export const stepApi = {
   },
 }
 
-// 会话资产管理 API（素材管理台：音频/图片素材）
-export const assetApi = {
-  // 列出会话资产（可按类型过滤）
-  list: async (
-    sessionId: string,
-    assetType?: 'audio' | 'image'
-  ): Promise<{ success: boolean; assets: SessionAsset[] }> => {
-    const params = assetType ? { asset_type: assetType } : {}
-    const { data } = await client.get(`/assets/${sessionId}`, { params })
-    return data
-  },
-
-  // 上传资产（音频/图片）
-  upload: async (
-    sessionId: string,
-    assetType: 'audio' | 'image',
-    file: File
-  ): Promise<{ success: boolean; message: string; asset: SessionAsset }> => {
-    const formData = new FormData()
-    formData.append('file', file)
-    const { data } = await client.post(`/assets/${sessionId}/upload`, formData, {
-      params: { asset_type: assetType },
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })
-    return data
-  },
-
-  // 删除资产
-  remove: async (
-    sessionId: string,
-    assetId: string
-  ): Promise<{ success: boolean; message: string }> => {
-    const { data } = await client.delete(`/assets/${sessionId}/${assetId}`)
-    return data
-  },
-}
-
 // 生图模型管理 API
 export const modelApi = {
   // 列出全部模型配置（可按类型过滤：image / chat）
   list: async (
     modelType?: 'image' | 'chat' | 'agent'
-  ): Promise<{ success: boolean; models: ImageModelConfig[] }> => {
+  ): Promise<{ success: boolean; data: { models: ImageModelConfig[] } }> => {
     const params = modelType ? { model_type: modelType } : {}
     const { data } = await client.get('/models', { params })
     return data
@@ -255,7 +226,7 @@ export const modelApi = {
     model_id: string
     is_default?: boolean
     model_type?: 'image' | 'chat'
-  }): Promise<{ success: boolean; message: string; model: ImageModelConfig }> => {
+  }): Promise<{ success: boolean; data: { model: ImageModelConfig } }> => {
     const { data } = await client.post('/models', payload)
     return data
   },
@@ -271,7 +242,7 @@ export const modelApi = {
       is_default?: boolean
       model_type?: 'image' | 'chat' | 'agent'
     }
-  ): Promise<{ success: boolean; message: string; model: ImageModelConfig }> => {
+  ): Promise<{ success: boolean; data: { model: ImageModelConfig } }> => {
     const { data } = await client.put(`/models/${modelId}`, payload)
     return data
   },
@@ -279,13 +250,13 @@ export const modelApi = {
   // 设为默认模型
   setDefault: async (
     modelId: string
-  ): Promise<{ success: boolean; message: string; model: ImageModelConfig }> => {
+  ): Promise<{ success: boolean; message: string; data: { model: ImageModelConfig } }> => {
     const { data } = await client.post(`/models/${modelId}/set-default`)
     return data
   },
 
   // 删除模型配置
-  remove: async (modelId: string): Promise<{ success: boolean; message: string }> => {
+  remove: async (modelId: string): Promise<{ success: boolean; data: { deleted: boolean } }> => {
     const { data } = await client.delete(`/models/${modelId}`)
     return data
   },
@@ -294,7 +265,7 @@ export const modelApi = {
 // 提示词管理 API（分片镜头 skill 提示词）
 export const promptApi = {
   // 列出全部提示词模板
-  list: async (): Promise<{ success: boolean; prompts: PromptTemplate[] }> => {
+  list: async (): Promise<{ success: boolean; data: { prompts: PromptTemplate[] } }> => {
     const { data } = await client.get('/prompts')
     return data
   },
@@ -302,7 +273,7 @@ export const promptApi = {
   // 获取单个提示词内容
   get: async (
     name: string
-  ): Promise<{ success: boolean; prompt: PromptTemplate }> => {
+  ): Promise<{ success: boolean; data: { prompt: PromptTemplate } }> => {
     const { data } = await client.get(`/prompts/${name}`)
     return data
   },
@@ -311,7 +282,7 @@ export const promptApi = {
   save: async (
     name: string,
     content: string
-  ): Promise<{ success: boolean; message: string }> => {
+  ): Promise<{ success: boolean }> => {
     const { data } = await client.put(`/prompts/${name}`, { content })
     return data
   },

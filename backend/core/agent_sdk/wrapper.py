@@ -62,8 +62,6 @@ class AgentRunOptions:
     resume: Optional[str] = None
     # 触发后调用 client.interrupt() 取消运行
     interrupt: Optional[asyncio.Event] = None
-    # JSON Schema 约束最终输出（结构化输出）
-    output_format: Optional[dict] = None
     # 额外环境变量（默认继承当前进程 + 注入 agent 模型端点）
     env: Optional[dict[str, str]] = None
 
@@ -73,7 +71,6 @@ class AgentRunResult:
     """一次 agent 运行的结果"""
     text: str = ""
     session_id: str = ""
-    structured_output: Any = None
     usage: dict = field(default_factory=dict)
     cost_usd: float = 0.0
     error: Optional[str] = None
@@ -101,8 +98,6 @@ async def run_agent(
         resume=options.resume,
         cwd=options.cwd,
     )
-    if options.output_format:
-        sdk_options.output_format = options.output_format
 
     result = AgentRunResult()
     client = ClaudeSDKClient(options=sdk_options)
@@ -157,7 +152,6 @@ async def run_agent(
                     if msg.subtype == "success":
                         result.text = msg.result or accumulated_text
                         result.session_id = msg.session_id or ""
-                        result.structured_output = msg.structured_output
                         result.usage = msg.usage or {}
                         result.cost_usd = msg.total_cost_usd or 0.0
                         emit(AgentEvent(
@@ -289,7 +283,6 @@ async def run_conversation(
     message: str,
     system_prompt: Optional[str] = None,
     agent_session_id: Optional[str] = None,
-    tools: Optional[dict] = None,
     max_turns: int = DEFAULT_MAX_TURNS,
     on_event: Optional[Callable[[AgentEvent], None]] = None,
     interrupt: Optional[asyncio.Event] = None,
@@ -299,7 +292,6 @@ async def run_conversation(
         AgentRunOptions(
             prompt=message,
             system_prompt=system_prompt,
-            mcp_servers=tools,
             resume=agent_session_id,
             max_turns=max_turns,
             interrupt=interrupt,

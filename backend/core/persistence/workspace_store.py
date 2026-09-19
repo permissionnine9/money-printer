@@ -55,7 +55,7 @@ DIR_ENTITIES = "03-entities"
 DIR_STORYBOARDS = "04-storyboards"
 STORY_SUBDIRS = (DIR_IDEATION, DIR_OUTLINE, DIR_EPISODES, DIR_ENTITIES, DIR_STORYBOARDS)
 
-# next_entity_id 全局唯一性锁：ID 跨 story 全局分配（glob MAX+1 非原子），
+# 实体 ID 分配全局唯一性锁：ID 跨 story 全局分配（glob MAX+1 非原子），
 # per-story 锁保护不到跨会话并发，须用进程级锁
 _ENTITY_ID_LOCK = threading.Lock()
 
@@ -387,11 +387,6 @@ class WorkspaceStore:
 
     # ==================== 实体注册表（全局实体卡） ====================
 
-    def next_entity_id(self, script_session_id: str, entity_type: str) -> str:
-        """查询下一个可用实体 ID（仅预览用途；并发安全的新建请走 upsert_entity）"""
-        with _ENTITY_ID_LOCK:
-            return self._scan_next_entity_id(entity_type)
-
     def _scan_next_entity_id(self, entity_type: str) -> str:
         """无锁扫描实现（调用方须持有 _ENTITY_ID_LOCK）；跨全工作区 MAX+1，与旧 DB 全局唯一语义一致"""
         prefix = ENTITY_ID_PREFIXES[entity_type]
@@ -520,6 +515,54 @@ class WorkspaceStore:
             path = self._find_entity_file(script_session_id, entity_id)
             if not path:
                 return False
+            path.unlink(missing_ok=True)
+            if story:
+                self._refresh(story)
+        return True
+
+    def entity_references(self, script_session_id: str, entity_id: str) -> Optional[list[dict]]:
+        """引用反查：该实体在全部分集中的引用方式（人物/场景 → 出场；线索/伏笔 → action 值）
+
+        实体不存在或不属于该会话返回 None。
+        """
+        entity = self.get_entity(script_session_id, entity_id)
+        if not entity or entity["script_session_id"] != script_session_id:
+            return None
+        entity_type = entity["entity_type"]
+        episodes = []
+        for ep in self.list_episodes(script_session_id):
+            if entity_type == "character":
+                actions = ["出场"] if entity_id in ep["character_ids"] else []
+            elif entity_type == "scene":
+                actions = ["出场"] if entity_id in ep["scene_ids"] else []
+            else:
+                refs = ep["clue_refs"] if entity_type == "clue" else ep["foreshadow_refs"]
+                actions = [r.get("action", "") for r in refs if r.get("entity_id") == entity_id]
+            if actions:
+                episodes.append({"episode_id": ep["episode_id"], "title": ep["title"], "actions": actions})
+        return episodes
+
+    def delete_entity_unreferenced(self, script_session_id: str, entity_id: str) -> bool:
+        """删除实体（同锁内校验无分集反向引用后删除，消除校验-删除 TOCTOU）
+
+        被分集引用时 raise ValueError；不存在返回 False。
+        """
+        _require_entity_id(entity_id)
+        story = self.story_dir(script_session_id)
+        with self._story_lock(script_session_id):
+            path = self._find_entity_file(script_session_id, entity_id)
+            if not path:
+                return False
+            for episode in self.list_episodes(script_session_id):
+                referenced = (
+                    episode["character_ids"] + episode["scene_ids"]
+                    + [r.get("entity_id") for r in episode["clue_refs"]]
+                    + [r.get("entity_id") for r in episode["foreshadow_refs"]]
+                )
+                if entity_id in referenced:
+                    raise ValueError(
+                        f"实体 {entity_id} 被分集 {episode['episode_id']} 引用，先移除引用再删除"
+                    )
             path.unlink(missing_ok=True)
             if story:
                 self._refresh(story)
@@ -660,6 +703,27 @@ class WorkspaceStore:
                 self._refresh(story)
         return deleted
 
+    def delete_last_episode(self, script_session_id: str, episode_id: str) -> bool:
+        """删除分集（同锁内校验「只能删最后一集」，保持集号连续）
+
+        非最后一集 raise ValueError；不存在返回 False。
+        """
+        _require_episode_id(episode_id)
+        story = self.story_dir(script_session_id)
+        if not story:
+            return False
+        with self._story_lock(script_session_id):
+            episodes = self.list_episodes(script_session_id)
+            if not episodes or episodes[-1]["episode_id"] != episode_id:
+                raise ValueError("只能删除最后一集（保持集号连续）")
+            deleted = False
+            for path in (story / DIR_EPISODES).glob(f"{episode_id}-*.md"):
+                path.unlink(missing_ok=True)
+                deleted = True
+            if deleted:
+                self._refresh(story)
+        return deleted
+
     def delete_story_content(self, script_session_id: str) -> dict:
         """大纲重生成的级联清理：清空分集与实体（02/03），返回清理计数
 
@@ -759,6 +823,7 @@ class WorkspaceStore:
             "overlap": int(seg.get("overlap", 1)),
             "duration": int(seg.get("duration", 15)),
             "edited": bool(seg.get("edited", False)),
+            "configured": bool(seg.get("configured", False)),
             "reference_images": seg.get("reference_images") or [],
             "updated_at": _now(),
         }
@@ -775,6 +840,7 @@ class WorkspaceStore:
             "overlap": int(meta.get("overlap", 1)),
             "duration": int(meta.get("duration", 15)),
             "edited": bool(meta.get("edited", False)),
+            "configured": bool(meta.get("configured", False)),
             "prompt": _unescape_headings(sections.get("分镜提示词", "")),
             "reference_images": meta.get("reference_images") or [],
             "updated_at": meta.get("updated_at", ""),
@@ -857,7 +923,7 @@ class WorkspaceStore:
             meta, content = doc
             seg = self._segment_from_doc(path, meta, content)
             seg.update({k: v for k, v in fields.items() if k in (
-                "title", "outline", "mode", "overlap", "duration", "prompt", "reference_images",
+                "title", "outline", "mode", "overlap", "duration", "prompt", "reference_images", "configured",
             )})
             self._replace_doc_file(vs_dir, f"seg_{index:02d}", seg["title"], {
                 **{k: v for k, v in seg.items() if k not in ("outline", "prompt")},

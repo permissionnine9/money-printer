@@ -13,15 +13,13 @@ from backend.api.v1 import (
     sessions,
     steps,
     uploads,
-    assets,
     models,
     prompts,
     script_sessions,
     agent_runs,
 )
 from backend.config import override_src_config
-from backend.core.agents.script_workflow import ScriptWorkflowError
-from backend.core.agents.storyboard import StoryboardError
+from backend.core.errors import WorkflowError
 
 # 配置日志
 logging.basicConfig(
@@ -66,8 +64,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 # 全局业务异常处理（路由层无需逐个 try/except 转 HTTPException）
-@app.exception_handler(ScriptWorkflowError)
-@app.exception_handler(StoryboardError)
+@app.exception_handler(WorkflowError)
 async def business_error_handler(request: Request, exc: Exception):
     """工作流业务异常 → HTTP detail（状态码由异常携带，默认 400）"""
     return JSONResponse(status_code=getattr(exc, "status_code", 400), content={"detail": str(exc)})
@@ -77,7 +74,6 @@ async def business_error_handler(request: Request, exc: Exception):
 app.include_router(sessions.router, prefix="/api/v1/sessions", tags=["会话管理"])
 app.include_router(steps.router, prefix="/api/v1/steps", tags=["工作流步骤"])
 app.include_router(uploads.router, prefix="/api/v1/uploads", tags=["文件上传"])
-app.include_router(assets.router, prefix="/api/v1/assets", tags=["会话资产管理"])
 app.include_router(models.router, prefix="/api/v1/models", tags=["生图模型管理"])
 app.include_router(prompts.router, prefix="/api/v1/prompts", tags=["提示词管理"])
 app.include_router(script_sessions.router, prefix="/api/v1/script-sessions", tags=["剧本工作流"])

@@ -21,18 +21,27 @@ interface StepNavigatorProps {
 }
 
 export const StepNavigator: React.FC<StepNavigatorProps> = ({
+  session,
   currentStep,
   onStepChange,
 }) => {
   // 使用 currentStep（用户当前浏览的步骤）而不是 session.current_step（会话完成的步骤）
   const current = currentStep
 
+  // 第 3 步进度：已完成配置的分镜数 / 总数（如「分镜管理 5/10」）
+  const segments = session?.step_results?.storyboard_outline?.result_data?.segments || []
+  const items = STEPS.map((step, i) =>
+    i === 2 && segments.length > 0
+      ? { ...step, title: `${step.title} ${segments.filter((s: any) => s.configured).length}/${segments.length}` }
+      : step
+  )
+
   return (
     <div className={styles.container}>
       <Steps
         current={current}
         onChange={onStepChange}
-        items={STEPS}
+        items={items}
         className={styles.steps}
       />
     </div>

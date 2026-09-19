@@ -6,26 +6,23 @@
 
 业务异常（ScriptWorkflowError）由 main.py 的全局异常 handler 统一转 HTTP detail。
 """
-import asyncio
-import json
 import logging
 import uuid
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path
-from fastapi.responses import StreamingResponse
 
-from backend.core.agent_sdk import AgentEvent
-from backend.core.agents.script_workflow import ScriptWorkflow
+from backend.core.agent_sdk import sse_direct_response
 from backend.core.persistence.workspace_store import ENTITY_ID_PATTERN, EPISODE_ID_PATTERN
-from backend.core.services.workspace_projection import script_step_results, script_title
+from backend.core.services.step_payload import script_step_results, script_title
 from backend.deps import (
     get_model_manager,
     get_script_manager,
     get_script_session_manager,
+    get_script_workflow,
     get_workspace_store,
     load_script_session,
-    start_agent_run,
+    run_agent_endpoint,
 )
 from backend.schemas.script import (
     CreateScriptSessionRequest,
@@ -47,14 +44,6 @@ router = APIRouter()
 # 这里 422 快速失败防 glob 元字符注入）
 EPISODE_ID_PATH = Path(pattern=EPISODE_ID_PATTERN)
 ENTITY_ID_PATH = Path(pattern=ENTITY_ID_PATTERN)
-
-
-def get_script_workflow() -> ScriptWorkflow:
-    return ScriptWorkflow(
-        session_manager=get_script_session_manager(),
-        script_manager=get_script_manager(),
-        store=get_workspace_store(),
-    )
 
 
 # ==================== 会话 CRUD ====================
@@ -88,7 +77,7 @@ async def list_script_sessions():
     for info in sm.list_sessions(workflow_type="script"):
         sessions.append({
             "session_id": info["session_id"],
-            "title": script_title(sm, store, info["session_id"]),
+            "title": script_title(store, info["session_id"]),
             "created_at": info["created_at"],
             "updated_at": info["updated_at"],
             "current_step": info.get("current_step") or sm.STEPS[0],
@@ -125,64 +114,8 @@ async def delete_script_session(session_id: str, _info: dict = Depends(load_scri
 
 
 # ==================== SSE 形态 A：请求内直跑 ====================
+# 编排在 core/agent_sdk/direct.py（sse_direct_response），router 只留 HTTP 包装
 
-def _sse_direct(coro_factory):
-    """形态 A：SSE 响应内直接跑 agent，事件经队列转流；断开触发 interrupt 后取消"""
-    interrupt_holder: dict = {}
-
-    async def gen():
-        queue: asyncio.Queue = asyncio.Queue()
-        FINAL = object()
-
-        async def runner():
-            interrupt = asyncio.Event()
-            interrupt_holder["event"] = interrupt
-
-            def on_event(ev: AgentEvent) -> None:
-                queue.put_nowait(ev)
-
-            try:
-                data = await coro_factory(on_event, interrupt)
-                await queue.put(("final", data))
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # noqa: BLE001
-                logger.exception("[剧本SSE] agent 运行异常")
-                await queue.put(("final_err", str(e)))
-            finally:
-                await queue.put(FINAL)
-
-        task = asyncio.create_task(runner())
-        try:
-            while True:
-                item = await queue.get()
-                if item is FINAL:
-                    break
-                if isinstance(item, AgentEvent):
-                    yield item.to_sse(0)
-                else:
-                    kind, payload = item
-                    if kind == "final":
-                        yield f"data: {json.dumps({'type': 'final', 'data': payload}, ensure_ascii=False)}\n\n"
-                    else:
-                        yield f"data: {json.dumps({'type': 'error', 'message': payload}, ensure_ascii=False)}\n\n"
-        finally:
-            # 客户端断开：先 interrupt（优雅终止），5 秒宽限后强取消
-            event = interrupt_holder.get("event")
-            if event and not task.done():
-                event.set()
-                try:
-                    await asyncio.wait_for(asyncio.shield(task), timeout=5)
-                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                    task.cancel()
-            elif not task.done():
-                task.cancel()
-        yield "data: [DONE]\n\n"
-
-    return StreamingResponse(gen(), media_type="text/event-stream")
-
-
-# ==================== 第 1 步：故事构思 ====================
 
 @router.post("/{session_id}/ideation/message")
 async def ideation_message(session_id: str, body: IdeationMessageRequest, _info: dict = Depends(load_script_session)):
@@ -192,7 +125,7 @@ async def ideation_message(session_id: str, body: IdeationMessageRequest, _info:
     def factory(on_event, interrupt):
         return workflow.ideation_message(session_id, body.message, on_event, interrupt)
 
-    return _sse_direct(factory)
+    return sse_direct_response(factory)
 
 
 @router.post("/{session_id}/ideation/finalize")
@@ -203,7 +136,7 @@ async def ideation_finalize(session_id: str, _info: dict = Depends(load_script_s
     def factory(on_event, interrupt):
         return workflow.ideation_finalize(session_id, on_event, interrupt)
 
-    return _sse_direct(factory)
+    return sse_direct_response(factory)
 
 
 @router.get("/{session_id}/ideation")
@@ -236,15 +169,13 @@ async def generate_outline(session_id: str, body: OutlineGenerateRequest, _info:
     def factory(on_event, interrupt):
         return workflow.generate_outline(session_id, body.model_dump(), on_event, interrupt)
 
-    return start_agent_run("story_outline", factory)
+    return run_agent_endpoint("story_outline", factory)
 
 
 @router.get("/{session_id}/outline")
 async def get_outline(session_id: str, _info: dict = Depends(load_script_session)):
-    projected = script_step_results(
-        get_script_session_manager(), get_workspace_store(), session_id,
-    ).get("story_outline")
-    return {"success": True, "data": (projected or {}).get("result_data") or {}}
+    outline = get_workspace_store().read_outline(session_id) or {}
+    return {"success": True, "data": outline}
 
 
 @router.put("/{session_id}/outline")
@@ -270,7 +201,7 @@ async def generate_episodes(session_id: str, body: EpisodesGenerateRequest, _inf
             extra_instruction=body.extra_instruction,
         )
 
-    return start_agent_run("episode_design", factory)
+    return run_agent_endpoint("episode_design", factory)
 
 
 @router.post("/{session_id}/episodes/regenerate")
@@ -288,7 +219,7 @@ async def regenerate_episode(session_id: str, body: EpisodeRegenerateRequest, _i
             extra_instruction=body.extra_instruction,
         )
 
-    return start_agent_run(f"episode_redesign_{body.episode_id}", factory)
+    return run_agent_endpoint(f"episode_redesign_{body.episode_id}", factory)
 
 
 @router.get("/{session_id}/episodes")
@@ -318,11 +249,12 @@ async def update_episode(session_id: str, episode_id: Annotated[str, EPISODE_ID_
 @router.delete("/{session_id}/episodes/{episode_id}")
 async def delete_episode(session_id: str, episode_id: Annotated[str, EPISODE_ID_PATH], _info: dict = Depends(load_script_session)):
     """删除分集（仅允许删除最后一集，保持集号连续）"""
-    store = get_workspace_store()
-    episodes = store.list_episodes(session_id)
-    if not episodes or episodes[-1]["episode_id"] != episode_id:
-        raise HTTPException(status_code=400, detail="只能删除最后一集（保持集号连续）")
-    store.delete_episode(session_id, episode_id)
+    try:
+        ok = get_workspace_store().delete_last_episode(session_id, episode_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"分集不存在: {episode_id}")
     return {"success": True, "message": f"{episode_id} 已删除"}
 
 
@@ -334,74 +266,53 @@ async def list_entities(session_id: str, entity_type: Optional[str] = None, _inf
     return {"success": True, "data": {"entities": entities, "total": len(entities)}}
 
 
-@router.post("/{session_id}/entities")
-async def upsert_entity(session_id: str, body: EntityUpsertRequest, _info: dict = Depends(load_script_session)):
-    """人工新增/更新实体（ID 由后端分配）"""
-    try:
-        entity = get_workspace_store().upsert_entity(
-            session_id, body.entity_type, body.name, body.description, body.meta,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"success": True, "data": entity}
-
-
-@router.put("/{session_id}/entities/{entity_id}")
-async def update_entity(session_id: str, entity_id: Annotated[str, ENTITY_ID_PATH], body: EntityUpsertRequest, _info: dict = Depends(load_script_session)):
+def _upsert_entity(session_id: str, body: EntityUpsertRequest, entity_id: Optional[str] = None) -> dict:
+    """人工新增/更新实体：指定 entity_id 时先校验存在（404），ValueError 统一转 400"""
     store = get_workspace_store()
-    if not store.get_entity(session_id, entity_id):
+    if entity_id and not store.get_entity(session_id, entity_id):
         raise HTTPException(status_code=404, detail=f"实体不存在或不属于该会话: {entity_id}")
     try:
-        entity = store.upsert_entity(
+        return store.upsert_entity(
             session_id, body.entity_type, body.name, body.description, body.meta,
             entity_id=entity_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{session_id}/entities")
+async def upsert_entity(session_id: str, body: EntityUpsertRequest, _info: dict = Depends(load_script_session)):
+    """人工新增/更新实体（ID 由后端分配）"""
+    entity = _upsert_entity(session_id, body)
+    return {"success": True, "data": entity}
+
+
+@router.put("/{session_id}/entities/{entity_id}")
+async def update_entity(session_id: str, entity_id: Annotated[str, ENTITY_ID_PATH], body: EntityUpsertRequest, _info: dict = Depends(load_script_session)):
+    entity = _upsert_entity(session_id, body, entity_id)
     return {"success": True, "data": entity}
 
 
 @router.get("/{session_id}/entities/{entity_id}/references")
 async def get_entity_references(session_id: str, entity_id: Annotated[str, ENTITY_ID_PATH], _info: dict = Depends(load_script_session)):
     """引用反查：该实体在全部分集中的引用方式（人物/场景 → 出场；线索/伏笔 → action 值）"""
-    store = get_workspace_store()
-    entity = store.get_entity(session_id, entity_id)
-    if not entity or entity["script_session_id"] != session_id:
+    episodes = get_workspace_store().entity_references(session_id, entity_id)
+    if episodes is None:
         raise HTTPException(status_code=404, detail=f"实体不存在或不属于该会话: {entity_id}")
-    entity_type = entity["entity_type"]
-    episodes = []
-    for ep in store.list_episodes(session_id):
-        if entity_type == "character":
-            actions = ["出场"] if entity_id in ep["character_ids"] else []
-        elif entity_type == "scene":
-            actions = ["出场"] if entity_id in ep["scene_ids"] else []
-        else:
-            refs = ep["clue_refs"] if entity_type == "clue" else ep["foreshadow_refs"]
-            actions = [r.get("action", "") for r in refs if r.get("entity_id") == entity_id]
-        if actions:
-            episodes.append({"episode_id": ep["episode_id"], "title": ep["title"], "actions": actions})
     return {"success": True, "data": {"entity_id": entity_id, "episodes": episodes}}
 
 
 @router.delete("/{session_id}/entities/{entity_id}")
 async def delete_entity(session_id: str, entity_id: Annotated[str, ENTITY_ID_PATH], _info: dict = Depends(load_script_session)):
-    """删除实体（不属于本会话或被分集反向引用时拒绝）"""
+    """删除实体（不属于本会话或被分集反向引用时拒绝；校验+删除同锁原子完成）"""
     store = get_workspace_store()
-    if not store.get_entity(session_id, entity_id):
+    try:
+        ok = store.delete_entity_unreferenced(session_id, entity_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not ok:
         raise HTTPException(status_code=404, detail=f"实体不存在或不属于该会话: {entity_id}")
-    for episode in store.list_episodes(session_id):
-        referenced = (
-            episode["character_ids"] + episode["scene_ids"]
-            + [r.get("entity_id") for r in episode["clue_refs"]]
-            + [r.get("entity_id") for r in episode["foreshadow_refs"]]
-        )
-        if entity_id in referenced:
-            raise HTTPException(
-                status_code=400,
-                detail=f"实体 {entity_id} 被分集 {episode['episode_id']} 引用，先移除引用再删除",
-            )
-    ok = store.delete_entity(session_id, entity_id)
-    return {"success": ok, "message": f"实体 {entity_id} 已删除" if ok else "实体不存在"}
+    return {"success": True, "message": f"实体 {entity_id} 已删除"}
 
 
 # ==================== 第 4 步：定妆照 ====================
@@ -428,7 +339,7 @@ async def generate_lookbook(session_id: str, body: LookbookGenerateRequest, _inf
             body.model_config_id, on_event, interrupt,
         )
 
-    return start_agent_run("lookbook_images", factory)
+    return run_agent_endpoint("lookbook_images", factory)
 
 
 @router.post("/{session_id}/lookbook/complete")
@@ -459,7 +370,7 @@ async def regenerate_lookbook_image(session_id: str, image_id: str, body: Lookbo
             }
         return run()
 
-    return start_agent_run(f"lookbook_regen_{image_id}", factory)
+    return run_agent_endpoint(f"lookbook_regen_{image_id}", factory)
 
 
 @router.delete("/{session_id}/lookbook/{image_id}")

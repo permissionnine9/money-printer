@@ -8,6 +8,8 @@
  *
  * 分镜数据来源：优先旧 generate_segment_scripts（legacy 会话），否则读
  * storyboard_outline.segments（content=已生成提示词或分镜大纲）。
+ * 勾选分镜子集拼接 timeline 生成：仅「已完成配置」（configured）的分镜可勾选，
+ * 缺省全选；至少 1 个分镜 configured 即可进入本步骤（不再要求全部配置完）。
  */
 import React, { useState, useMemo } from 'react'
 import {
@@ -24,6 +26,9 @@ import {
   Modal,
   Descriptions,
   Collapse,
+  Checkbox,
+  Image,
+  Empty,
 } from 'antd'
 import {
   VideoCameraOutlined,
@@ -41,6 +46,7 @@ import { stepApi } from '@/api/client'
 import { useSessionStore } from '@/stores/sessionStore'
 import { usePolling } from '@/hooks/usePolling'
 import { LazyVideo } from '@/components/common/LazyVideo'
+import { imageSrc } from '@/utils/imageSrc'
 
 const { Text } = Typography
 
@@ -61,10 +67,25 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
   const [loading, setLoading] = useState(false)
   const { refreshSession } = useSessionStore()
 
-  // 检查前置步骤是否完成（步骤3 分镜管理）
-  const canExecute = useMemo(
-    () => session.completed_steps?.includes('segment_management') ?? false,
+  const outlineSegments: any[] = useMemo(
+    () => session.step_results?.storyboard_outline?.result_data?.segments || [],
     [session]
+  )
+  // legacy 会话（旧 segment_scripts 兜底）无 per-segment 配置完成概念，全部分镜可生成
+  const isLegacy = useMemo(
+    () => !!session.step_results?.generate_segment_scripts?.result_data?.segment_scripts?.length,
+    [session]
+  )
+  const configuredSegments = useMemo(
+    () => outlineSegments.filter((s) => s.configured),
+    [outlineSegments]
+  )
+  // 门禁：分镜大纲已完成 + ≥1 个分镜已「完成当前分镜配置」（legacy 会话放行全部分镜）
+  const canExecute = useMemo(
+    () =>
+      (session.completed_steps?.includes('storyboard_outline') ?? false) &&
+      (isLegacy || configuredSegments.length > 0),
+    [session, isLegacy, configuredSegments.length]
   )
 
   const stepResult = session.step_results?.generate_videos?.result_data
@@ -73,18 +94,42 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
   const finalVideo = stepResult?.final_video
   const timelineData = stepResult?.timeline_data
 
-  // 分镜数据源：优先旧分镜脚本（legacy 会话兜底），否则从分镜大纲映射
+  // 分镜数据源：优先旧分镜脚本（legacy 会话兜底），否则从分镜大纲映射（携带详情供弹窗展示）
   const segments: any[] = useMemo(() => {
     const legacy = session.step_results?.generate_segment_scripts?.result_data?.segment_scripts
     if (legacy?.length) return legacy
-    const outlineSegments = session.step_results?.storyboard_outline?.result_data?.segments || []
     const params = session.step_results?.select_episode?.result_data?.video_params || {}
     return outlineSegments.map((seg: any, i: number) => ({
       index: seg.index ?? i,
+      title: seg.title || '',
+      configured: !!seg.configured,
+      mode: seg.mode,
+      overlap: seg.overlap,
+      duration: seg.duration || params.max_segment_duration || 15,
       content: seg.prompt || seg.outline || '',
-      duration: params.max_segment_duration || 15,
+      prompt: seg.prompt || '',
+      outline: seg.outline || '',
+      reference_images: seg.reference_images || [],
     }))
-  }, [session])
+  }, [session, outlineSegments])
+
+  // 可勾选参与生成的分镜（configured 子集；legacy 全量）
+  const selectableIndexes = useMemo(
+    () => (isLegacy ? segments.map((s) => s.index) : configuredSegments.map((s) => s.index)),
+    [isLegacy, segments, configuredSegments]
+  )
+  // 勾选状态：null=默认全选可勾选分镜；手动改选后固定
+  const [selectedIndexes, setSelectedIndexes] = useState<number[] | null>(null)
+  const effectiveSelected = useMemo(
+    () => (selectedIndexes ?? selectableIndexes).filter((i) => selectableIndexes.includes(i)),
+    [selectedIndexes, selectableIndexes]
+  )
+  // 分镜详情弹窗（火车块点击打开）
+  const [detailIndex, setDetailIndex] = useState<number | null>(null)
+  const detailSegment = useMemo(
+    () => segments.find((s) => s.index === detailIndex) || null,
+    [segments, detailIndex]
+  )
 
   // 检查是否有正在进行的视频生成任务
   const hasPendingVideos = videos.length > 0 && videos.some((v: any) => v.task_status === 'pending')
@@ -104,13 +149,13 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
     }
   )
 
-  // 计算视频生成预览信息
+  // 计算视频生成预览信息（基于勾选分镜子集）
   const calculateVideoPreviewInfo = () => {
-    const totalSegments = segments.length
+    const selected = segments.filter((s) => effectiveSelected.includes(s.index))
     let totalDuration = 0
     const segmentDetails: Array<{ index: number; content: string; duration: number }> = []
 
-    segments.forEach((segment: any) => {
+    selected.forEach((segment: any) => {
       const duration = segment.duration || 5.0
       totalDuration += duration
       segmentDetails.push({
@@ -120,7 +165,7 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
       })
     })
 
-    return { totalSegments, totalDuration, segmentDetails }
+    return { totalSegments: selected.length, totalDuration, segmentDetails }
   }
 
   const videoPreviewInfo = calculateVideoPreviewInfo()
@@ -193,7 +238,7 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
       onOk: async () => {
         setLoading(true)
         try {
-          const response = await stepApi.generateVideos(session.session_id)
+          const response = await stepApi.generateVideos(session.session_id, effectiveSelected)
           if (response.success) {
             message.loading('视频生成任务已启动，正在生成中...', 2)
             // 立即刷新以获取pending状态，触发轮询
@@ -366,11 +411,252 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
     }
   }
 
+  // 分镜视频状态映射（segment_index → 该分镜本次生成的状态；无记录=未参与本次生成）
+  const videoBySegmentIndex = useMemo(() => {
+    const m = new Map<number, any>()
+    videos.forEach((v: any) => m.set(v.segment_index, v))
+    return m
+  }, [videos])
+
+  // 分镜详情弹窗（两个分支共用：火车块点击打开）
+  const detailModalNode = (
+    <Modal
+      title={`分镜 ${(detailSegment?.index ?? 0) + 1}${detailSegment?.title ? `《${detailSegment.title}》` : ''}`}
+      open={detailIndex !== null}
+      footer={null}
+      onCancel={() => setDetailIndex(null)}
+      width={720}
+      destroyOnHidden
+    >
+      {detailSegment && (
+        <div style={{ maxHeight: 520, overflowY: 'auto' }}>
+          <Descriptions bordered size="small" column={2} style={{ marginBottom: 16 }}>
+            <Descriptions.Item label="分镜形式">{detailSegment.mode || '—'}</Descriptions.Item>
+            <Descriptions.Item label="与上一分镜 overlap">
+              {detailSegment.overlap != null ? `${detailSegment.overlap} 秒` : '—'}
+            </Descriptions.Item>
+            <Descriptions.Item label="时长">{detailSegment.duration ? `${detailSegment.duration} 秒` : '—'}</Descriptions.Item>
+            <Descriptions.Item label="配置状态">
+              {detailSegment.configured ? (
+                <Tag color="success">已完成配置</Tag>
+              ) : (
+                <Tag>未完成配置</Tag>
+              )}
+            </Descriptions.Item>
+          </Descriptions>
+
+          {/* 本分镜的生成结果（已参与生成的分镜；整段视频共用同一 video_path） */}
+          {(() => {
+            const video = videoBySegmentIndex.get(detailSegment.index)
+            if (!video) return null
+            const status = getVideoStatus(video)
+            return (
+              <Card size="small" style={{ marginBottom: 16 }} title={
+                <Space size={8}>
+                  <span>本分镜生成结果</span>
+                  {renderStatusTag(status)}
+                  {video.duration ? <Tag>{video.duration} 秒</Tag> : null}
+                </Space>
+              }>
+                {video.video_path && !video.video_path.startsWith('生成失败') && status === 'completed' ? (
+                  <LazyVideo
+                    src={getMediaSrc(video.video_path)}
+                    poster={video.first_frame_path ? getMediaSrc(video.first_frame_path) : undefined}
+                    placeholderHeight={200}
+                  />
+                ) : status === 'pending' ? (
+                  <div style={{ height: 160, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: '#f5f5f5' }}>
+                    <Spin />
+                    <Text style={{ marginTop: 12 }}>视频生成中...</Text>
+                  </div>
+                ) : (
+                  <div style={{ height: 160, display: 'flex', alignItems: 'center', justifyContent: 'center', background: status === 'cancelled' ? '#fffbe6' : '#fff2f0' }}>
+                    <Text type={status === 'cancelled' ? 'warning' : 'danger'}>
+                      {status === 'cancelled' ? '已取消' : '生成失败'}
+                    </Text>
+                  </div>
+                )}
+              </Card>
+            )
+          })()}
+
+          <Card size="small" title="分镜脚本（提示词优先，无则显示大纲）" style={{ marginBottom: 16 }}>
+            <Text style={{ whiteSpace: 'pre-wrap' }}>
+              {detailSegment.prompt || detailSegment.outline || detailSegment.content || '（无）'}
+            </Text>
+          </Card>
+
+          <Card size="small" title={`参考素材图（${detailSegment.reference_images?.length || 0} 张）`}>
+            {detailSegment.reference_images?.length ? (
+              <Row gutter={[12, 12]}>
+                {detailSegment.reference_images.map((r: any) => (
+                  <Col key={r.image_id} xs={12} sm={8}>
+                    <Image
+                      src={imageSrc(r.image_path)}
+                      alt={r.description}
+                      width="100%"
+                      height={120}
+                      style={{ objectFit: 'cover', borderRadius: 6 }}
+                      fallback="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+                    />
+                    <Text type="secondary" style={{ fontSize: 12, display: 'block' }} ellipsis>
+                      {r.description || r.image_id}
+                    </Text>
+                  </Col>
+                ))}
+              </Row>
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无参考素材图" />
+            )}
+          </Card>
+        </div>
+      )}
+    </Modal>
+  )
+
+  // 火车轨道：横向排列的分镜块，相邻块视觉重叠（呼应 overlap 衔接），点击块查看详情。
+  // interactive=true 生成前勾选；false 结果视图只读（展示各分镜本次生成状态）。
+  const renderTrain = (interactive: boolean) => (
+    <div style={{ marginBottom: 16, padding: '12px 12px 4px', background: '#fafafa', borderRadius: 4, overflowX: 'auto' }}>
+      <Space style={{ marginBottom: 8 }}>
+        <Text strong>{interactive ? '选择分镜：' : '分镜轨道：'}</Text>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {interactive
+            ? `已选 ${effectiveSelected.length}/${selectableIndexes.length} 个可生成分镜（共 ${segments.length} 个分镜）；块间重叠示意 overlap 衔接，点击分镜块查看参数/脚本/参考图`
+            : `本次生成 ${videoBySegmentIndex.size}/${segments.length} 个分镜；点击分镜块查看参数/脚本/参考图`}
+        </Text>
+      </Space>
+      <div style={{ display: 'flex', alignItems: 'stretch', padding: '8px 4px 12px', minWidth: 0 }}>
+        {segments.map((seg: any, i: number) => {
+          const selectable = selectableIndexes.includes(seg.index)
+          const checked = effectiveSelected.includes(seg.index)
+          const video = videoBySegmentIndex.get(seg.index)
+          const inThisRun = !!video
+          // 未配置完成：空白虚线占位块，不可交互
+          if (!selectable) {
+            return (
+              <div
+                key={seg.index}
+                style={{
+                  width: 150,
+                  flexShrink: 0,
+                  marginLeft: i === 0 ? 0 : -24,
+                  zIndex: i,
+                  border: '1px dashed #d9d9d9',
+                  borderRadius: 6,
+                  padding: '10px 12px',
+                  background: 'repeating-linear-gradient(45deg, #fafafa, #fafafa 6px, #f0f0f0 6px, #f0f0f0 12px)',
+                  minHeight: 92,
+                  opacity: 0.8,
+                }}
+              >
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  分镜 {seg.index + 1}
+                </Text>
+                <div style={{ marginTop: 8, color: '#bfbfbf', fontSize: 12 }}>未完成配置（占位）</div>
+              </div>
+            )
+          }
+          // 结果视图：参与本次生成的块按生成状态着色；未参与的块灰化
+          const resultColor = interactive
+            ? undefined
+            : inThisRun
+              ? getVideoStatus(video) === 'completed'
+                ? '#52c41a'
+                : getVideoStatus(video) === 'pending'
+                  ? '#1677ff'
+                  : '#ff4d4f'
+              : '#d9d9d9'
+          return (
+            <div
+              key={seg.index}
+              onClick={() => setDetailIndex(seg.index)}
+              style={{
+                width: 150,
+                flexShrink: 0,
+                marginLeft: i === 0 ? 0 : -24,
+                zIndex: i,
+                border: `2px solid ${
+                  interactive
+                    ? checked
+                      ? '#1677ff'
+                      : '#91caff'
+                    : resultColor
+                }`,
+                background: interactive
+                  ? checked
+                    ? '#e6f4ff'
+                    : '#fff'
+                  : inThisRun
+                    ? '#f6ffed'
+                    : '#fafafa',
+                borderRadius: 6,
+                padding: '10px 12px',
+                minHeight: 92,
+                cursor: 'pointer',
+                boxShadow: interactive && checked ? '0 2px 6px rgba(22,119,255,0.25)' : 'none',
+                transition: 'all 0.2s',
+                opacity: !interactive && !inThisRun ? 0.65 : 1,
+              }}
+              title="点击查看分镜详情"
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                {interactive ? (
+                  <Checkbox
+                    checked={checked}
+                    disabled={isGenerating}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) =>
+                      setSelectedIndexes(
+                        e.target.checked
+                          ? [...effectiveSelected, seg.index]
+                          : effectiveSelected.filter((idx: number) => idx !== seg.index)
+                      )
+                    }
+                  />
+                ) : inThisRun ? (
+                  renderStatusTag(getVideoStatus(video))
+                ) : null}
+                <Text strong style={{ fontSize: 12 }}>
+                  分镜 {seg.index + 1}
+                </Text>
+              </div>
+              <div
+                style={{
+                  marginTop: 6,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {seg.title || seg.content?.substring(0, 12) || '（无标题）'}
+              </div>
+              <div style={{ marginTop: 4 }}>
+                <Tag style={{ fontSize: 11 }} color={checked || inThisRun ? 'blue' : 'default'}>
+                  {seg.duration || 15}s
+                </Tag>
+                {seg.overlap > 0 && (
+                  <Tag style={{ fontSize: 11 }} color="purple">
+                    ↔{seg.overlap}s
+                  </Tag>
+                )}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+
   if (!canExecute) {
     return (
       <Card title="生成视频" style={{ marginTop: 16 }}>
         <div style={{ marginBottom: 16 }}>
-          <Text type="secondary">请先完成第 3 步：分镜管理（点击「完成分镜配置」）</Text>
+          <Text type="secondary">
+            请先完成第 2 步：分镜大纲，并在第 3 步对至少 1 个分镜点击「完成当前分镜配置」
+          </Text>
         </div>
       </Card>
     )
@@ -457,6 +743,9 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
         }
         style={{ marginTop: 16 }}
       >
+        {/* 分镜轨道：各分镜本次生成状态总览 */}
+        {renderTrain(false)}
+
         {/* ===== 最终视频（远程 ComfyUI 整段生成） ===== */}
         {finalVideo?.video_path && !finalVideo.video_path.startsWith('生成失败') && (
           <Card
@@ -532,94 +821,31 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
             )}
           </Card>
         )}
-        <Row gutter={[16, 16]}>
-          {videos.map((video: any, index: number) => (
-            <Col xs={24} sm={12} key={index}>
-              <Card
-                size="small"
-                title={
-                  <span>
-                    <Tag color="blue">视频 {index + 1}</Tag>
-                    {renderStatusTag(getVideoStatus(video))}
-                  </span>
-                }
-              >
-                {video.video_path && !video.video_path.startsWith('生成失败') && getVideoStatus(video) === 'completed' ? (
-                  <div>
-                    <LazyVideo
-                      src={getMediaSrc(video.video_path)}
-                      poster={video.first_frame_path ? getMediaSrc(video.first_frame_path) : undefined}
-                      placeholderHeight={200}
-                    />
-                  </div>
-                ) : getVideoStatus(video) === 'pending' ? (
-                  <div
-                    style={{
-                      height: 200,
-                      display: 'flex',
-                      flexDirection: 'column',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      background: '#f5f5f5',
-                    }}
-                  >
-                    <Spin />
-                    <Text style={{ marginTop: 16 }}>视频生成中...</Text>
-                  </div>
-                ) : getVideoStatus(video) === 'cancelled' ? (
-                  <div
-                    style={{
-                      height: 200,
-                      display: 'flex',
-                      flexDirection: 'column',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      background: '#fffbe6',
-                    }}
-                  >
-                    <StopOutlined style={{ fontSize: 32, color: '#faad14' }} />
-                    <Text type="warning" style={{ marginTop: 8 }}>已取消</Text>
-                  </div>
-                ) : (
-                  <div
-                    style={{
-                      height: 200,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      background: '#fff2f0',
-                    }}
-                  >
-                    <Text type="danger">生成失败</Text>
-                  </div>
-                )}
-              </Card>
-            </Col>
-          ))}
-        </Row>
-
         {/* 完成后显示合并提示 */}
         {isAllCompleted && (
           <Card style={{ marginTop: 16, background: '#f6ffed', border: '1px solid #b7eb8f' }}>
             <div style={{ textAlign: 'center' }}>
               <CheckCircleOutlined style={{ fontSize: 32, color: '#52c41a' }} />
               <div style={{ marginTop: 8 }}>
-                <Text strong>所有视频片段生成完成！</Text>
+                <Text strong>整段视频生成完成！</Text>
               </div>
-              <Text type="secondary">您可以下载各个视频片段，或使用视频编辑软件进行合并。</Text>
+              <Text type="secondary">各分镜的生成情况可点击上方「分镜轨道」的分镜块查看。</Text>
             </div>
           </Card>
         )}
+      {detailModalNode}
       </Card>
     )
   }
 
-  // 初始状态：显示生成按钮
+  // 初始状态：分镜勾选列表 + 生成按钮
   return (
     <Card title="生成视频" style={{ marginTop: 16 }}>
       <div style={{ marginBottom: 16 }}>
-        <Text>基于分镜提示词与首帧素材，通过远程 ComfyUI 整段生成视频。</Text>
+        <Text>基于分镜提示词与参考素材，通过远程 ComfyUI 整段生成视频。勾选要参与生成的分镜（须为已完成配置的分镜）。</Text>
       </div>
+
+      {segments.length > 0 && renderTrain(true)}
 
       {/* 预览统计信息 */}
       {segments.length > 0 && (
@@ -657,12 +883,14 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
           icon={<VideoCameraOutlined />}
           onClick={handleGenerate}
           loading={isGenerating}
-          disabled={isGenerating}
+          disabled={isGenerating || effectiveSelected.length === 0}
           size="large"
         >
           {isGenerating ? '生成中...' : '开始生成视频'}
         </Button>
       </Spin>
+
+      {detailModalNode}
     </Card>
   )
 }

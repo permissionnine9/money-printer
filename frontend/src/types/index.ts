@@ -179,6 +179,7 @@ export interface StoryboardSegment {
   duration?: number  // 建议时长（秒，分镜大纲阶段 LLM 分析；第 2 步导图展示、第 3 步参考）
   prompt: string   // 已生成的分镜提示词
   reference_images?: SegmentReferenceImage[]  // 参考素材图（仅全能参考模式）
+  configured?: boolean  // 用户手动确认当前分镜配置完成（修改配置后自动回退）
 }
 
 // 素材池条目（选择弹窗 / @ 引用候选）
@@ -217,17 +218,6 @@ export interface FinalVideo {
   mock: boolean
   overlap_seconds: number
   segment_count: number
-}
-
-// 会话资产（音频/图片素材）
-export interface SessionAsset {
-  asset_id: string
-  session_id: string
-  asset_type: 'audio' | 'image'
-  name: string
-  file_path: string
-  meta: Record<string, any>
-  created_at: string
 }
 
 // 生图/chat/agent 模型配置

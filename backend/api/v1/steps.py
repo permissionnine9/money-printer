@@ -8,7 +8,6 @@
 
 业务异常（StoryboardError）由 main.py 的全局异常 handler 统一转 HTTP detail。
 """
-import asyncio
 import logging
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 
@@ -19,6 +18,8 @@ from backend.schemas.steps import (
     SegmentConfigUpdateRequest,
     SegmentReferenceImagesUpdateRequest,
     SegmentMaterialGenerateRequest,
+    SegmentCompleteRequest,
+    GenerateVideosRequest,
     StepResponse,
 )
 from backend.deps import (
@@ -26,7 +27,7 @@ from backend.deps import (
     get_storyboard_workflow,
     get_workflow,
     load_video_session,
-    start_agent_run,
+    run_agent_endpoint,
 )
 from backend.core.persistence.session_manager import SessionManager
 
@@ -53,8 +54,6 @@ async def step_1_select_episode(
     result = get_workflow().step_select_episode(
         session_id, request.script_session_id, request.episode_id, video_params,
     )
-    if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error", "选集失败"))
 
     result_data = session_manager.get_step_result(session_id, "select_episode")
     return StepResponse(
@@ -84,7 +83,7 @@ async def generate_storyboard_outline(
     def factory(on_event, interrupt):
         return workflow.generate_outline(session_id, extra_prompt, on_event, interrupt)
 
-    return start_agent_run("storyboard_outline", factory)
+    return run_agent_endpoint("storyboard_outline", factory)
 
 
 @router.put("/{session_id}/storyboard-outline")
@@ -122,6 +121,18 @@ async def get_material_pool(
     """步骤3：素材池（选择弹窗分组数据：定妆照 / 本集素材 / 其他集素材，不跨 story）"""
     result = get_storyboard_workflow().list_material_pool(session_id)
     return {"success": True, "data": result}
+
+
+@router.delete("/{session_id}/materials/{image_id}")
+async def delete_material_image(
+    session_id: str,
+    image_id: str,
+    _session_info: dict = Depends(load_video_session),
+):
+    """步骤3：删除分集素材图（素材池记录 + 磁盘归档文件；不清理分镜文件中的引用）"""
+    selected = get_workflow().get_selected_episode(session_id)
+    get_storyboard_workflow().delete_material(selected["script_session_id"], image_id)
+    return {"success": True, "data": {"deleted": True, "image_id": image_id}}
 
 
 @router.put("/{session_id}/storyboard-segments/{index}/reference-images")
@@ -169,7 +180,7 @@ async def generate_segment_material(
             interrupt=interrupt,
         )
 
-    return start_agent_run(f"segment_material_{index}", factory)
+    return run_agent_endpoint(f"segment_material_{index}", factory)
 
 
 @router.get("/{session_id}/storyboard-segments/{index}/prompt-context")
@@ -195,93 +206,41 @@ async def generate_segment_prompt(
     def factory(on_event, interrupt):
         return workflow.generate_segment_prompt(session_id, index, on_event, interrupt)
 
-    return start_agent_run(f"segment_prompt_{index}", factory)
+    return run_agent_endpoint(f"segment_prompt_{index}", factory)
 
 
-@router.post("/{session_id}/segment-management/complete", response_model=StepResponse)
-async def complete_segment_management(
+@router.post("/{session_id}/storyboard-segments/{index}/complete", response_model=StepResponse)
+async def complete_segment(
     session_id: str,
+    index: int,
+    body: SegmentCompleteRequest | None = None,
     _session_info: dict = Depends(load_video_session),
 ):
-    """步骤3：完成分镜配置（推进到步骤4：视频生成）"""
-    result = get_storyboard_workflow().complete_segment_management(session_id)
-    return StepResponse(success=True, message="分镜配置已完成", data=result)
+    """步骤3：完成/取消完成单个分镜的配置（≥1 个分镜完成即可进入步骤4）"""
+    completed = body.completed if body else True
+    result = get_storyboard_workflow().complete_segment(session_id, index, completed)
+    message = "分镜配置已完成" if completed else "分镜配置已取消完成"
+    return StepResponse(success=True, message=message, data=result)
 
 
 # ==================== 步骤 4：生成视频 ====================
-
-def _initial_video(segment_index: int, old: dict | None = None) -> dict:
-    """构建单个视频的 pending 初始状态；old 有旧视频时保留备份字段"""
-    video = {
-        "segment_index": segment_index,
-        "video_id": "",
-        "video_path": "",
-        "duration": 0.0,
-        "prompt": "",
-        "task_status": "pending",
-    }
-    if old and old.get("video_path"):
-        video["_old_video_path"] = old.get("video_path")  # 备份旧路径
-        video["_old_video_id"] = old.get("video_id", "")
-    return video
-
-
-def _build_initial_videos(segments: list[dict], existing_videos: list[dict] | None = None) -> list[dict]:
-    """构建视频生成初始状态（所有视频标记为 pending；有旧视频的保留备份）"""
-    existing_videos = existing_videos or []
-    initial = []
-    for segment in segments:
-        seg_idx = segment.get("index", 0)
-        existing = next((v for v in existing_videos if v.get("segment_index") == seg_idx), None)
-        initial.append(_initial_video(seg_idx, existing))
-    return initial
-
-
-def _submit_video_background_task(background_tasks: BackgroundTasks, session_id: str, log_label: str) -> None:
-    """提交视频生成后台任务（asyncio.run 包装，进度落盘由 workflow 负责）"""
-    async def execute_step():
-        logger.info(f"[API] 后台任务启动 - 开始{log_label} - 会话: {session_id[:8]}...")
-        await get_workflow().step_generate_videos(session_id)
-        logger.info(f"[API] 后台任务完成 - {log_label}完成 - 会话: {session_id[:8]}...")
-
-    def run_async_task():
-        asyncio.run(execute_step())
-
-    background_tasks.add_task(run_async_task)
-
 
 @router.post("/{session_id}/videos", response_model=StepResponse)
 async def step_4_generate_videos(
     session_id: str,
     background_tasks: BackgroundTasks,
-    session_manager: SessionManager = Depends(get_session_manager),
+    body: GenerateVideosRequest | None = None,
     _session_info: dict = Depends(load_video_session),
 ):
-    """步骤4：生成视频（后台任务 + 前端轮询）"""
+    """步骤4：生成视频（勾选分镜子集拼接 timeline；后台任务 + 前端轮询）"""
     logger.info(f"[API] 步骤4 - 生成视频 - 会话: {session_id[:8]}...")
 
-    can_execute, reason = session_manager.can_execute_step(session_id, "generate_videos")
-    if not can_execute:
-        raise HTTPException(status_code=400, detail=reason or "请先完成步骤3：分镜管理")
-
     workflow = get_workflow()
-    segments = workflow._get_video_segments(session_id)
-    if not segments:
-        raise HTTPException(status_code=400, detail="无可用分镜数据，请先生成分镜大纲")
-
-    initial_data = {
-        "generated_videos": _build_initial_videos(segments),
-        "video_count": len(segments),
-        "success_count": 0,
-        "failed_count": 0,
-        "final_video": None,   # ComfyUI 整段生成的最终视频（完成后填充）
-        "_generating": True,   # 标记为生成中
-        "_success": False      # 标记为未完成
-    }
-    session_manager.save_step_result(session_id, "generate_videos", initial_data, success=False)
+    segment_indexes = body.segment_indexes if body else None
+    initial_data = workflow.mark_videos_generating(session_id, segment_indexes=segment_indexes)
     logger.info(f"[API] 已保存生成中状态，开始后台生成视频 - 会话: {session_id[:8]}...")
 
-    _submit_video_background_task(background_tasks, session_id, "生成视频")
+    background_tasks.add_task(workflow.run_generate_videos_sync, session_id)
     logger.info(f"[API] 视频生成任务已提交到后台队列 - 会话: {session_id[:8]}...")
 
     return StepResponse(
@@ -321,43 +280,17 @@ async def step_4_cancel_videos(
 async def step_4_regenerate_videos(
     session_id: str,
     background_tasks: BackgroundTasks,
-    session_manager: SessionManager = Depends(get_session_manager),
     _session_info: dict = Depends(load_video_session),
 ):
     """步骤4重新生成：保留旧视频数据作为备份，标记为待重新生成状态"""
     logger.info(f"[API] 步骤4 - 重新生成视频 - 会话: {session_id[:8]}...")
 
-    if not session_manager.is_step_completed(session_id, "generate_videos"):
-        raise HTTPException(status_code=400, detail="步骤4尚未完成，请使用正常生成接口")
-    if not session_manager.is_step_completed(session_id, "segment_management"):
-        raise HTTPException(status_code=400, detail="请先完成步骤3：分镜管理")
-
-    reset = session_manager.reset_current_step(session_id, "generate_videos")
-    if not reset:
-        raise HTTPException(status_code=500, detail="重置步骤状态失败")
-
     workflow = get_workflow()
-    segments = workflow._get_video_segments(session_id)
-    existing_result = session_manager.get_step_result(session_id, "generate_videos")
-    existing_videos = existing_result['result_data'].get('generated_videos', []) if existing_result else []
-
-    # 创建待重新生成状态（有旧视频的保留备份）
-    initial_videos = _build_initial_videos(segments, existing_videos)
-    backed_up_count = sum(1 for v in initial_videos if '_old_video_path' in v)
-
-    initial_data = {
-        "generated_videos": initial_videos,
-        "video_count": len(initial_videos),
-        "success_count": 0,
-        "failed_count": 0,
-        "_generating": True,
-        "_success": False,
-        "_backed_up_count": backed_up_count,
-    }
-    session_manager.save_step_result(session_id, "generate_videos", initial_data, success=False)
+    initial_data = workflow.mark_videos_generating(session_id, regenerate=True)
+    backed_up_count = initial_data.get("_backed_up_count", 0)
     logger.info(f"[API] 已标记为待重新生成状态（保留 {backed_up_count} 个旧视频作为备份）- 会话: {session_id[:8]}...")
 
-    _submit_video_background_task(background_tasks, session_id, "重新生成视频")
+    background_tasks.add_task(workflow.run_generate_videos_sync, session_id)
 
     message = "视频重新生成任务已启动，正在生成中..."
     if backed_up_count > 0:
@@ -369,41 +302,14 @@ async def step_4_regenerate_videos(
 @router.post("/{session_id}/restore-videos-backup", response_model=StepResponse)
 async def step_4_restore_videos_backup(
     session_id: str,
-    session_manager: SessionManager = Depends(get_session_manager),
     _session_info: dict = Depends(load_video_session),
 ):
     """恢复备份的视频（将 _old_video_path 恢复为 video_path）"""
-    existing_result = session_manager.get_step_result(session_id, "generate_videos")
-    if not existing_result:
-        raise HTTPException(status_code=404, detail="未找到视频数据")
-
-    result_data = existing_result['result_data']
-    generated_videos = result_data.get('generated_videos', [])
-
-    restored_count = 0
-    for video in generated_videos:
-        old_path = video.get('_old_video_path')
-        if old_path:
-            video['video_path'] = old_path
-            video['video_id'] = video.get('_old_video_id', '')
-            video['task_status'] = 'completed'
-            video['duration'] = 5.0  # 恢复默认时长
-            restored_count += 1
-
-    if restored_count == 0:
-        raise HTTPException(status_code=400, detail="没有可恢复的备份数据")
-
-    result_data['success_count'] = restored_count
-    result_data['failed_count'] = len(generated_videos) - restored_count
-    result_data['_generating'] = False
-    result_data['_success'] = (restored_count == len(generated_videos))
-
-    session_manager.save_step_result(session_id, "generate_videos", result_data, success=True)
-    logger.info(f"[API] 已恢复 {restored_count} 个视频的备份 - 会话: {session_id[:8]}...")
+    result_data = get_workflow().restore_videos_backup(session_id)
 
     return StepResponse(
         success=True,
-        message=f"已恢复 {restored_count} 个视频的备份",
+        message=f"已恢复 {result_data['success_count']} 个视频的备份",
         data=result_data,
     )
 

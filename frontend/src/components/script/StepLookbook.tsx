@@ -57,7 +57,7 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
     void loadImages()
     modelApi
       .list('image')
-      .then((r) => setModels(r.models || []))
+      .then((r) => setModels(r.data?.models || []))
       .catch(() => setModels([]))
   }, [loadEntities, loadImages])
 

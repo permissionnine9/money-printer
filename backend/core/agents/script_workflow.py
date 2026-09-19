@@ -7,24 +7,29 @@
 """
 import asyncio
 import json
-import logging
 import re
 from typing import Optional
 
 from claude_agent_sdk import create_sdk_mcp_server, tool as sdk_tool
 
-from backend.core.agent_sdk import READ_ONLY_TOOLS, AgentEvent, AgentRunOptions, run_agent, run_conversation
+from backend.core.agent_sdk import AgentEvent, run_conversation
 from backend.core.agents.system_prompts import LOOKBOOK_PROMPTS_SYSTEM, SCRIPT_OUTLINE_SYSTEM
 from backend.core.agents.workflow_base import OnEvent, StepWorkflowBase
-from backend.core.config import IMAGE_REQUEST_TIME_GAP
+from backend.core.errors import WorkflowError
 from backend.core.models import VideoParams
 from backend.core.persistence import SessionManager
 from backend.core.persistence.script_manager import ScriptManager
 from backend.core.persistence.workspace_store import WorkspaceStore
+from backend.core.services.agent_step_service import AgentStepService
 from backend.core.services.image_service import build_image_service_from_model_config
+from backend.core.services.image_task_service import ImageTaskService, ImageTaskSpec
+from backend.core.services.regeneration import cascade_regenerate
+from backend.core.services.workspace_sections import (
+    load_story_logic,
+    workspace_envelope,
+    workspace_section,
+)
 from backend.core.utils.json_parser import extract_json_array, extract_markdown, is_valid_mindmap
-
-logger = logging.getLogger(__name__)
 
 # 定妆照生图默认参数（锚点图，全剧统一）
 LOOKBOOK_VIDEO_PARAMS = VideoParams(resolution="1080p", aspect_ratio="16:9")
@@ -42,12 +47,8 @@ EPISODE_TURNS_BASE, EPISODE_TURNS_PER = 10, 3
 EPISODE_TURNS_MIN, EPISODE_TURNS_MAX = 20, 200
 
 
-class ScriptWorkflowError(Exception):
+class ScriptWorkflowError(WorkflowError):
     """剧本工作流业务错误（返回给前端 detail；status_code 供全局异常 handler 使用）"""
-
-    def __init__(self, message: str, status_code: int = 400):
-        super().__init__(message)
-        self.status_code = status_code
 
 
 class ScriptWorkflow(StepWorkflowBase):
@@ -58,22 +59,16 @@ class ScriptWorkflow(StepWorkflowBase):
     def __init__(
         self,
         session_manager: SessionManager,
-        script_manager: Optional[ScriptManager] = None,
-        store: Optional[WorkspaceStore] = None,
+        script_manager: ScriptManager,
+        store: WorkspaceStore,
     ):
         super().__init__(session_manager)
         # scm 仅管 DB 侧任务表（定妆照/分集素材图状态机）；markdown 产物权威源为 store
-        self.scm = script_manager or ScriptManager()
-        if store is None:
-            from backend.deps import get_workspace_store
-            store = get_workspace_store()
+        self.scm = script_manager
         self.store = store
-
-    def _envelope(self, session_id: str, rel: str) -> dict:
-        """步骤结果薄 envelope：内容产物落 workspace 文件，DB 行只留定位指针"""
-        story = self.store.story_dir(session_id)
-        base = f"workspace/{story.name}" if story else "workspace"
-        return {"_artifact": "workspace", "path": f"{base}/{rel}"}
+        # agent 步骤运行封装 / 生图任务状态机（业务异常统一为 ScriptWorkflowError）
+        self.agent_steps = AgentStepService(ScriptWorkflowError)
+        self.image_tasks = ImageTaskService(ScriptWorkflowError)
 
     # ==================== 通用 ====================
 
@@ -192,7 +187,7 @@ class ScriptWorkflow(StepWorkflowBase):
         interrupt: Optional[asyncio.Event] = None,
     ) -> dict:
         """生成故事大纲（单次 agent run）；重生成会级联清下游"""
-        story_logic = self._load_story_logic(session_id)
+        story_logic = load_story_logic(self.store, self.sm, session_id)
 
         req_lines = []
         if requirements.get("episode_count"):
@@ -206,36 +201,33 @@ class ScriptWorkflow(StepWorkflowBase):
             req_lines.append(f"- 补充要求：{extra}")
         requirements_text = "## 生成要求\n" + "\n".join(req_lines) if req_lines else ""
 
-        user_prompt = self.prompts.render("script_outline", {
-            "requirements": requirements_text,
-            "story_logic": story_logic,
-            "extra_instruction": "",
-        })
+        def _parse_outline(text: str) -> str:
+            mindmap = extract_markdown(text)
+            if not is_valid_mindmap(mindmap):
+                raise ScriptWorkflowError("大纲输出格式异常（未得到 markdown 层级结构），请重试")
+            return mindmap
 
-        result = await run_agent(
-            AgentRunOptions(
-                prompt=user_prompt,
-                system_prompt=SCRIPT_OUTLINE_SYSTEM,
-                max_turns=2,
-                interrupt=interrupt,
-            ),
-            on_event,
+        mindmap = await self.agent_steps.run(
+            "大纲生成",
+            template="script_outline",
+            variables={
+                "requirements": requirements_text,
+                "story_logic": story_logic,
+                "extra_instruction": "",
+            },
+            system_prompt=SCRIPT_OUTLINE_SYSTEM,
+            max_turns=2,
+            interrupt=interrupt,
+            on_event=on_event,
+            parse=_parse_outline,
         )
-        if result.error:
-            raise ScriptWorkflowError(f"大纲生成失败: {result.error}")
-
-        mindmap = extract_markdown(result.text)
-        if not is_valid_mindmap(mindmap):
-            raise ScriptWorkflowError("大纲输出格式异常（未得到 markdown 层级结构），请重试")
 
         # 重生成 → 清下游（step_results + 工作区分集/实体 + DB 定妆照/素材图任务）
-        self.sm.clear_steps_after(session_id, "story_outline")
-        self.store.delete_story_content(session_id)
-        self.scm.delete_script_data(session_id)
+        cascade_regenerate(self.sm, self.store, self.scm, session_id, "story_outline")
         # 大纲落工作区文件（story 目录随剧名正名），DB 行只留薄 envelope
         outline = self.store.write_outline(session_id, mindmap, requirements=requirements)
         self.sm.save_step_result(session_id, "story_outline",
-                                 self._envelope(session_id, "01-outline/outline.md"), success=True)
+                                 workspace_envelope(self.store, session_id, "01-outline/outline.md"), success=True)
         return {"mindmap": outline["mindmap"]}
 
     def update_outline(self, session_id: str, mindmap_markdown: str) -> dict:
@@ -243,7 +235,7 @@ class ScriptWorkflow(StepWorkflowBase):
         self.require_step_data(session_id, "story_outline")
         self.store.update_outline(session_id, mindmap_markdown)
         self.sm.update_step_result(session_id, "story_outline",
-                                   self._envelope(session_id, "01-outline/outline.md"))
+                                   workspace_envelope(self.store, session_id, "01-outline/outline.md"))
         warning = ""
         saved_episodes = self.store.list_episodes(session_id)
         if saved_episodes:
@@ -482,19 +474,6 @@ class ScriptWorkflow(StepWorkflowBase):
             tools=[_upsert("character"), _upsert("scene"), _upsert("clue"), _upsert("foreshadow"), save_episode],
         )
 
-    def _workspace_section(self, session_id: str) -> str:
-        """Agent prompt 的「剧本工作区」段（目录路径 + MAP）"""
-        entry = self.store.agent_entry(session_id)
-        if not entry["available"]:
-            return "（剧本工作区不可用）"
-        return "\n".join([
-            f"剧本工作区根目录：{entry['story_root']}",
-            f"目录地图（先 Read 了解全貌）：{entry['map_path']}",
-            "全剧大纲：01-outline/outline.md",
-            "已保存分集设计：02-episodes/（每集一文件，「结尾摘要」「因果链」小节供前后集衔接）",
-            "已注册实体卡：03-entities/（人物/场景/线索/伏笔，frontmatter 含 entity_id）",
-        ])
-
     async def generate_episodes(
         self,
         session_id: str,
@@ -516,13 +495,11 @@ class ScriptWorkflow(StepWorkflowBase):
             task_prompt = self._build_single_episode_prompt(session_id, regenerate_episode_id, extra_instruction)
         else:
             # 全量生成前清空旧数据（step 下游 + 工作区实体/分集 + DB 定妆照/素材图任务）
-            self.sm.clear_steps_after(session_id, "episode_design")
-            self.store.delete_story_content(session_id)
-            self.scm.delete_script_data(session_id)
+            cascade_regenerate(self.sm, self.store, self.scm, session_id, "episode_design")
             task_prompt = (
                 "请根据大纲完成全部分集设计。\n\n"
                 f"## 剧本工作区（你只可在该目录内使用 Read/Grep/Glob 自主检索，禁止越界）\n"
-                f"{self._workspace_section(session_id)}\n\n"
+                f"{workspace_section(self.store, session_id)}\n\n"
                 "## 任务步骤\n"
                 "1. 先 Read 目录地图 MAP.md 与全剧大纲 01-outline/outline.md，规划实体与各集设计\n"
                 f"2. 从 ep_01 到 ep_{episode_count:02d} 逐集调 save_episode 保存（共 {episode_count} 集）；"
@@ -535,21 +512,17 @@ class ScriptWorkflow(StepWorkflowBase):
         # 轮次按集数估算（每集 3 轮 + 固定开销，见常量注释），上下限兜底
         turns = max(EPISODE_TURNS_MIN, min(EPISODE_TURNS_BASE + EPISODE_TURNS_PER * episode_count, EPISODE_TURNS_MAX))
 
-        result = await run_agent(
-            AgentRunOptions(
-                prompt=task_prompt,
-                system_prompt=system_prompt,
-                mcp_servers={"script_design": mcp_server},
-                # 读侧：剧本目录内自主检索；写侧：仅 save/upsert MCP 工具落盘
-                tools=READ_ONLY_TOOLS,
-                cwd=self.store.story_cwd(session_id),
-                max_turns=turns,
-                interrupt=interrupt,
-            ),
-            on_event,
+        # 读侧：剧本目录内自主检索；写侧：仅 save/upsert MCP 工具落盘（结果取 store 状态校验，无 parse）
+        await self.agent_steps.run(
+            "分集设计",
+            prompt=task_prompt,
+            system_prompt=system_prompt,
+            cwd=self.store.story_cwd(session_id),
+            mcp_servers={"script_design": mcp_server},
+            max_turns=turns,
+            interrupt=interrupt,
+            on_event=on_event,
         )
-        if result.error:
-            raise ScriptWorkflowError(f"分集设计失败: {result.error}")
 
         episodes = self.store.list_episodes(session_id)
         if not regenerate_episode_id and len(episodes) != episode_count:
@@ -578,7 +551,7 @@ class ScriptWorkflow(StepWorkflowBase):
 
         parts = [
             f"本次为「单集重设计」任务：只重新设计并保存 {episode_id}（工具只接受这一集）。",
-            f"\n## 剧本工作区（你只可在该目录内使用 Read/Grep/Glob 自主检索，禁止越界）\n{self._workspace_section(session_id)}",
+            f"\n## 剧本工作区（你只可在该目录内使用 Read/Grep/Glob 自主检索，禁止越界）\n{workspace_section(self.store, session_id)}",
         ]
         if prev:
             parts.append(f"\n## 上一集（{prev['episode_id']}）结尾摘要（本集必须自然承接）\n{prev['ending_summary']}")
@@ -633,28 +606,29 @@ class ScriptWorkflow(StepWorkflowBase):
             f"- entity_id: {e['entity_id']} | 类型: {e['entity_type']} | 名称: {e['name']} | 设定: {e['description']}"
             for e in entities
         )
-        story_logic = self._load_story_logic(session_id)[:1500]
-        user_prompt = self.prompts.render("lookbook_prompts", {
-            "story_logic": story_logic or "（无）",
-            "style_prompt": style_prompt or "（用户未指定——请你根据剧本故事逻辑的题材与气质自行判断，并全剧统一）",
-            "entities": entities_text,
-        })
-        on_event(AgentEvent(type="thinking", delta="正在生成定妆照 prompt..."))
-        result = await run_agent(
-            AgentRunOptions(
-                prompt=user_prompt,
-                system_prompt=LOOKBOOK_PROMPTS_SYSTEM,
-                max_turns=2,
-                interrupt=interrupt,
-            ),
-            on_event,
-        )
-        if result.error:
-            raise ScriptWorkflowError(f"定妆照 prompt 生成失败: {result.error}")
+        story_logic = load_story_logic(self.store, self.sm, session_id)[:1500]
 
-        items = extract_json_array(result.text)
-        if not items:
-            raise ScriptWorkflowError("定妆照 prompt 输出解析失败，请重试")
+        def _parse_prompts(text: str) -> list[dict]:
+            items = extract_json_array(text)
+            if not items:
+                raise ScriptWorkflowError("定妆照 prompt 输出解析失败，请重试")
+            return items
+
+        on_event(AgentEvent(type="thinking", delta="正在生成定妆照 prompt..."))
+        items = await self.agent_steps.run(
+            "定妆照 prompt 生成",
+            template="lookbook_prompts",
+            variables={
+                "story_logic": story_logic or "（无）",
+                "style_prompt": style_prompt or "（用户未指定——请你根据剧本故事逻辑的题材与气质自行判断，并全剧统一）",
+                "entities": entities_text,
+            },
+            system_prompt=LOOKBOOK_PROMPTS_SYSTEM,
+            max_turns=2,
+            interrupt=interrupt,
+            on_event=on_event,
+            parse=_parse_prompts,
+        )
         # 以勾选集为准；agent 缺漏的实体用设定兜底
         prompts_by_entity: dict[str, dict] = {}
         for item in items:
@@ -671,7 +645,7 @@ class ScriptWorkflow(StepWorkflowBase):
                     "description": f"{e['name']} 定妆照",
                 }
 
-        # 2. 确定性生图（沿用素材图间隔提交 + 并发轮询模式）
+        # 2. 确定性生图（间隔提交 + 并发轮询；完成后回写实体的 lookbook 锚点）
         image_service = build_image_service_from_model_config(model_config_id)
         rows = {}
         for e in entities:
@@ -680,38 +654,21 @@ class ScriptWorkflow(StepWorkflowBase):
             rows[row["image_id"]] = row
 
         on_event(AgentEvent(type="thinking", delta=f"开始生成 {len(rows)} 张定妆照..."))
-        submitted: list[tuple[str, str]] = []  # (image_id, request_id)
-        for i, (image_id, row) in enumerate(rows.items()):
-            if interrupt and interrupt.is_set():
-                raise ScriptWorkflowError("已取消")
-            if i > 0:
-                await asyncio.sleep(IMAGE_REQUEST_TIME_GAP)
-            try:
-                submit = await image_service.submit_image_task(row["prompt"], LOOKBOOK_VIDEO_PARAMS, None)
-                if submit.get("success"):
-                    submitted.append((image_id, submit["request_id"]))
-                    self.scm.update_lookbook(image_id, {"task_id": submit["request_id"], "task_status": "processing"})
-                else:
-                    self.scm.update_lookbook(image_id, {"task_status": "failed"})
-                    logger.error(f"[定妆照] 提交失败 {row['entity_id']}: {submit.get('error')}")
-            except Exception as e:  # noqa: BLE001
-                self.scm.update_lookbook(image_id, {"task_status": "failed"})
-                logger.error(f"[定妆照] 提交异常 {row['entity_id']}: {e}")
 
-        async def poll_one(image_id: str, request_id: str) -> None:
-            poll = await image_service.poll_i2i_task(request_id, timeout=180, poll_interval=5)
-            if poll.get("success"):
-                self.scm.update_lookbook(image_id, {"image_path": poll.get("image_url", ""), "task_status": "completed"})
-                lookbook = self.scm.get_lookbook(image_id)
-                self.store.set_entity_lookbook(
-                    session_id, lookbook["entity_id"], image_id, poll.get("image_url", ""),
-                )
-            else:
-                self.scm.update_lookbook(image_id, {"task_status": "failed"})
-                logger.error(f"[定妆照] 生成失败 {image_id}: {poll.get('error')}")
+        def _on_completed(image_id: str, poll: dict) -> None:
+            lookbook = self.scm.get_lookbook(image_id)
+            self.store.set_entity_lookbook(
+                session_id, lookbook["entity_id"], image_id, poll.get("image_url", ""),
+            )
 
-        if submitted:
-            await asyncio.gather(*(poll_one(iid, rid) for iid, rid in submitted))
+        await self.image_tasks.run_batch(
+            image_service,
+            [ImageTaskSpec(image_id=r["image_id"], prompt=r["prompt"]) for r in rows.values()],
+            LOOKBOOK_VIDEO_PARAMS,
+            self.scm.update_lookbook,
+            interrupt=interrupt,
+            on_completed=_on_completed,
+        )
 
         final_rows = self.scm.list_lookbook(session_id)
         completed = sum(1 for r in final_rows if r["task_status"] == "completed")
@@ -729,27 +686,17 @@ class ScriptWorkflow(StepWorkflowBase):
         if not row or row["script_session_id"] != session_id:
             raise ScriptWorkflowError(f"定妆照不存在: {image_id}")
         image_service = build_image_service_from_model_config(model_config_id)
-        self.scm.update_lookbook(image_id, {"task_status": "processing", **({"prompt": prompt} if prompt else {})})
-        submit = await image_service.submit_image_task(prompt or row["prompt"], LOOKBOOK_VIDEO_PARAMS, None)
-        if not submit.get("success"):
-            self.scm.update_lookbook(image_id, {"task_status": "failed"})
-            raise ScriptWorkflowError(f"提交失败: {submit.get('error')}")
-        self.scm.update_lookbook(image_id, {"task_id": submit["request_id"]})
-        poll = await image_service.poll_i2i_task(submit["request_id"], timeout=180, poll_interval=5)
-        if not poll.get("success"):
-            self.scm.update_lookbook(image_id, {"task_status": "failed"})
-            raise ScriptWorkflowError(f"生成失败: {poll.get('error')}")
-        self.scm.update_lookbook(image_id, {"image_path": poll["image_url"], "task_status": "completed"})
-        self.store.set_entity_lookbook(session_id, row["entity_id"], image_id, poll["image_url"])
+        await self.image_tasks.run_single(
+            image_service,
+            ImageTaskSpec(image_id=image_id, prompt=prompt or row["prompt"]),
+            LOOKBOOK_VIDEO_PARAMS,
+            self.scm.update_lookbook,
+            pre_update={"task_status": "processing", **({"prompt": prompt} if prompt else {})},
+            on_completed=lambda iid, poll: self.store.set_entity_lookbook(
+                session_id, row["entity_id"], iid, poll.get("image_url", ""),
+            ),
+        )
         return self.scm.get_lookbook(image_id)
-
-    def _load_story_logic(self, session_id: str) -> str:
-        """故事逻辑读取（工作区文件优先，DB 老数据 fallback）"""
-        logic = self.store.read_story_logic(session_id)
-        if logic:
-            return logic
-        step = self.sm.get_step_result(session_id, "story_ideation")
-        return step["result_data"].get("story_logic", "") if step else ""
 
     def complete_lookbook(self, session_id: str) -> dict:
         """手动确认完成第 4 步（按需勾选无自然终点）"""

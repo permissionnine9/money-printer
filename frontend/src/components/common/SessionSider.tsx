@@ -3,7 +3,7 @@
  * 平铺模式（剧本页）/ 分组模式（视频页，grouped=true 按引用剧本二级分组）
  */
 import React, { useEffect, useMemo, useState } from 'react'
-import { Button, Empty, Popconfirm, Spin, Tag, Tooltip, Typography } from 'antd'
+import { Button, Empty, Popconfirm, Spin, Tooltip, Typography } from 'antd'
 import { CaretRightOutlined, DeleteOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import type { Session } from '@/types'
 import styles from '@/components/layout/MainLayout.module.css'
@@ -12,12 +12,6 @@ const { Text } = Typography
 
 // 无引用剧本的会话归入的哨兵组（「未选择剧本分集」）
 const UNGROUPED_KEY = '__ungrouped__'
-
-const statusColor = (status: string) => {
-  if (status === 'completed') return 'success'
-  if (status === 'error') return 'error'
-  return 'processing'
-}
 
 export interface SessionGroupMeta {
   key: string  // 分组唯一 key（视频页 = 剧本会话ID）
@@ -150,9 +144,6 @@ export const SessionSider: React.FC<SessionSiderProps> = ({
             <Text type="secondary" style={{ fontSize: 11 }} title={s.session_id}>
               {s.session_id.slice(0, 8)}
             </Text>
-            <Tag color={statusColor(s.status)} style={{ marginRight: 0, fontSize: 11 }}>
-              {s.status === 'completed' ? '已完成' : s.status === 'error' ? '异常' : '进行中'}
-            </Tag>
             <Text type="secondary" style={{ fontSize: 11 }}>
               {(s.completed_steps?.length || 0)}/{totalSteps} 步
             </Text>

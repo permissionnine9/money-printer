@@ -4,8 +4,10 @@
 - wrapper.run_agent / run_conversation: agent 运行入口
 - events.AgentEvent: 归一化事件
 - registry.get_run_registry(): 后台 run 注册表（SSE 解耦）
+- direct.sse_direct_response: SSE 请求内直跑形态（断开即取消）
 - model_env.build_agent_env: 模型端点环境注入
 """
+from backend.core.agent_sdk.direct import sse_direct_response
 from backend.core.agent_sdk.events import AgentEvent
 from backend.core.agent_sdk.model_env import AgentModelNotConfiguredError, build_agent_env
 from backend.core.agent_sdk.registry import AgentRunRegistry, RunHandle, get_run_registry
@@ -29,4 +31,5 @@ __all__ = [
     "get_run_registry",
     "run_agent",
     "run_conversation",
+    "sse_direct_response",
 ]

@@ -2,7 +2,8 @@
  * 步骤 3（索引2）：分镜管理
  * 左侧分镜列表 + 右侧选中分镜详情（布局参照剧本工作流「分集设计」）。
  * 详情含：分镜大纲展示、分镜配置（分镜形式下拉框；全能参考模式时出现 overlap 滑块、
- * 参考素材图编辑区，且「分镜提示词生成」可用）、已生成提示词展示；底部「完成分镜配置」解锁第 4 步。
+ * 参考素材图编辑区，且「分镜提示词生成」可用）、已生成提示词展示；
+ * 每个分镜独立「完成当前分镜配置」按钮（≥1 个完成即可进入第 4 步勾选生成视频）。
  */
 import React, { useMemo, useState } from 'react'
 import {
@@ -80,7 +81,7 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
   const outlineData = session.step_results?.storyboard_outline?.result_data
   const segments: StoryboardSegment[] = useMemo(() => outlineData?.segments || [], [outlineData])
   const canExecute = session.completed_steps?.includes('storyboard_outline')
-  const isCompleted = session.completed_steps?.includes('segment_management')
+  const configuredCount = segments.filter((s) => s.configured).length
 
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [configLoading, setConfigLoading] = useState(false)
@@ -220,11 +221,11 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
     }
   }
 
-  const completeManagement = async () => {
+  const completeSegment = async (index: number, completed: boolean) => {
     setCompleting(true)
     try {
-      await stepApi.completeSegmentManagement(session.session_id)
-      message.success('分镜配置已完成，可进入第 4 步生成视频')
+      await stepApi.completeSegment(session.session_id, index, completed)
+      message.success(completed ? `分镜 ${index + 1} 配置已完成，可进入第 4 步勾选生成视频` : '分镜配置已取消完成')
       await refreshSession()
     } catch (e) {
       message.error((e as Error).message)
@@ -307,24 +308,20 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
       <Card
         title={
           <span>
-            {isCompleted && <CheckCircleOutlined style={{ color: '#52c41a', marginRight: 8 }} />}
             分镜管理
             <Text type="secondary" style={{ marginLeft: 12, fontSize: 13, fontWeight: 'normal' }}>
-              共 {segments.length} 个分镜 · 已生成提示词 {segments.filter((s) => s.prompt).length} 个
+              共 {segments.length} 个分镜 · 已完成配置 {configuredCount} 个 · 已生成提示词{' '}
+              {segments.filter((s) => s.prompt).length} 个
             </Text>
           </span>
         }
         style={{ marginTop: 16 }}
         extra={
-          isCompleted ? (
+          configuredCount > 0 ? (
             <Tag icon={<CheckCircleOutlined />} color="success">
-              分镜配置已完成
+              {configuredCount}/{segments.length} 已配置
             </Tag>
-          ) : (
-            <Button type="primary" loading={completing} onClick={completeManagement}>
-              完成分镜配置
-            </Button>
-          )
+          ) : undefined
         }
       >
         <div style={{ display: 'flex', gap: 16, alignItems: 'stretch' }}>
@@ -352,6 +349,7 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
                   <Space size={6} wrap>
                     <Tag color="blue">分镜 {seg.index + 1}</Tag>
                     {tag && <Tag color={tag.color}>{tag.text}</Tag>}
+                    {seg.configured && <Tag color="success">已配置</Tag>}
                     {seg.prompt && <Tag color="green">已生成提示词</Tag>}
                   </Space>
                   <div
@@ -399,7 +397,33 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
                 </Card>
 
                 {/* 分镜配置 */}
-                <Card size="small" title="分镜配置" style={{ marginTop: 12 }}>
+                <Card
+                  size="small"
+                  title="分镜配置"
+                  style={{ marginTop: 12 }}
+                  extra={
+                    selected.configured ? (
+                      <Popconfirm
+                        title="取消完成该分镜的配置？"
+                        onConfirm={() => completeSegment(selected.index, false)}
+                      >
+                        <Button size="small" icon={<CheckCircleOutlined />} loading={completing}>
+                          已完成配置（点击取消）
+                        </Button>
+                      </Popconfirm>
+                    ) : (
+                      <Button
+                        size="small"
+                        type="primary"
+                        icon={<CheckCircleOutlined />}
+                        loading={completing}
+                        onClick={() => completeSegment(selected.index, true)}
+                      >
+                        完成当前分镜配置
+                      </Button>
+                    )
+                  }
+                >
                   <Spin spinning={configLoading}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                       <Text style={{ flexShrink: 0 }}>分镜形式</Text>
@@ -575,12 +599,12 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
           </div>
         </div>
 
-        {!isCompleted && (
+        {configuredCount === 0 && (
           <Alert
             type="info"
             showIcon
             style={{ marginTop: 16 }}
-            title="配置完各分镜后点击右上角「完成分镜配置」，即可进入第 4 步生成视频。修改分镜配置会清空该分镜已生成的提示词并回退完成状态。"
+            title="每个分镜配置完成后点击「完成当前分镜配置」；至少完成 1 个分镜即可进入第 4 步勾选生成视频。修改已完成的分镜配置会清空其提示词并回退完成状态。"
           />
         )}
       </Card>

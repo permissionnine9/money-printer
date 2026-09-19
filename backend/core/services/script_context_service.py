@@ -6,10 +6,10 @@
 各段有长度上限（超长截断），保证 prompt 总量可控。
 """
 import logging
-from typing import Optional
 
 from backend.core.persistence.script_manager import ScriptManager
 from backend.core.persistence.workspace_store import WorkspaceStore
+from backend.core.services.workspace_sections import episode_number, load_story_outline
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +24,9 @@ MOTIVATION_KEYS = ("性格", "欲望", "身份", "伤口")  # meta 中优先取�
 class ScriptContextService:
     """从剧本会话装配分镜上下文"""
 
-    def __init__(self, script_manager: Optional[ScriptManager] = None, store: Optional[WorkspaceStore] = None):
+    def __init__(self, script_manager: ScriptManager, store: WorkspaceStore):
         # scm：定妆照/素材图任务表（DB）；markdown 产物（分集/实体/大纲）读工作区文件
-        self.scm = script_manager or ScriptManager()
-        if store is None:
-            from backend.deps import get_workspace_store
-            store = get_workspace_store()
+        self.scm = script_manager
         self.store = store
 
     def build_segment_script_context(self, script_session_id: str, episode_id: str) -> str:
@@ -55,7 +52,7 @@ class ScriptContextService:
 
         # 2. 上一集结尾摘要（ep_01 无）
         prev = next(
-            (e for e in episodes if _episode_num(e["episode_id"]) == _episode_num(episode_id) - 1),
+            (e for e in episodes if episode_number(e["episode_id"]) == episode_number(episode_id) - 1),
             None,
         )
         if prev:
@@ -80,53 +77,12 @@ class ScriptContextService:
             parts.extend(related_parts)
 
         # 5. 全局大纲摘要（压缩兜底）
-        outline = self._load_outline(script_session_id)
+        outline = load_story_outline(self.store, script_session_id)
         if outline:
             parts.append("\n## 全剧大纲摘要")
             parts.append(_truncate(outline.replace("\n#", " "), OUTLINE_MAX_CHARS))
 
         return "\n".join(parts)
-
-    def build_reference_images_context(self, script_session_id: str, episode_id: str) -> str:
-        """装配「本集参考图生成」的上下文（分镜脚本由调用方另行拼接）"""
-        episode = self.store.get_episode(script_session_id, episode_id)
-        if not episode:
-            raise ValueError(f"分集不存在: {episode_id}")
-        entities = {e["entity_id"]: e for e in self.store.list_entities(script_session_id)}
-
-        parts: list[str] = [f"本集：{episode_id}《{episode['title']}》"]
-        # 已有定妆照的实体不再生成参考图
-        lookbook_ids = {
-            row["entity_id"]
-            for row in self.scm.list_lookbook(script_session_id, task_status="completed")
-        }
-        cards = []
-        for eid in episode["character_ids"] + episode["scene_ids"]:
-            entity = entities.get(eid)
-            if not entity:
-                continue
-            has_lookbook = "（已有定妆照，勿重复生成）" if eid in lookbook_ids else ""
-            cards.append(_truncate(f"- {eid} {entity['name']}{has_lookbook}：{entity['description']}", ENTITY_CARD_MAX_CHARS))
-        if cards:
-            parts.append("本集人物/场景：")
-            parts.extend(cards)
-        return "\n".join(parts)
-
-    def fetch_lookbook_images(self, script_session_id: str) -> list[dict]:
-        """取已完成的定妆照（合并进素材池，image_type='lookbook'）"""
-        return [
-            {
-                "image_id": f"lookbook_{row['image_id']}",
-                "image_path": row["image_path"],
-                "prompt": row["prompt"],
-                "description": f"{row['description']}",
-                "image_type": "lookbook",
-                "task_id": row.get("task_id", ""),
-                "task_status": row["task_status"],
-            }
-            for row in self.scm.list_lookbook(script_session_id, task_status="completed")
-            if row.get("image_path")
-        ]
 
     def _build_foreshadow_related(
         self, episode: dict, episodes: list[dict], entities: dict,
@@ -139,9 +95,9 @@ class ScriptContextService:
             return []
         now_refs = list(episode.get("foreshadow_refs", [])) + list(episode.get("clue_refs", []))
         parts = []
-        current_num = _episode_num(episode["episode_id"])
+        current_num = episode_number(episode["episode_id"])
         for other in episodes:
-            other_num = _episode_num(other["episode_id"])
+            other_num = episode_number(other["episode_id"])
             if other_num == current_num:
                 continue
             other_refs_list = list(other.get("foreshadow_refs", [])) + list(other.get("clue_refs", []))
@@ -161,18 +117,6 @@ class ScriptContextService:
                 RELATED_EPISODE_MAX_CHARS,
             ))
         return parts
-
-    def _load_outline(self, script_session_id: str) -> str:
-        outline = self.store.read_outline(script_session_id)
-        return outline.get("mindmap", "") if outline else ""
-
-
-def _episode_num(episode_id: str) -> int:
-    try:
-        return int(episode_id.split("_")[1])
-    except (IndexError, ValueError):
-        return 0
-
 
 def _entity_card(eid: str, entity: dict) -> str:
     """实体卡：视觉描述 + 人物内在动机摘要（供分镜理解行动逻辑）"""

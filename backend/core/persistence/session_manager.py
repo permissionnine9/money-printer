@@ -341,28 +341,6 @@ class SessionManager(BaseSQLiteManager):
             conn.commit()
             return cursor.rowcount > 0
 
-    def delete_step_result(self, session_id: str, step_name: str) -> bool:
-        """删除指定步骤的结果
-
-        Args:
-            session_id: 会话ID
-            step_name: 步骤名称
-
-        Returns:
-            是否成功
-        """
-        if step_name not in self.STEPS:
-            return False
-
-        try:
-            return self._delete(
-                "DELETE FROM step_results WHERE session_id = ? AND step_name = ?",
-                (session_id, step_name)
-            )
-        except Exception as e:
-            logger.error(f"删除步骤结果失败: {e}")
-            return False
-
     def clear_steps_after(self, session_id: str, step_name: str) -> bool:
         """清空指定步骤之后的所有步骤结果
 
@@ -464,6 +442,15 @@ class SessionManager(BaseSQLiteManager):
             logger.error(f"重置当前步骤失败: {e}")
             return False
 
+    def rollback_completion(self, session_id: str, step_name: str) -> None:
+        """回退某步骤的完成态：清该步骤结果 + 清下游步骤 + current_step 重置到该步骤
+
+        用于「上游数据变化导致完成态失效」的场景（配置变化需重新确认）。
+        """
+        self.clear_step_result(session_id, step_name)
+        self.clear_steps_after(session_id, step_name)
+        self.reset_current_step(session_id, step_name)
+
     def update_step_result(self, session_id: str, step_name: str, result_data: dict) -> bool:
         """更新指定步骤的结果数据（不推进 current_step）
 
@@ -559,17 +546,6 @@ class SessionManager(BaseSQLiteManager):
             "progress": f"{len(completed_steps)}/{len(self.STEPS)}",
             "step_results": all_results
         }
-
-    def get_latest_session(self) -> Optional[str]:
-        """获取最近更新的活动会话ID
-
-        Returns:
-            会话ID，如果没有活动会话则返回None
-        """
-        row = self._fetch_one(
-            "SELECT session_id FROM sessions WHERE status = 'active' ORDER BY updated_at DESC LIMIT 1"
-        )
-        return row[0] if row else None
 
     def list_sessions(self, workflow_type: str | None = None) -> list[dict]:
         """列出所有会话（可按工作流类型过滤）
@@ -748,17 +724,3 @@ class SessionManager(BaseSQLiteManager):
             logger.error(f"设置取消标志失败: {e}")
             return False
 
-    def is_step_cancelled(self, session_id: str, step_name: str) -> bool:
-        """检查步骤是否已被取消
-
-        Args:
-            session_id: 会话ID
-            step_name: 步骤名称
-
-        Returns:
-            是否已取消
-        """
-        step_result = self.get_step_result(session_id, step_name)
-        if not step_result:
-            return False
-        return step_result.get('result_data', {}).get('_cancelled', False)

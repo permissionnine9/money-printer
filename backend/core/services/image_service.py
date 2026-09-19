@@ -173,7 +173,10 @@ class ImageService:
                         # 图生图：/images/edits multipart（image 字段可重复，最多 4 张参考图）
                         files = []
                         for ref in reference_images[:4]:
-                            img_bytes, mime = await self._load_reference_bytes(ref, compress_reference)
+                            img_bytes, mime = await load_image_bytes(
+                                ref, compress_reference,
+                                max_size=IMAGE_COMPRESS_MAX_SIZE, quality=IMAGE_COMPRESS_QUALITY,
+                            )
                             if img_bytes is not None:
                                 files.append(("image", ("reference.png", img_bytes, mime or "image/png")))
                         if not files:
@@ -236,13 +239,6 @@ class ImageService:
         except Exception as e:
             logger.error(f"[OpenAI图片] 提交异常: {e}")
             return {"success": False, "error": str(e)}
-
-    async def _load_reference_bytes(self, image_path: str, compress: bool) -> tuple[bytes | None, str | None]:
-        """读取参考图为字节（支持本地路径与 URL），可选压缩"""
-        return await load_image_bytes(
-            image_path, compress,
-            max_size=IMAGE_COMPRESS_MAX_SIZE, quality=IMAGE_COMPRESS_QUALITY,
-        )
 
     async def poll_i2i_task(
         self,

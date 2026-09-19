@@ -47,7 +47,7 @@ const ModelsPage: React.FC = () => {
     setLoading(true)
     try {
       const result = await modelApi.list(filterType === 'all' ? undefined : filterType)
-      setModels(result.models || [])
+      setModels(result.data?.models || [])
     } catch (error) {
       message.error((error as Error).message)
     } finally {
@@ -94,11 +94,11 @@ const ModelsPage: React.FC = () => {
         : await modelApi.create(payload)
 
       if (response.success) {
-        message.success(response.message)
+        message.success(modal.editing ? '模型配置已更新' : '模型配置已创建')
         setModal({ visible: false, editing: null, loading: false })
         await loadModels()
       } else {
-        message.error(response.message)
+        message.error('保存失败')
         setModal((prev) => ({ ...prev, loading: false }))
       }
     } catch (error) {
@@ -126,10 +126,10 @@ const ModelsPage: React.FC = () => {
     try {
       const response = await modelApi.remove(model.id)
       if (response.success) {
-        message.success(response.message)
+        message.success('模型配置已删除')
         await loadModels()
       } else {
-        message.error(response.message)
+        message.error('删除失败')
       }
     } catch (error) {
       message.error((error as Error).message)
@@ -231,7 +231,7 @@ const ModelsPage: React.FC = () => {
               setFilterType(t)
               setTimeout(() => {
                 modelApi.list(t === 'all' ? undefined : t)
-                  .then((r) => setModels(r.models || []))
+                  .then((r) => setModels(r.data?.models || []))
                   .catch(() => {})
               }, 0)
             }}

@@ -14,8 +14,9 @@ from backend.core.persistence.session_manager import (
 from backend.core.persistence.model_manager import ModelManager
 from backend.core.persistence.script_manager import ScriptManager
 from backend.core.persistence.workspace_store import WorkspaceStore
+from backend.core.agents.script_workflow import ScriptWorkflow
 from backend.core.agents.storyboard import StoryboardWorkflow
-from backend.core.agents.workflow_v2 import VideoCreationWorkflowV2
+from backend.core.workflows.video_workflow import VideoCreationWorkflowV2
 
 
 @lru_cache()
@@ -27,7 +28,11 @@ def get_session_manager() -> SessionManager:
 @lru_cache()
 def get_storyboard_workflow() -> StoryboardWorkflow:
     """获取分镜工作流实例（单例，共享视频 SessionManager）"""
-    return StoryboardWorkflow(session_manager=get_session_manager(), store=get_workspace_store())
+    return StoryboardWorkflow(
+        session_manager=get_session_manager(),
+        store=get_workspace_store(),
+        script_manager=get_script_manager(),
+    )
 
 
 @lru_cache()
@@ -54,15 +59,23 @@ def get_workspace_store() -> WorkspaceStore:
     return WorkspaceStore(session_manager=get_script_session_manager())
 
 
+@lru_cache()
 def get_workflow() -> VideoCreationWorkflowV2:
-    """
-    获取工作流实例
+    """获取视频工作流实例（单例，共享 SessionManager 与 WorkspaceStore）"""
+    return VideoCreationWorkflowV2(
+        session_manager=get_session_manager(),
+        store=get_workspace_store(),
+    )
 
-    Returns:
-        VideoCreationWorkflowV2 实例（共享 SessionManager）
-    """
-    session_manager = get_session_manager()
-    return VideoCreationWorkflowV2(session_manager=session_manager)
+
+@lru_cache()
+def get_script_workflow() -> ScriptWorkflow:
+    """获取剧本工作流实例（单例，共享剧本 SessionManager/ScriptManager/WorkspaceStore）"""
+    return ScriptWorkflow(
+        session_manager=get_script_session_manager(),
+        script_manager=get_script_manager(),
+        store=get_workspace_store(),
+    )
 
 
 # ==================== 实体加载依赖（消除路由层「get_session → 404」样板） ====================
@@ -87,7 +100,10 @@ def load_script_session(session_id: str, sm: SessionManager = Depends(get_script
 
 # ==================== agent 运行提交（统一 run_id 响应） ====================
 
-def start_agent_run(label: str, factory) -> dict:
-    """提交 agent 运行到注册表并返回统一响应 {"success": True, "data": {"run_id": ...}}"""
+def run_agent_endpoint(label: str, factory) -> dict:
+    """提交 agent 运行到注册表并返回统一响应 {"success": True, "data": {"run_id": ...}}
+
+    factory 签名：factory(on_event, interrupt) -> awaitable dict（RunCoroFactory）
+    """
     run_id = get_run_registry().start(label, factory)
     return {"success": True, "data": {"run_id": run_id}}

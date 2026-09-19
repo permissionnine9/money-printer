@@ -64,17 +64,6 @@ class EntityUpsertRequest(BaseModel):
     meta: dict = Field(default_factory=dict)
 
 
-class EntityReferenceEpisode(BaseModel):
-    episode_id: str = Field(description="引用该实体的集，如 ep_01")
-    title: str = Field(default="", description="集标题")
-    actions: list[str] = Field(default_factory=list, description="该实体在本集的引用方式")
-
-
-class EntityReferencesResponse(BaseModel):
-    entity_id: str
-    episodes: list[EntityReferenceEpisode] = Field(default_factory=list)
-
-
 # ==================== 第 4 步：定妆照 ====================
 
 class LookbookGenerateRequest(BaseModel):
@@ -86,10 +75,3 @@ class LookbookGenerateRequest(BaseModel):
 class LookbookRegenerateRequest(BaseModel):
     prompt: Optional[str] = Field(default=None, description="新 prompt（空=沿用原 prompt）")
     model_config_id: Optional[str] = None
-
-
-# ==================== 视频会话入口 ====================
-
-class CreateVideoSessionFromScriptRequest(BaseModel):
-    script_session_id: str = Field(min_length=1)
-    episode_id: str = Field(pattern=EPISODE_ID_PATTERN)

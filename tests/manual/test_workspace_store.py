@@ -122,7 +122,6 @@ def run(store: WorkspaceStore, sm: SessionManager, tmp: Path):
     store.ensure_story(sid2, title="另一部剧")
     e2 = store.upsert_entity(sid2, "character", "陈默", "沉默的店主")
     check("跨 story 不撞号", e2["entity_id"] == "chr_002")
-    check("next_entity_id 全局", store.next_entity_id(sid, "character") == "chr_003")
 
     e1b = store.upsert_entity(sid, "character", "林小雨", "短发女孩，眼神倔强（修订）",
                               entity_id="chr_001")

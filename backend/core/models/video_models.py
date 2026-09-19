@@ -44,4 +44,5 @@ class StoryboardSegment(BaseModel):
     reference_images: list[SegmentReferenceImage] = Field(
         default_factory=list, description="参考素材图列表（仅全能参考模式使用）",
     )
+    configured: bool = Field(default=False, description="用户手动确认当前分镜配置完成（修改配置后自动回退）")
 

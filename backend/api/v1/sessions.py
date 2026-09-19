@@ -1,7 +1,7 @@
 """
 会话管理 API
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from typing import List
 import re
 import uuid
@@ -11,11 +11,9 @@ from backend.schemas.sessions import (
     SessionDetailResponse,
     SessionListResponse,
 )
-from backend.schemas.script import CreateVideoSessionFromScriptRequest
-from backend.deps import get_session_manager, get_script_session_manager, get_workspace_store, load_video_session
+from backend.deps import get_session_manager, get_workspace_store, load_video_session
 from backend.core.persistence.session_manager import SessionManager
-from backend.core.persistence.workspace_store import WorkspaceStoreError
-from backend.core.services.workspace_projection import script_title, video_step_results
+from backend.core.services.step_payload import script_title, video_step_results
 
 router = APIRouter()
 
@@ -24,43 +22,6 @@ def _episode_number(episode_id: str | None) -> int | None:
     """从 episode_id（如 ep_01）解析集数，格式不符返回 None"""
     m = re.match(r"^ep_(\d+)$", episode_id or "")
     return int(m.group(1)) if m else None
-
-
-@router.post("/from-script", response_model=SessionResponse, status_code=201)
-async def create_session_from_script(
-    body: CreateVideoSessionFromScriptRequest,
-    session_manager: SessionManager = Depends(get_session_manager),
-):
-    """从剧本选集创建视频工作流会话"""
-    script_sm = get_script_session_manager()
-    script_info = script_sm.get_session(body.script_session_id)
-    if not script_info or script_info.get("workflow_type") != "script":
-        raise HTTPException(status_code=404, detail=f"剧本会话 {body.script_session_id} 不存在")
-    if not script_sm.is_step_completed(body.script_session_id, "episode_design"):
-        raise HTTPException(status_code=400, detail="该剧本会话的分集设计尚未完成")
-    try:
-        episode = get_workspace_store().get_episode(body.script_session_id, body.episode_id)
-    except WorkspaceStoreError as e:
-        raise HTTPException(status_code=400, detail=str(e))  # 非法 ID 格式（schema 已拦，纵深兜底）
-    if not episode:
-        raise HTTPException(status_code=404, detail=f"分集 {body.episode_id} 不存在")
-
-    session_id = str(uuid.uuid4())
-    session_manager.create_session(
-        session_id,
-        workflow_type="video",
-        script_session_id=body.script_session_id,
-        source_episode_id=body.episode_id,
-    )
-    session_info = session_manager.get_session(session_id)
-    return SessionResponse(
-        session_id=session_info["session_id"],
-        created_at=session_info["created_at"],
-        updated_at=session_info["updated_at"],
-        current_step=session_info["current_step"],
-        status=session_info["status"],
-        completed_steps=session_manager.get_completed_steps(session_id),
-    )
 
 
 @router.post("", response_model=SessionResponse, status_code=201)
@@ -88,7 +49,6 @@ async def list_sessions(
 ):
     """获取所有会话列表（旧版 5/7 步会话标记 legacy，前端隐藏）"""
     sessions = session_manager.list_sessions()
-    script_sm = get_script_session_manager()
     script_title_cache: dict[str, str] = {}
 
     session_responses = []
@@ -117,7 +77,7 @@ async def list_sessions(
         script_session_id = select_result.get("script_session_id")
         if script_session_id and script_session_id not in script_title_cache:
             script_title_cache[script_session_id] = script_title(
-                script_sm, get_workspace_store(), script_session_id,
+                get_workspace_store(), script_session_id,
             )
         session_responses.append(
             SessionResponse(

@@ -51,6 +51,16 @@ class SegmentMaterialGenerateRequest(BaseModel):
     model_config_id: Optional[str] = Field(None, description="生图模型配置ID（默认取默认生图模型）")
 
 
+class SegmentCompleteRequest(BaseModel):
+    """步骤3：完成/取消完成单个分镜的配置"""
+    completed: bool = Field(default=True, description="True=完成当前分镜配置，False=取消完成")
+
+
+class GenerateVideosRequest(BaseModel):
+    """步骤4：生成视频（勾选分镜子集；缺省=全部已配置分镜）"""
+    segment_indexes: Optional[list[int]] = Field(None, description="勾选参与生成的分镜 index 列表（须为已完成配置的分镜）")
+
+
 class StepResponse(BaseModel):
     """步骤响应"""
     success: bool

@@ -89,18 +89,19 @@ function WorkflowPage() {
             onStepChange={setCurrentStep}
           />
 
-          {/* 步骤内容区域（4 步，keep-alive：仅隐藏非当前步骤，SSE 与生成进度保活） */}
+          {/* 步骤内容区域（4 步，keep-alive：仅隐藏非当前步骤，SSE 与生成进度保活；
+              key=会话 id —— 切换步骤保活，切换会话重挂载以重置勾选/选中分镜等本地状态） */}
           <div style={currentStep === 0 ? undefined : HIDDEN}>
-            <StepSelectEpisode session={currentSession} />
+            <StepSelectEpisode key={currentSession.session_id} session={currentSession} />
           </div>
           <div style={currentStep === 1 ? undefined : HIDDEN}>
-            <StepStoryboardOutline session={currentSession} />
+            <StepStoryboardOutline key={currentSession.session_id} session={currentSession} />
           </div>
           <div style={currentStep === 2 ? undefined : HIDDEN}>
-            <StepSegmentManagement session={currentSession} />
+            <StepSegmentManagement key={currentSession.session_id} session={currentSession} />
           </div>
           <div style={currentStep === 3 ? undefined : HIDDEN}>
-            <Step6Videos session={currentSession} />
+            <Step6Videos key={currentSession.session_id} session={currentSession} />
           </div>
         </>
       )}

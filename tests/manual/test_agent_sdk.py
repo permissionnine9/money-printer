@@ -133,7 +133,7 @@ async def test_mcp_tool() -> None:
         on_event,
     )
     assert not result.error, f"MCP 运行失败: {result.error}"
-    tool_uses = [e for e in events if e.type == "tool_use" and e.tool == "add_numbers"]
+    tool_uses = [e for e in events if e.type == "tool_use" and e.tool.endswith("add_numbers")]
     assert tool_uses, "未捕获 add_numbers 工具调用"
     assert "42" in result.text, f"工具结果未体现在回答中: {result.text!r}"
     print("  ✓ 工具调用成功")

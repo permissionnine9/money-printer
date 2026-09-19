@@ -4,8 +4,8 @@
  * multi=true 勾选多张确认；否则单选（点击即确认，用于「更换」场景）。
  */
 import React, { useEffect, useState } from 'react'
-import { Button, Card, Empty, Image, Modal, Spin, Tabs, Tooltip, Typography, message } from 'antd'
-import { CheckSquareFilled, PictureOutlined } from '@ant-design/icons'
+import { Button, Card, Empty, Image, Modal, Popconfirm, Spin, Tabs, Tooltip, Typography, message } from 'antd'
+import { CheckSquareFilled, DeleteOutlined, PictureOutlined } from '@ant-design/icons'
 import type { MaterialPoolGroup, PoolMaterial } from '@/types'
 import { stepApi } from '@/api/client'
 import { imageSrc } from '@/utils/imageSrc'
@@ -29,7 +29,9 @@ const MaterialGrid: React.FC<{
   groups: { key: string; label: string; materials: PoolMaterial[] }[]
   selected: PoolMaterial[]
   onItemClick: (m: PoolMaterial) => void
-}> = ({ groups, selected, onItemClick }) => (
+  /** 删除素材图（仅 AI 生成的 mat_* 素材；删除后分镜中已引用处将失效） */
+  onDelete?: (m: PoolMaterial) => void
+}> = ({ groups, selected, onItemClick, onDelete }) => (
   <div style={{ maxHeight: 420, overflowY: 'auto' }}>
     {groups.map((g) => (
       <Card
@@ -69,6 +71,29 @@ const MaterialGrid: React.FC<{
                         zIndex: 1,
                       }}
                     />
+                  )}
+                  {onDelete && m.image_id.startsWith('mat_') && (
+                    <Popconfirm
+                      title="删除该素材图？"
+                      description="分镜中已引用该图的地方将失效"
+                      okText="删除"
+                      cancelText="取消"
+                      onConfirm={(e) => {
+                        e?.stopPropagation()
+                        onDelete(m)
+                      }}
+                      onCancel={(e) => e?.stopPropagation()}
+                    >
+                      <Button
+                        size="small"
+                        type="primary"
+                        danger
+                        shape="circle"
+                        icon={<DeleteOutlined />}
+                        style={{ position: 'absolute', top: 4, left: 4, width: 20, height: 20, minWidth: 20, zIndex: 2 }}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    </Popconfirm>
                   )}
                   <Image
                     src={imageSrc(m.image_path)}
@@ -117,16 +142,21 @@ export const MaterialPickerModal: React.FC<MaterialPickerModalProps> = ({
   const [selected, setSelected] = useState<PoolMaterial[]>([])
   const [error, setError] = useState('')
 
-  useEffect(() => {
-    if (!open) return
+  const loadPool = () => {
     setLoading(true)
-    setSelected([])
     setError('')
     stepApi
       .getMaterialPool(sessionId)
       .then(setGroups)
       .catch((e) => setError((e as Error).message))
       .finally(() => setLoading(false))
+  }
+
+  useEffect(() => {
+    if (!open) return
+    setSelected([])
+    loadPool()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, open])
 
   const filterGroups = (predicate: (g: MaterialPoolGroup) => boolean) =>
@@ -159,6 +189,18 @@ export const MaterialPickerModal: React.FC<MaterialPickerModalProps> = ({
     }
   }
 
+  // 删除 AI 生成的素材图（mat_*）后刷新素材池
+  const handleDeleteMaterial = async (m: PoolMaterial) => {
+    try {
+      await stepApi.deleteMaterial(sessionId, m.image_id)
+      message.success('素材图已删除')
+      setSelected((prev) => prev.filter((x) => x.image_id !== m.image_id))
+      loadPool()
+    } catch (e) {
+      message.error((e as Error).message)
+    }
+  }
+
   const handleConfirm = () => {
     if (selected.length === 0) {
       message.warning('请先选择素材图')
@@ -177,7 +219,7 @@ export const MaterialPickerModal: React.FC<MaterialPickerModalProps> = ({
 
   const tabItems = [
     { key: 'lookbook', label: '定妆照', children: lookbookGroups.length ? <MaterialGrid groups={lookbookGroups} selected={selected} onItemClick={handleItemClick} /> : emptyHint },
-    { key: 'episode', label: '本集素材', children: episodeGroups.length ? <MaterialGrid groups={episodeGroups} selected={selected} onItemClick={handleItemClick} /> : emptyHint },
+    { key: 'episode', label: '本集素材', children: episodeGroups.length ? <MaterialGrid groups={episodeGroups} selected={selected} onItemClick={handleItemClick} onDelete={handleDeleteMaterial} /> : emptyHint },
     ...(segmentMaterials !== undefined
       ? [{
           key: 'segment',

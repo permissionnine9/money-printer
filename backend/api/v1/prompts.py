@@ -1,10 +1,10 @@
 """提示词管理 API（分片镜头 skill 提示词，markdown 文件形式保存）"""
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from backend.core.services.prompt_manager import get_prompt_manager, PromptManager
+from backend.core.services.prompt_manager import get_prompt_manager
 
 logger = logging.getLogger(__name__)
 
@@ -16,22 +16,17 @@ class PromptUpdateRequest(BaseModel):
     content: str = Field(..., description="提示词模板内容（markdown）")
 
 
-def _get_manager() -> PromptManager:
-    return get_prompt_manager()
-
-
 @router.get("")
 async def list_prompts():
     """列出全部提示词模板"""
-    manager = _get_manager()
-    prompts = manager.list_prompts()
-    return {"success": True, "prompts": prompts}
+    prompts = get_prompt_manager().list_prompts()
+    return {"success": True, "data": {"prompts": prompts}}
 
 
 @router.get("/{name}")
 async def get_prompt(name: str):
     """获取单个提示词模板内容"""
-    manager = _get_manager()
+    manager = get_prompt_manager()
     try:
         content = manager.load_prompt(name)
     except ValueError as e:
@@ -42,12 +37,14 @@ async def get_prompt(name: str):
 
     return {
         "success": True,
-        "prompt": {
-            "name": name,
-            "description": manager.extract_description(content),
-            "category": manager.extract_category(content),
-            "step": manager.extract_step(content),
-            "content": content,
+        "data": {
+            "prompt": {
+                "name": name,
+                "description": manager.extract_description(content),
+                "category": manager.extract_category(content),
+                "step": manager.extract_step(content),
+                "content": content,
+            },
         },
     }
 
@@ -55,7 +52,7 @@ async def get_prompt(name: str):
 @router.put("/{name}")
 async def update_prompt(name: str, request: PromptUpdateRequest):
     """保存提示词模板（markdown 文件覆盖写，无版本管理）"""
-    manager = _get_manager()
+    manager = get_prompt_manager()
     try:
         existing = manager.load_prompt(name)
         if existing is None:
@@ -66,11 +63,12 @@ async def update_prompt(name: str, request: PromptUpdateRequest):
 
     return {
         "success": True,
-        "message": "提示词已保存",
-        "prompt": {
-            "name": name,
-            "description": manager.extract_description(request.content),
-            "category": manager.extract_category(request.content),
-            "step": manager.extract_step(request.content),
+        "data": {
+            "prompt": {
+                "name": name,
+                "description": manager.extract_description(request.content),
+                "category": manager.extract_category(request.content),
+                "step": manager.extract_step(request.content),
+            },
         },
     }

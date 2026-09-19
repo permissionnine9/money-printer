@@ -57,7 +57,7 @@ const PromptsPage: React.FC = () => {
     setLoading(true)
     try {
       const result = await promptApi.list()
-      const list = result.prompts || []
+      const list = result.data?.prompts || []
       setPrompts(list)
       // 默认选中第一个（按分组展示顺序，或指定项）
       const first = [...list].sort((a, b) => (a.step ?? Infinity) - (b.step ?? Infinity))[0]
@@ -80,7 +80,7 @@ const PromptsPage: React.FC = () => {
     setDirty(false)
     try {
       const result = await promptApi.get(prompt.name)
-      setContent(result.prompt?.content || '')
+      setContent(result.data?.prompt?.content || '')
     } catch (error) {
       message.error((error as Error).message)
       setContent('')
@@ -97,11 +97,11 @@ const PromptsPage: React.FC = () => {
     try {
       const response = await promptApi.save(selected.name, content)
       if (response.success) {
-        message.success(response.message + '（backend/prompts/' + selected.name + '.md）')
+        message.success('提示词已保存（backend/prompts/' + selected.name + '.md）')
         setDirty(false)
         await loadPrompts(selected.name)
       } else {
-        message.error(response.message)
+        message.error('保存失败')
       }
     } catch (error) {
       message.error((error as Error).message)
