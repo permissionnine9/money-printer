@@ -8,7 +8,11 @@
 """
 import asyncio
 import logging
+from datetime import datetime
 
+import httpx
+
+from backend.core.config import COMFYUI_BASE_URL
 from backend.core.errors import WorkflowError
 from backend.core.models import VideoParams
 from backend.core.persistence import SessionManager
@@ -108,14 +112,10 @@ class VideoCreationWorkflowV2:
     def get_video_segments(self, session_id: str) -> list[dict]:
         """读取视频生成用的分片列表（dict）
 
-        优先旧 generate_segment_scripts（legacy 会话兜底）；
-        否则从工作区分镜文件读取（content=已生成提示词或分镜大纲，
-        duration=max_segment_duration）。新会话无首尾帧数据时视频链路自然进入缺数据态。
+        从工作区分镜文件读取（content=已生成提示词或分镜大纲，
+        duration=分镜自身时长，缺省回落选集的 max_segment_duration）。
+        无首尾帧数据时视频链路自然进入缺数据态。
         """
-        legacy = self.session_manager.get_step_result(session_id, "generate_segment_scripts")
-        if legacy and legacy.get("result_data", {}).get("segment_scripts"):
-            return legacy["result_data"]["segment_scripts"]
-
         try:
             selected = self.get_selected_episode(session_id)
         except WorkflowError:
@@ -124,12 +124,15 @@ class VideoCreationWorkflowV2:
             selected.get("script_session_id", ""), selected.get("episode_id", ""), session_id,
         )
         if sb and sb.get("segments"):
-            duration = float((selected.get("video_params") or {}).get("max_segment_duration", 15))
+            max_duration = float((selected.get("video_params") or {}).get("max_segment_duration", 15))
             return [
                 {
                     "index": seg.get("index", i),
                     "content": seg.get("prompt") or seg.get("outline", ""),
-                    "duration": duration,
+                    # 分镜自身时长（步骤2大纲/步骤3配置）优先，缺省回落选集上限
+                    "duration": seg.get("duration") or max_duration,
+                    # 与上一分镜的重叠秒数（步骤3配置；时间轴拼接的逐段物理重叠来源）
+                    "overlap": seg.get("overlap", 0) or 0,
                     # 全能参考模式的参考素材图（生成视频时作为该段参考图）
                     "reference_images": seg.get("reference_images", []),
                 }
@@ -138,7 +141,7 @@ class VideoCreationWorkflowV2:
         return []
 
     def _configured_segment_indexes(self, session_id: str) -> set[int]:
-        """读取已点「完成当前分镜配置」的分镜 index 集合（新会话门禁；legacy/无分镜返回空集）"""
+        """读取已点「完成当前分镜配置」的分镜 index 集合（生成门禁；无分镜返回空集）"""
         try:
             selected = self.get_selected_episode(session_id)
         except WorkflowError:
@@ -155,8 +158,7 @@ class VideoCreationWorkflowV2:
     ) -> list[dict]:
         """解析本次参与生成的分镜集合（勾选子集；缺省=全部已配置分镜）
 
-        新会话要求 ≥1 个分镜 configured；legacy 会话（旧 segment_scripts 兜底）无
-        configured 概念，退化为全部分镜。返回按原次序排列的分段子集。
+        要求 ≥1 个分镜 configured；返回按原次序排列的分段子集。
         gate=False 时只按 index 过滤不重跑门禁（后台任务按 mark_videos_generating
         落盘的 segment_indexes 消费，生成期间取消 configured 不应中断任务）。
         """
@@ -168,13 +170,9 @@ class VideoCreationWorkflowV2:
             raise WorkflowError("请至少勾选一个分镜")
 
         if gate:
-            configured = self._configured_segment_indexes(session_id)
-            allowed = configured if configured else {s.get("index", i) for i, s in enumerate(segments)}
-            if not configured:
-                # legacy 会话无 per-segment 完成标志，跳过门禁（全部分镜可生成）
-                legacy = self.session_manager.get_step_result(session_id, "generate_segment_scripts")
-                if not (legacy and legacy.get("result_data", {}).get("segment_scripts")):
-                    raise WorkflowError("请先在步骤3完成至少一个分镜的配置")
+            allowed = self._configured_segment_indexes(session_id)
+            if not allowed:
+                raise WorkflowError("请先在步骤3完成至少一个分镜的配置")
         else:
             allowed = {s.get("index", i) for i, s in enumerate(segments)}
 
@@ -189,6 +187,10 @@ class VideoCreationWorkflowV2:
                 unconfigured = chosen - allowed
                 if unconfigured:
                     raise WorkflowError(f"分镜 {', '.join(str(i) for i in sorted(unconfigured))} 尚未完成配置")
+        # 连续性校验（与前端勾选规则一致）：分镜编号须严格相邻，不可跳选
+        chosen_ordered = sorted(chosen)
+        if chosen_ordered and chosen_ordered != list(range(chosen_ordered[0], chosen_ordered[0] + len(chosen_ordered))):
+            raise WorkflowError("分镜须连续选择（不可跳选），请勾选一段连续的分镜")
         return [s for i, s in enumerate(segments) if s.get("index", i) in chosen]
 
     # ==================== 步骤 4: 生成视频（状态机操作） ====================
@@ -221,32 +223,34 @@ class VideoCreationWorkflowV2:
         return initial
 
     def mark_videos_generating(
-        self, session_id: str, *, regenerate: bool = False, segment_indexes: list[int] | None = None,
+        self, session_id: str, *, segment_indexes: list[int] | None = None,
     ) -> dict:
         """生成前写 _generating 初始状态并落盘，返回 initial_data
 
-        regenerate=True 时校验步骤4已完成并保留旧视频备份（reset 步骤后重建初始状态）。
         segment_indexes 为勾选分镜子集（缺省=全部已配置分镜）。
         门禁：分镜大纲已完成 + ≥1 个分镜 configured（不再要求 segment_management 步骤完成）。
+        上次已生成过（步骤已完成）时先回退步骤状态，旧分段视频与最终视频保留备份
+        （_old_video_path / _old_final_video），支持「生成过后重新勾选再生成」+ 恢复备份。
         校验失败抛 WorkflowError（main.py 全局 handler 转 HTTP detail）。
         """
         step = "generate_videos"
         if not self.session_manager.is_step_completed(session_id, "storyboard_outline"):
             raise WorkflowError("请先完成步骤2：分镜大纲")
-        if regenerate:
-            if not self.session_manager.is_step_completed(session_id, step):
-                raise WorkflowError("步骤4尚未完成，请使用正常生成接口")
-            if not self.session_manager.reset_current_step(session_id, step):
-                raise WorkflowError("重置步骤状态失败", status_code=500)
 
         segments = self._resolve_generation_segments(session_id, segment_indexes)
 
-        if regenerate:
-            existing = self.session_manager.get_step_result(session_id, step)
-            existing_videos = existing["result_data"].get("generated_videos", []) if existing else []
-            initial_videos = self._build_initial_videos(segments, existing_videos)
+        existing = self.session_manager.get_step_result(session_id, step)
+        existing_videos = existing["result_data"].get("generated_videos", []) if existing else []
+        old_final_video = existing["result_data"].get("final_video") if existing else None
+        if existing and self.session_manager.is_step_completed(session_id, step):
+            # 上次生成已完成：回退步骤状态，旧结果走备份（生成中重复调用不备份）
+            if not self.session_manager.reset_current_step(session_id, step):
+                raise WorkflowError("重置步骤状态失败", status_code=500)
         else:
-            initial_videos = self._build_initial_videos(segments)
+            existing_videos = []
+            old_final_video = None
+
+        initial_videos = self._build_initial_videos(segments, existing_videos)
 
         initial_data = {
             "generated_videos": initial_videos,
@@ -255,25 +259,25 @@ class VideoCreationWorkflowV2:
             "success_count": 0,
             "failed_count": 0,
             "final_video": None,   # ComfyUI 整段生成的最终视频（完成后填充）
+            "_backed_up_count": sum(1 for v in initial_videos if "_old_video_path" in v),
             "_generating": True,   # 标记为生成中
             "_success": False      # 标记为未完成
         }
-        if regenerate:
-            initial_data["_backed_up_count"] = sum(1 for v in initial_videos if "_old_video_path" in v)
-            initial_data.pop("final_video")  # 重生成态无最终视频（与旧行为一致）
+        if old_final_video:
+            initial_data["_old_final_video"] = old_final_video  # 旧最终视频备份（恢复备份时回填）
         self.session_manager.save_step_result(session_id, step, initial_data, success=False)
-        logger.info(
-            f"[步骤4] 已写入{'待重新生成' if regenerate else '生成中'}状态 - 会话: {session_id[:8]}..."
-        )
+        logger.info(f"[步骤4] 已写入生成中状态（备份 {initial_data['_backed_up_count']} 个旧视频）- 会话: {session_id[:8]}...")
         return initial_data
 
     def restore_videos_backup(self, session_id: str) -> dict:
-        """恢复备份的视频（将 _old_video_path 恢复为 video_path），返回恢复后的 result_data"""
+        """恢复备份的视频（_old_video_path/_old_final_video 回填），返回恢复后的 result_data"""
         existing = self.session_manager.get_step_result(session_id, "generate_videos")
         if not existing:
             raise WorkflowError("未找到视频数据", status_code=404)
 
         result_data = existing["result_data"]
+        if result_data.get("_generating"):
+            raise WorkflowError("视频正在生成中，请先停止生成再恢复备份")
         generated_videos = result_data.get("generated_videos", [])
 
         restored_count = 0
@@ -286,7 +290,13 @@ class VideoCreationWorkflowV2:
                 video["duration"] = 5.0  # 恢复默认时长
                 restored_count += 1
 
-        if restored_count == 0:
+        # 旧最终视频一并恢复（mark_videos_generating 备份的 _old_final_video）；
+        # 勾选与旧结果不相交时分段无备份（restored_count=0），但最终视频仍可恢复
+        old_final = result_data.get("_old_final_video")
+        if old_final:
+            result_data["final_video"] = old_final
+
+        if restored_count == 0 and not old_final:
             raise WorkflowError("没有可恢复的备份数据")
 
         result_data["success_count"] = restored_count
@@ -306,8 +316,9 @@ class VideoCreationWorkflowV2:
     async def step_generate_videos(self, session_id: str, extra_prompt: str = "") -> dict:
         """步骤7：生成视频
 
-        上传首帧/音频素材到远程 ComfyUI，构造 timeline_data
-        整段提交生成最终长视频（远程不可用时 mock 本地合成演示视频）
+        两段式链路优先消费 comfyui_import 暂存的工作流（导入 → 开始）；
+        无暂存或勾选不一致时走一步式全流程（上传素材 → 构造 timeline → 整段提交）。
+        远程不可用时 mock 本地合成演示视频。
 
         Args:
             session_id: 会话ID
@@ -326,104 +337,230 @@ class VideoCreationWorkflowV2:
         step_result = self.session_manager.get_step_result(session_id, "generate_videos")
         segment_indexes = step_result["result_data"].get("segment_indexes") if step_result else None
 
+        # 两段式链路：导入暂存与本次勾选一致时直接执行已注入的工作流
+        imported = self._get_imported_state(session_id, segment_indexes)
+        if imported is not None:
+            return await self._execute_imported_videos(session_id, imported)
+
         return await self._step_generate_videos_comfyui(session_id, extra_prompt, segment_indexes)
+
+    def _get_imported_state(self, session_id: str, segment_indexes: list[int] | None) -> dict | None:
+        """读取与本次生成勾选一致的 comfyui_import 导入暂存（不存在/不一致返回 None）"""
+        import_result = self.session_manager.get_step_result(session_id, "comfyui_import")
+        if not import_result:
+            return None
+        data = import_result.get("result_data") or {}
+        if not data.get("timeline_data"):
+            return None
+        if segment_indexes is not None and data.get("segment_indexes") != segment_indexes:
+            logger.info("[步骤7] 导入暂存与本次勾选不一致，重新走全流程")
+            return None
+        return data
+
+    async def prepare_comfyui_import(
+        self, session_id: str, segment_indexes: list[int] | None = None, global_prompt: str = "",
+    ) -> dict:
+        """阶段一（导入到 ComfyUI）：收集素材 → 上传+构造 timeline+注入工作流 → 暂存 → 返回摘要
+
+        门禁与 mark_videos_generating 一致（分镜大纲完成 + ≥1 个分镜 configured）。
+        global_prompt 为整条时间轴的全局提示词（timeline_data.globalPrompt）。
+        段间重叠逐段取自分镜的 overlap 字段（第 3 步分镜管理配置，此处不再可覆盖）。
+        暂存落在 step_results 的 comfyui_import 键（save_aux_state，不推进步骤状态机），
+        「开始生成」时由后台任务消费。
+        """
+        logger.info(f"[步骤4] 导入到 ComfyUI - 会话: {session_id[:8]}...")
+        if not self.session_manager.is_step_completed(session_id, "storyboard_outline"):
+            raise WorkflowError("请先完成步骤2：分镜大纲")
+
+        materials = self._collect_generation_materials(session_id, segment_indexes, gate=True)
+        segments = materials["segments"]
+        try:
+            prepared = await self.comfyui_service.prepare_import(
+                **materials, global_prompt=global_prompt,
+                ui_workflow_name=f"导入_{session_id[:8]}.json",
+            )
+        except httpx.HTTPError as e:  # 连接失败/超时等网络异常
+            raise WorkflowError(
+                f"无法连接远程 ComfyUI（{COMFYUI_BASE_URL}），请检查隧道是否运行: ./start_comfyui_tunnel.sh（{e}）"
+            )
+        except ValueError as e:  # TimelineBuilder 校验失败等
+            raise WorkflowError(f"导入到 ComfyUI 失败：{e}")
+
+        timeline = prepared["timeline_data"]
+        summary = {
+            "segment_indexes": [s.get("index", i) for i, s in enumerate(segments)],
+            "segment_count": len(segments),
+            "image_count": len(timeline.get("images", [])),
+            "audio_count": len(timeline.get("audios", [])),
+            "total_duration": timeline.get("selection", {}).get("duration", 0),
+            "global_prompt": global_prompt,
+            "mock": prepared["mock"],
+            "imported_at": datetime.now().isoformat(timespec="seconds"),
+            # UI 工作流落盘结果（mock / 落盘失败时为 None）：ComfyUI 网页打开检查/微调用
+            "ui_workflow_name": prepared.get("ui_workflow_name"),
+            "comfyui_url": COMFYUI_BASE_URL,
+        }
+        self.session_manager.save_aux_state(session_id, "comfyui_import", {
+            **summary,
+            # 执行阶段消费：注入后的工作流 + timeline + 段内容（mock 渲染/结果回填）
+            "workflow": prepared["workflow"],
+            "timeline_data": timeline,
+            "segments": [
+                {"index": s.get("index", i), "content": s.get("content", "")}
+                for i, s in enumerate(segments)
+            ],
+        })
+        logger.info(
+            f"[步骤4] 导入完成 - {summary['segment_count']} 段 / {summary['image_count']} 图 / "
+            f"{summary['audio_count']} 音频 / 约 {summary['total_duration']}s, mock={summary['mock']}"
+        )
+        return summary
+
+    async def _execute_imported_videos(self, session_id: str, imported: dict) -> dict:
+        """阶段二（开始生成）：执行已导入的工作流并落盘结果"""
+        logger.info(f"[步骤7][ComfyUI] 执行已导入工作流 - 会话: {session_id[:8]}...")
+        try:
+            result = await self.comfyui_service.execute_imported(
+                imported.get("segments", []), imported.get("workflow"), imported["timeline_data"],
+            )
+            result_data = self._finalize_video_result(
+                session_id, result, imported.get("segment_indexes", []),
+            )
+            mode_text = "（mock 演示视频）" if result.get("mock") else ""
+            return {
+                "success": True,
+                "message": f"最终视频生成完成{mode_text}",
+                "data": result_data,
+            }
+        except Exception as e:
+            return self._save_video_failure(session_id, e)
+
+    def _collect_generation_materials(
+        self, session_id: str, segment_indexes: list[int] | None = None, *,
+        extra_prompt: str = "", gate: bool = False,
+    ) -> dict:
+        """收集生成素材（两段式与一步式共用）：分镜子集、首帧图、参考图、音频"""
+        frames_result = self.session_manager.get_step_result(session_id, "generate_segment_frames")
+
+        segment_frames = frames_result['result_data'].get('segment_frames', []) if frames_result else []
+
+        segments = self._resolve_generation_segments(session_id, segment_indexes, gate=gate)
+        # 收集各分片首帧（缺失首帧的分片不传参考图，仅靠提示词生成）
+        frame_image_paths = {}
+        for frame in segment_frames:
+            idx = frame.get('segment_index', -1)
+            path = frame.get('first_image_path') or ""
+            if idx >= 0 and path:
+                frame_image_paths[idx] = path
+
+        # 收集各分镜参考素材图（全能参考模式；http(s) 外链无法直接上传，跳过）
+        reference_image_paths = {
+            seg.get("index", i): [
+                r["image_path"] for r in seg.get("reference_images", []) if r.get("image_path")
+            ]
+            for i, seg in enumerate(segments)
+        }
+        reference_image_paths = {
+            idx: [p for p in paths if not p.startswith(("http://", "https://"))]
+            for idx, paths in reference_image_paths.items() if paths
+        }
+
+        # 收集会话音频资产（参考音频）
+        audio_assets = self.session_manager.list_assets(session_id, asset_type="audio")
+
+        if extra_prompt:
+            # 用户自定义提示词并入每段提示词
+            segments = [dict(seg, content=f"{seg.get('content', '')}。{extra_prompt}") for seg in segments]
+
+        logger.info(
+            f"[步骤7][ComfyUI] 材料: {len(frame_image_paths)} 张首帧, "
+            f"{sum(len(v) for v in reference_image_paths.values())} 张参考图, "
+            f"{len(audio_assets)} 个音频, 逐段overlap={[s.get('overlap', 0) for s in segments]}, "
+            f"mock={self.comfyui_service.mock}"
+        )
+        return {
+            "segments": segments,
+            "frame_image_paths": frame_image_paths,
+            "audio_assets": audio_assets,
+            "reference_image_paths": reference_image_paths,
+        }
+
+    def _finalize_video_result(self, session_id: str, result: dict, seg_indexes: list[int]) -> dict:
+        """构造成功结果并落盘（两段式与一步式共用）"""
+        timeline = result["timeline_data"]
+        result_data = {
+            "generated_videos": [
+                {
+                    # 勾选子集时 timeline 段序对应过滤后 segments，回填原始分镜 index
+                    "segment_index": seg_indexes[j] if j < len(seg_indexes) else j,
+                    "video_id": result.get("prompt_id", ""),
+                    "video_path": result["video_path"],
+                    "duration": round((seg.get("endFrame", 0) - seg.get("startFrame", 0)) / timeline.get("fps", 24), 2),
+                    "prompt": seg.get("prompt", ""),
+                    "task_status": "completed",
+                }
+                for j, seg in enumerate(timeline["segmentConfig"]["segments"])
+            ],
+            "video_count": len(seg_indexes),
+            "segment_indexes": seg_indexes,
+            "success_count": len(seg_indexes),
+            "failed_count": 0,
+            "final_video": {
+                "video_path": result["video_path"],
+                "prompt_id": result.get("prompt_id", ""),
+                "mock": result.get("mock", False),
+                # 逐段重叠合计秒数（_overlap_seconds 为逐段列表；兼容旧结果的单值）
+                "overlap_seconds": round(sum(
+                    timeline.get("_overlap_seconds", [])
+                    if isinstance(timeline.get("_overlap_seconds"), list)
+                    else [timeline.get("_overlap_seconds", 0)]
+                ), 3),
+                "segment_count": len(seg_indexes),
+            },
+            "timeline_data": timeline,
+            "_generating": False,
+            "_success": True,
+        }
+
+        self.session_manager.save_step_result(session_id, "generate_videos", result_data)
+        self.session_manager.update_session_status(session_id, "completed")
+
+        mode_text = "（mock 演示视频）" if result.get("mock") else ""
+        logger.info(f"[步骤7][ComfyUI] 完成 - 最终视频已生成{mode_text}: {result['video_path']}")
+        return result_data
+
+    def _save_video_failure(self, session_id: str, error: Exception) -> dict:
+        """保存失败状态快照"""
+        logger.error(f"[步骤7][ComfyUI] 失败: {str(error)}")
+        failure_data = {
+            "generated_videos": [],
+            "video_count": 0,
+            "success_count": 0,
+            "failed_count": 1,
+            "_generating": False,
+            "_success": False,
+            "error": str(error),
+        }
+        self.session_manager.save_step_result(session_id, "generate_videos", failure_data, success=False)
+        return {"success": False, "error": f"视频生成失败: {str(error)}", "data": failure_data}
 
     async def _step_generate_videos_comfyui(
         self, session_id: str, extra_prompt: str = "", segment_indexes: list[int] | None = None,
     ) -> dict:
-        """步骤7（ComfyUI 链路）：上传材料 → 构造 timeline_data → 整段生成最终视频（勾选分镜子集拼接）"""
+        """步骤7（ComfyUI 一步式链路）：上传材料 → 构造 timeline_data → 整段生成最终视频（勾选分镜子集拼接）"""
         logger.info(f"[步骤7][ComfyUI] 整段视频生成 - 会话: {session_id[:8]}...")
-
-        # 获取首尾帧、分片脚本和参数
-        frames_result = self.session_manager.get_step_result(session_id, "generate_segment_frames")
-        selected_episode = self.get_selected_episode(session_id)
-
-        segment_frames = frames_result['result_data'].get('segment_frames', []) if frames_result else []
-        params = selected_episode['video_params']
-        overlap_seconds = float(params.get('overlap_seconds', 0) or 0)
 
         try:
             # 只按 mark_videos_generating 落盘的 segment_indexes 过滤（不重跑门禁：
             # 生成期间取消某分镜 configured 不应中断任务）；异常走 except 落失败快照
-            segments = self._resolve_generation_segments(session_id, segment_indexes, gate=False)
-            # 收集各分片首帧（缺失首帧的分片不传参考图，仅靠提示词生成）
-            frame_image_paths = {}
-            for frame in segment_frames:
-                idx = frame.get('segment_index', -1)
-                path = frame.get('first_image_path') or ""
-                if idx >= 0 and path:
-                    frame_image_paths[idx] = path
-
-            # 收集各分镜参考素材图（全能参考模式；http(s) 外链无法直接上传，跳过）
-            reference_image_paths = {
-                seg.get("index", i): [
-                    r["image_path"] for r in seg.get("reference_images", []) if r.get("image_path")
-                ]
-                for i, seg in enumerate(segments)
-            }
-            reference_image_paths = {
-                idx: [p for p in paths if not p.startswith(("http://", "https://"))]
-                for idx, paths in reference_image_paths.items() if paths
-            }
-
-            # 收集会话音频资产（参考音频）
-            audio_assets = self.session_manager.list_assets(session_id, asset_type="audio")
-
-            if extra_prompt:
-                # 用户自定义提示词并入每段提示词
-                segments = [dict(seg, content=f"{seg.get('content', '')}。{extra_prompt}") for seg in segments]
-
-            logger.info(
-                f"[步骤7][ComfyUI] 材料: {len(frame_image_paths)} 张首帧, "
-                f"{sum(len(v) for v in reference_image_paths.values())} 张参考图, "
-                f"{len(audio_assets)} 个音频, overlap={overlap_seconds}s, mock={self.comfyui_service.mock}"
-            )
+            materials = self._collect_generation_materials(session_id, segment_indexes, extra_prompt=extra_prompt, gate=False)
 
             # 生成最终视频（mock 模式本地合成演示视频）
-            result = await self.comfyui_service.generate_full_video(
-                segments=segments,
-                frame_image_paths=frame_image_paths,
-                audio_assets=audio_assets,
-                overlap_seconds=overlap_seconds,
-                reference_image_paths=reference_image_paths,
-            )
+            result = await self.comfyui_service.generate_full_video(**materials)
 
-            timeline = result["timeline_data"]
-            result_data = {
-                "generated_videos": [
-                    {
-                        # 勾选子集时 timeline 段序对应过滤后 segments，回填原始分镜 index
-                        "segment_index": segments[j].get("index", j) if j < len(segments) else j,
-                        "video_id": result.get("prompt_id", ""),
-                        "video_path": result["video_path"],
-                        "duration": round((seg.get("endFrame", 0) - seg.get("startFrame", 0)) / timeline.get("fps", 24), 2),
-                        "prompt": seg.get("prompt", ""),
-                        "task_status": "completed",
-                    }
-                    for j, seg in enumerate(timeline["segmentConfig"]["segments"])
-                ],
-                "video_count": len(segments),
-                "segment_indexes": [s.get("index", i) for i, s in enumerate(segments)],
-                "success_count": len(segments),
-                "failed_count": 0,
-                "final_video": {
-                    "video_path": result["video_path"],
-                    "prompt_id": result.get("prompt_id", ""),
-                    "mock": result.get("mock", False),
-                    "overlap_seconds": timeline.get("_overlap_seconds", 0),
-                    "segment_count": len(segments),
-                },
-                "timeline_data": timeline,
-                "_generating": False,
-                "_success": True,
-            }
-
-            self.session_manager.save_step_result(session_id, "generate_videos", result_data)
-            self.session_manager.update_session_status(session_id, "completed")
-
+            seg_indexes = [s.get("index", i) for i, s in enumerate(materials["segments"])]
+            result_data = self._finalize_video_result(session_id, result, seg_indexes)
             mode_text = "（mock 演示视频）" if result.get("mock") else ""
-            logger.info(f"[步骤7][ComfyUI] 完成 - 最终视频已生成{mode_text}: {result['video_path']}")
-
             return {
                 "success": True,
                 "message": f"最终视频生成完成{mode_text}",
@@ -431,16 +568,4 @@ class VideoCreationWorkflowV2:
             }
 
         except Exception as e:
-            logger.error(f"[步骤7][ComfyUI] 失败: {str(e)}")
-            # 保存失败状态
-            failure_data = {
-                "generated_videos": [],
-                "video_count": 0,
-                "success_count": 0,
-                "failed_count": 1,
-                "_generating": False,
-                "_success": False,
-                "error": str(e),
-            }
-            self.session_manager.save_step_result(session_id, "generate_videos", failure_data, success=False)
-            return {"success": False, "error": f"视频生成失败: {str(e)}", "data": failure_data}
+            return self._save_video_failure(session_id, e)

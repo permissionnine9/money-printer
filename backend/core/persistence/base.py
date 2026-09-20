@@ -1,6 +1,7 @@
 """持久化公共基类：收敛三个 manager（SessionManager/ScriptManager/ModelManager）的
 SQLite 连接、建表迁移、时间戳与 JSON 列序列化样板。"""
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -27,22 +28,35 @@ class BaseSQLiteManager:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_database()
 
-    def _connect(self) -> sqlite3.Connection:
-        """业务连接：Row factory + busy timeout（WAL 下多 manager 并发读写）"""
+    @contextmanager
+    def _connect(self):
+        """业务连接：Row factory + busy timeout（WAL 下多 manager 并发读写）。
+
+        生成器上下文管理器：保留 sqlite3 原生 with 的事务语义（异常回滚、
+        正常提交），退出时显式 close——sqlite3.Connection 自身作为 with
+        上下文不会关连接，靠它泄漏 fd（曾导致进程堆积数百个 db 连接）。
+        """
         conn = sqlite3.connect(str(self.db_path), timeout=5.0)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     @staticmethod
     def _now() -> str:
         return datetime.now().isoformat()
 
     def _init_database(self):
-        with sqlite3.connect(str(self.db_path)) as conn:
-            # WAL 模式：多连接（video/script 两个 SessionManager + ScriptManager + ModelManager）并发读写
-            conn.execute("PRAGMA journal_mode=WAL")
-            self._create_schema(conn)
-            conn.commit()
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            with conn:
+                # WAL 模式：多连接（video/script 两个 SessionManager + ScriptManager + ModelManager）并发读写
+                conn.execute("PRAGMA journal_mode=WAL")
+                self._create_schema(conn)
+        finally:
+            conn.close()
 
     def _create_schema(self, conn: sqlite3.Connection):
         """建表 + 列迁移（子类实现）"""

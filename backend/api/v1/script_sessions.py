@@ -30,7 +30,9 @@ from backend.schemas.script import (
     EpisodeRegenerateRequest,
     EpisodeUpdateRequest,
     EpisodesGenerateRequest,
+    IdeationAdoptRequest,
     IdeationMessageRequest,
+    IdeationTitleRequest,
     LookbookGenerateRequest,
     LookbookRegenerateRequest,
     OutlineGenerateRequest,
@@ -153,6 +155,20 @@ async def update_ideation_story_logic(session_id: str, body: dict, _info: dict =
     if not story_logic.strip():
         raise HTTPException(status_code=400, detail="story_logic 不能为空")
     result = get_script_workflow().update_story_logic(session_id, story_logic)
+    return {"success": True, "data": result}
+
+
+@router.put("/{session_id}/ideation/title")
+async def set_ideation_story_title(session_id: str, body: IdeationTitleRequest, _info: dict = Depends(load_script_session)):
+    """手动设定剧名（manual 锁定，AI 收敛不再覆盖；置空解除锁定）"""
+    result = get_script_workflow().set_story_title(session_id, body.title)
+    return {"success": True, "data": result}
+
+
+@router.post("/{session_id}/ideation/adopt")
+async def adopt_ideation_story_logic(session_id: str, body: IdeationAdoptRequest, _info: dict = Depends(load_script_session)):
+    """采纳文本为故事逻辑并完成第 1 步（不经 LLM 收敛）"""
+    result = get_script_workflow().adopt_story_logic(session_id, body.story_logic)
     return {"success": True, "data": result}
 
 
@@ -376,4 +392,4 @@ async def regenerate_lookbook_image(session_id: str, image_id: str, body: Lookbo
 @router.delete("/{session_id}/lookbook/{image_id}")
 async def delete_lookbook_image(session_id: str, image_id: str, _info: dict = Depends(load_script_session)):
     ok = get_script_manager().delete_lookbook(session_id, image_id)
-    return {"success": ok, "message": "定妆照已删除" if ok else "定妆照不存在"}
+    return {"success": ok, "message": "核心素材已删除" if ok else "核心素材不存在"}

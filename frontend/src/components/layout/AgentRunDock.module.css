@@ -1,0 +1,48 @@
+.dock {
+  position: fixed;
+  top: 72px; /* Header 64px + 8px */
+  right: 16px;
+  width: 300px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.card {
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.cardError {
+  background: #fff2f0;
+  border: 1px solid #ffccc7;
+}
+
+.cardName {
+  flex: 1;
+  min-width: 0;
+}
+
+.cardStatus {
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.cardClose {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.45);
+  padding: 2px;
+}
+
+.cardClose:hover {
+  color: rgba(0, 0, 0, 0.88);
+}

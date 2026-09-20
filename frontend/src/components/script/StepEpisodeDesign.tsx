@@ -243,7 +243,7 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
       Modal.confirm({
         title: '确认重新生成分集设计？',
         icon: <ExclamationCircleOutlined />,
-        content: '将清空现有全部分集、实体与定妆照数据，此操作不可撤销。是否继续？',
+        content: '将清空现有全部分集、实体与核心素材数据，此操作不可撤销。是否继续？',
         onOk: () => executeGenerate('', extra),
       })
     } else {
@@ -407,7 +407,7 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
               }}
             >
               <Text type="secondary" style={{ fontSize: 12 }}>
-                暂无定妆照
+                暂无核心素材
               </Text>
             </div>
           )}
@@ -798,7 +798,7 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
               }}
             >
               <Text type="secondary" style={{ fontSize: 12 }}>
-                暂无定妆照
+                暂无核心素材
               </Text>
             </div>
           )}

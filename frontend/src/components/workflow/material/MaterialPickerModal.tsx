@@ -212,13 +212,13 @@ export const MaterialPickerModal: React.FC<MaterialPickerModalProps> = ({
 
   const emptyHint = (
     <Empty
-      description="素材池为空：可先在第 4 步剧本工作流生成定妆照，或用「AI 生成素材图」创建"
+      description="素材池为空：可先在第 4 步剧本工作流生成核心素材，或用「AI 生成素材图」创建"
       style={{ padding: '24px 0' }}
     />
   )
 
   const tabItems = [
-    { key: 'lookbook', label: '定妆照', children: lookbookGroups.length ? <MaterialGrid groups={lookbookGroups} selected={selected} onItemClick={handleItemClick} /> : emptyHint },
+    { key: 'lookbook', label: '核心素材', children: lookbookGroups.length ? <MaterialGrid groups={lookbookGroups} selected={selected} onItemClick={handleItemClick} /> : emptyHint },
     { key: 'episode', label: '本集素材', children: episodeGroups.length ? <MaterialGrid groups={episodeGroups} selected={selected} onItemClick={handleItemClick} onDelete={handleDeleteMaterial} /> : emptyHint },
     ...(segmentMaterials !== undefined
       ? [{

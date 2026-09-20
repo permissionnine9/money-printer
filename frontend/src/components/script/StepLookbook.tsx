@@ -1,5 +1,5 @@
 /**
- * 第 4 步：剧本定妆照（实体卡片上直接生成 / 重新生成 / 删除，弹窗输入提示词，单卡片独立进度）
+ * 第 4 步：全剧核心素材生成（实体卡片上直接生成 / 重新生成 / 删除，弹窗输入提示词，单卡片独立进度）
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button, Card, Empty, Image, Input, Modal, Popconfirm, Select, Space, Spin, Tag, Typography, message } from 'antd'
@@ -13,6 +13,20 @@ import { imageSrc } from '@/utils/imageSrc'
 
 const { Text } = Typography
 const { TextArea } = Input
+
+// 图片风格选项：zh 为中文风格要求（并入 style_prompt 给 agent，生成路径）；en 为英文风格关键词（附加到生图 prompt，重新生成路径）
+const IMAGE_STYLE_OPTIONS = [
+  { value: 'auto', label: '自动（AI 根据剧本气质判断）', zh: '', en: '' },
+  { value: 'realistic', label: '现实主义', zh: '写实摄影质感，真实自然光影与材质细节，像真实存在的照片', en: 'realistic photography style, shot on 35mm film, natural lighting, lifelike textures' },
+  { value: '2d', label: '2D 插画', zh: '2D 手绘插画，干净线稿与扁平上色，明快配色', en: '2D illustration style, clean linework, flat colors' },
+  { value: '3d', label: '3D 卡通渲染', zh: '皮克斯式 3D 卡通渲染，柔和全局光照，圆润造型，高细节材质', en: 'stylized 3D render, soft global illumination, subsurface scattering' },
+  { value: 'anime', label: '日式动漫', zh: '日式动漫赛璐璐风格，clean line art，精致角色设计与背景美术', en: 'Japanese anime style, cel shading, clean line art' },
+  { value: 'guofeng', label: '国风动漫', zh: '国风动漫美术，东方古典元素与配色，飘逸写意的中国风', en: 'Chinese guofeng anime style, oriental classical aesthetics, elegant flowing design' },
+  { value: 'comic', label: '美漫风', zh: '美式漫画风格，粗犷勾线与网点排线阴影，强对比动态构图', en: 'American comic book style, bold ink outlines, halftone shading' },
+  { value: 'ink', label: '水墨画', zh: '中国传统水墨画，毛笔笔触与留白意境，淡雅设色', en: 'traditional Chinese ink painting, brush strokes, negative space, muted colors' },
+  { value: 'watercolor', label: '水彩手绘', zh: '水彩手绘质感，柔和晕染边缘与纸纹，清新通透', en: 'watercolor painting, soft bleeding edges, paper texture' },
+  { value: 'cyberpunk', label: '赛博朋克', zh: '赛博朋克科幻风，霓虹灯光效与未来都市氛围，高对比冷暖色', en: 'cyberpunk style, neon lighting, futuristic sci-fi atmosphere' },
+]
 
 interface StepLookbookProps {
   session: ScriptSessionDetail
@@ -30,6 +44,7 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
   const [deleting, setDeleting] = useState('')
   const [modal, setModal] = useState<{ entity: ScriptEntity; image?: LookbookImage } | null>(null)
   const [promptText, setPromptText] = useState('')
+  const [styleType, setStyleType] = useState('auto')
   const [modelConfigId, setModelConfigId] = useState<string | undefined>(undefined)
   const [confirming, setConfirming] = useState(false)
   const [completing, setCompleting] = useState(false)
@@ -86,24 +101,44 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
 
   const openModal = (entity: ScriptEntity, image?: LookbookImage) => {
     setPromptText(image?.prompt || '')
+    setStyleType('auto')
     setModal({ entity, image })
   }
 
   const handleConfirm = async () => {
     if (!modal) return
     const { entity, image } = modal
+    const style = IMAGE_STYLE_OPTIONS.find((s) => s.value === styleType && s.value !== 'auto')
     setConfirming(true)
     try {
-      const runId = image
-        ? await scriptStepApi.regenerateLookbookImage(
-            session.session_id,
-            image.image_id,
-            promptText || undefined,
-            modelConfigId
-          )
-        : await scriptStepApi.generateLookbook(session.session_id, [entity.entity_id], promptText, modelConfigId)
+      let runId: string
+      if (image) {
+        // 重新生成不走 agent：英文风格关键词附加到生图 prompt（提示词为空则沿用原 prompt 再附加）
+        let prompt = promptText || undefined
+        if (style) {
+          const base = promptText || image.prompt || ''
+          prompt = base ? `${base}, ${style.en}` : style.en
+        }
+        runId = await scriptStepApi.regenerateLookbookImage(
+          session.session_id,
+          image.image_id,
+          prompt,
+          modelConfigId
+        )
+      } else {
+        // 生成走 agent：中文风格要求并入 style_prompt（优先级高于 agent 自行判断）
+        const stylePrompt = [style ? `图片风格：${style.label}——${style.zh}` : '', promptText]
+          .filter(Boolean)
+          .join('\n')
+        runId = await scriptStepApi.generateLookbook(
+          session.session_id,
+          [entity.entity_id],
+          stylePrompt,
+          modelConfigId
+        )
+      }
       setRuns((prev) => new Map(prev).set(entity.entity_id, runId))
-      message.success('定妆照生成任务已启动')
+      message.success('核心素材生成任务已启动')
       setModal(null)
       void loadImages()
     } catch (e) {
@@ -120,7 +155,7 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
       next.delete(entityId)
       return next
     })
-    if (!ev.success) message.error(ev.error || '定妆照生成失败')
+    if (!ev.success) message.error(ev.error || '核心素材生成失败')
     await loadImages()
     await loadEntities()
   }
@@ -129,7 +164,7 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
     setDeleting(image.image_id)
     try {
       await scriptStepApi.deleteLookbookImage(session.session_id, image.image_id)
-      message.success('定妆照已删除')
+      message.success('核心素材已删除')
       await loadImages()
     } catch (e) {
       message.error((e as Error).message)
@@ -153,7 +188,7 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
 
   if (!canExecute) {
     return (
-      <Card title="剧本定妆照" style={{ marginTop: 16 }}>
+      <Card title="全剧核心素材生成" style={{ marginTop: 16 }}>
         <Text type="secondary">请先完成第 3 步：分集设计</Text>
       </Card>
     )
@@ -208,7 +243,7 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
             </Text>
           ) : (
             <Text type="secondary" style={{ fontSize: 12 }}>
-              暂无定妆照
+              暂无核心素材
             </Text>
           )}
         </div>
@@ -222,7 +257,7 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
                 重新生成
               </Button>
               <Popconfirm
-                title="确定删除此定妆照？"
+                title="确定删除此核心素材？"
                 onConfirm={() => handleDeleteImage(img)}
                 okText="删除"
                 cancelText="取消"
@@ -244,7 +279,7 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
               disabled={busy}
               onClick={() => openModal(e)}
             >
-              生成定妆照
+              生成核心素材
             </Button>
           )}
         </div>
@@ -272,13 +307,13 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
       title={
         <span>
           {isCompleted && <CheckCircleOutlined style={{ color: '#52c41a', marginRight: 8 }} />}
-          剧本定妆照
+          全剧核心素材生成
         </span>
       }
       style={{ marginTop: 16 }}
     >
       <Text type="secondary">
-        为分集设计中的人物 / 场景生成定妆照：点击卡片上的按钮，输入提示词后生成；已有定妆照可重新生成或删除，各卡片互不影响。
+        为分集设计中的人物 / 场景生成核心素材：人物为三视图设定图（含身高标注与比例尺），场景为全景素材图；点击卡片上的按钮，输入提示词后生成；已有素材可重新生成或删除，各卡片互不影响。
       </Text>
 
       {/* 实体卡片 */}
@@ -306,7 +341,7 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
         {!isCompleted && (
           <div style={{ marginTop: 8 }}>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              确认定妆照满足要求后手动完成第 4 步
+              确认核心素材满足要求后手动完成第 4 步
             </Text>
           </div>
         )}
@@ -315,7 +350,7 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
       {/* 生成 / 重新生成弹窗 */}
       <Modal
         open={!!modal}
-        title={`${modal?.image ? '重新生成' : '生成'}定妆照${modal ? ` - ${modal.entity.name}` : ''}`}
+        title={`${modal?.image ? '重新生成' : '生成'}核心素材${modal ? ` - ${modal.entity.name}` : ''}`}
         okText="开始生成"
         cancelText="取消"
         confirmLoading={confirming}
@@ -334,6 +369,18 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
             onChange={(ev) => setPromptText(ev.target.value)}
             placeholder="例如：纪实摄影质感，自然光，真实生活感，35mm 胶片"
             style={{ marginTop: 4 }}
+          />
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <Text type="secondary">图片风格</Text>
+          <Select
+            value={styleType}
+            onChange={(v) => setStyleType(v)}
+            style={{ width: '100%', marginTop: 4 }}
+            options={IMAGE_STYLE_OPTIONS.map((s) => ({
+              value: s.value,
+              label: s.value === 'auto' ? s.label : `${s.label} · ${s.zh}`,
+            }))}
           />
         </div>
         <div style={{ marginTop: 12 }}>

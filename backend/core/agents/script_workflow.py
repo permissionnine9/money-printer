@@ -167,14 +167,42 @@ class ScriptWorkflow(StepWorkflowBase):
         self.store.write_story_logic(session_id, story_logic)
         return {"story_logic": story_logic}
 
+    def set_story_title(self, session_id: str, title: str) -> dict:
+        """手动设定剧名（manual 锁定；大纲生成后以大纲根标题为准）"""
+        title = title.strip().strip("《》").strip()
+        if len(title) > 60:
+            raise ScriptWorkflowError("剧名过长（不超过 60 字）")
+        self.store.set_story_title(session_id, title)
+        return {"title": title}
+
+    def adopt_story_logic(self, session_id: str, story_logic: str) -> dict:
+        """采纳文本为故事逻辑并完成第 1 步（不经 LLM 收敛）"""
+        story_logic = story_logic.strip()
+        if not story_logic:
+            raise ScriptWorkflowError("故事逻辑不能为空")
+        step = self.sm.get_step_result(session_id, "story_ideation")
+        result_data = step["result_data"] if step else {}
+        messages = list(result_data.get("messages", []))
+        # 与最近一条 story_logic 相同则不重复追加（防反复采纳堆气泡）
+        last = messages[-1] if messages else {}
+        if not (last.get("kind") == "story_logic" and last.get("content") == story_logic):
+            messages.append({"role": "assistant", "content": story_logic, "kind": "story_logic"})
+        self.store.write_story_logic(session_id, story_logic)
+        self.sm.save_step_result(session_id, "story_ideation", {
+            **{k: v for k, v in result_data.items() if k != "story_logic"},
+            "messages": messages,
+        }, success=True)
+        return {"story_logic": story_logic}
+
     def get_ideation(self, session_id: str) -> dict:
         step = self.sm.get_step_result(session_id, "story_ideation")
         if not step:
-            return {"messages": [], "story_logic": ""}
+            return {"messages": [], "story_logic": "", "title": ""}
         return {
             **step["result_data"],
             "story_logic": self.store.read_story_logic(session_id)
             or step["result_data"].get("story_logic", ""),
+            "title": self.store.read_story_title(session_id),
         }
 
     # ==================== 第 2 步：故事大纲 ====================
@@ -190,6 +218,10 @@ class ScriptWorkflow(StepWorkflowBase):
         story_logic = load_story_logic(self.store, self.sm, session_id)
 
         req_lines = []
+        # 已定剧名（第 1 步 AI 起名或手动设定）→ 大纲根标题沿用，避免另起名覆盖
+        titled = self.store.read_story_title(session_id)
+        if titled:
+            req_lines.append(f"- 剧名：全剧名已定为《{titled}》，大纲根标题（一级标题）必须使用该名")
         if requirements.get("episode_count"):
             req_lines.append(f"- 集数：{requirements['episode_count']} 集")
         if requirements.get("total_word_count"):
@@ -598,7 +630,7 @@ class ScriptWorkflow(StepWorkflowBase):
         # 定妆照仅支持人物/场景，线索/伏笔无视觉形象
         invalid = [eid for eid in entity_ids if owned[eid]["entity_type"] not in ("character", "scene")]
         if invalid:
-            raise ScriptWorkflowError(f"仅人物/场景可生成定妆照，线索/伏笔不支持: {invalid}")
+            raise ScriptWorkflowError(f"仅人物/场景可生成核心素材，线索/伏笔不支持: {invalid}")
         entities = [owned[eid] for eid in entity_ids]
 
         # 1. agent 单轮产出 prompt（story_logic 供 agent 判断本剧视觉风格）
@@ -611,12 +643,12 @@ class ScriptWorkflow(StepWorkflowBase):
         def _parse_prompts(text: str) -> list[dict]:
             items = extract_json_array(text)
             if not items:
-                raise ScriptWorkflowError("定妆照 prompt 输出解析失败，请重试")
+                raise ScriptWorkflowError("核心素材 prompt 输出解析失败，请重试")
             return items
 
-        on_event(AgentEvent(type="thinking", delta="正在生成定妆照 prompt..."))
+        on_event(AgentEvent(type="thinking", delta="正在生成核心素材 prompt..."))
         items = await self.agent_steps.run(
-            "定妆照 prompt 生成",
+            "核心素材 prompt 生成",
             template="lookbook_prompts",
             variables={
                 "story_logic": story_logic or "（无）",
@@ -640,9 +672,20 @@ class ScriptWorkflow(StepWorkflowBase):
                 }
         for e in entities:
             if e["entity_id"] not in prompts_by_entity:
+                if e["entity_type"] == "character":
+                    fallback_prompt = (
+                        f"{e['name']}, {e['description']}, character turnaround sheet, front view, side view "
+                        "and back view of the same character, full body, height measurement chart with scale "
+                        "ruler, plain neutral background, consistent character design"
+                    )
+                else:
+                    fallback_prompt = (
+                        f"{e['name']}, {e['description']}, empty scene, establishing shot, no people, "
+                        "consistent scene design"
+                    )
                 prompts_by_entity[e["entity_id"]] = {
-                    "prompt": f"{e['name']}, {e['description']}, single subject, consistent character design, medium shot",
-                    "description": f"{e['name']} 定妆照",
+                    "prompt": fallback_prompt,
+                    "description": f"{e['name']} 核心素材",
                 }
 
         # 2. 确定性生图（间隔提交 + 并发轮询；完成后回写实体的 lookbook 锚点）
@@ -653,7 +696,7 @@ class ScriptWorkflow(StepWorkflowBase):
             row = self.scm.insert_lookbook(session_id, e["entity_id"], p["prompt"], p["description"])
             rows[row["image_id"]] = row
 
-        on_event(AgentEvent(type="thinking", delta=f"开始生成 {len(rows)} 张定妆照..."))
+        on_event(AgentEvent(type="thinking", delta=f"开始生成 {len(rows)} 张核心素材..."))
 
         def _on_completed(image_id: str, poll: dict) -> None:
             lookbook = self.scm.get_lookbook(image_id)
@@ -684,7 +727,7 @@ class ScriptWorkflow(StepWorkflowBase):
         """单张定妆照重生成（可选改 prompt）"""
         row = self.scm.get_lookbook(image_id)
         if not row or row["script_session_id"] != session_id:
-            raise ScriptWorkflowError(f"定妆照不存在: {image_id}")
+            raise ScriptWorkflowError(f"核心素材不存在: {image_id}")
         image_service = build_image_service_from_model_config(model_config_id)
         await self.image_tasks.run_single(
             image_service,

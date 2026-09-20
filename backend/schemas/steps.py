@@ -13,6 +13,7 @@ class SelectEpisodeRequest(BaseModel):
     episode_id: str = Field(..., pattern=EPISODE_ID_PATTERN, description="分集ID（如 ep_01）")
     resolution: str = Field(default="1080p", description="分辨率")
     aspect_ratio: str = Field(default="16:9", description="宽高比")
+    film_style: str = Field(default="现实主义", description="影视风格（如：现实主义、二次元动漫、3D动画、赛博朋克、国风水墨、复古胶片）")
     max_segment_duration: int = Field(default=15, ge=5, le=30, description="最大分片时长（秒），范围5-30秒。注意：当前即梦和wan2.2模型仅支持5秒或10秒视频生成，更长时长需要接入其他模型")
 
 
@@ -59,6 +60,7 @@ class SegmentCompleteRequest(BaseModel):
 class GenerateVideosRequest(BaseModel):
     """步骤4：生成视频（勾选分镜子集；缺省=全部已配置分镜）"""
     segment_indexes: Optional[list[int]] = Field(None, description="勾选参与生成的分镜 index 列表（须为已完成配置的分镜）")
+    global_prompt: str = Field(default="", description="全局提示词（两段式导入时注入 timeline_data.globalPrompt，附加到整条时间轴）")
 
 
 class StepResponse(BaseModel):

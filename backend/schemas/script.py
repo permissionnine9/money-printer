@@ -18,6 +18,14 @@ class IdeationMessageRequest(BaseModel):
     message: str = Field(min_length=1, description="用户消息")
 
 
+class IdeationAdoptRequest(BaseModel):
+    story_logic: str = Field(min_length=1, description="采纳为故事逻辑的文本")
+
+
+class IdeationTitleRequest(BaseModel):
+    title: str = Field(default="", description="剧名（置空解除锁定）")
+
+
 # ==================== 第 2 步：故事大纲 ====================
 
 class OutlineGenerateRequest(BaseModel):

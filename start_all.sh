@@ -17,12 +17,14 @@ set -m
 
 BACKEND_PID=""
 FRONTEND_PID=""
+TUNNEL_PID=""
 
 cleanup() {
     echo ""
     echo -e "${YELLOW}正在停止所有服务...${NC}"
     [ -n "$BACKEND_PID" ] && kill -- -"$BACKEND_PID" 2>/dev/null
     [ -n "$FRONTEND_PID" ] && kill -- -"$FRONTEND_PID" 2>/dev/null
+    [ -n "$TUNNEL_PID" ] && kill -- -"$TUNNEL_PID" 2>/dev/null
     wait 2>/dev/null
     echo -e "${GREEN}所有服务已停止${NC}"
     exit 0
@@ -32,6 +34,10 @@ trap cleanup INT TERM
 
 echo -e "${GREEN}正在同时启动后端（http://localhost:8000/docs）和前端（http://localhost:5173）...${NC}"
 echo -e "${GREEN}按 Ctrl+C 停止所有服务${NC}"
+
+# ComfyUI SSH 隧道（后台保活，将远程 8188 转发到本地）
+bash start_comfyui_tunnel.sh &
+TUNNEL_PID=$!
 
 bash start_backend.sh &
 BACKEND_PID=$!

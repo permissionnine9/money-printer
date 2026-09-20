@@ -3,7 +3,7 @@
  */
 import React, { useEffect, useRef, useState } from 'react'
 import { Button, Card, Collapse, Empty, Input, Space, Spin, Tag, Typography, message } from 'antd'
-import { CheckCircleOutlined, EyeOutlined, SaveOutlined, SendOutlined, StopOutlined } from '@ant-design/icons'
+import { CheckCircleOutlined, CheckOutlined, EyeOutlined, SaveOutlined, SendOutlined, StopOutlined } from '@ant-design/icons'
 import type { AgentEvent, IdeationMessage, ScriptSessionDetail } from '@/types'
 import { scriptStepApi } from '@/api/client'
 import { fetchSSE } from '@/api/sse'
@@ -12,6 +12,20 @@ import { useScriptSessionStore } from '@/stores/scriptSessionStore'
 
 const { Text } = Typography
 const { TextArea } = Input
+
+// AI 回复是否为故事逻辑格式（行首「核心情境：」锚点，与 finalize 输出结构一致；
+// 行首+冒号避免盘问解释中顺带提到该词被误判）
+const looksLikeStoryLogic = (t: string) => /^核心情境[:：]/m.test(t)
+
+// 编辑框草稿：已 finalize 以文件为准，否则取最近一条格式化的 AI 回复
+const draftStoryLogic = (msgs: IdeationMessage[], fileLogic: string): string => {
+  if (fileLogic) return fileLogic
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i]
+    if (m.role === 'assistant' && looksLikeStoryLogic(m.content)) return m.content
+  }
+  return ''
+}
 
 interface StepIdeationChatProps {
   session: ScriptSessionDetail
@@ -27,17 +41,20 @@ const BUBBLE_BASE: React.CSSProperties = {
 }
 
 export const StepIdeationChat: React.FC<StepIdeationChatProps> = ({ session }) => {
-  const { refreshSession } = useScriptSessionStore()
+  const { refreshSession, loadSessions } = useScriptSessionStore()
   const ideationData = session.step_results?.story_ideation?.result_data
   const isCompleted = session.completed_steps?.includes('story_ideation')
   const storyLogic: string = ideationData?.story_logic || ''
+  const storyTitle: string = ideationData?.title || ''
 
   const [messages, setMessages] = useState<IdeationMessage[]>(ideationData?.messages || [])
   const [input, setInput] = useState('')
-  const [busy, setBusy] = useState<'' | 'chat' | 'finalize'>('')
+  const [busy, setBusy] = useState<'' | 'chat' | 'finalize' | 'adopt'>('')
   const [round, setRound] = useState<{ thinking: string; text: string } | null>(null)
   const [storyLogicEdit, setStoryLogicEdit] = useState(storyLogic)
   const [savingLogic, setSavingLogic] = useState(false)
+  const [titleEdit, setTitleEdit] = useState(storyTitle)
+  const [savingTitle, setSavingTitle] = useState(false)
   const [lastPrompt, setLastPrompt] = useState<{ systemPrompt: string; userPrompt: string; model: string } | null>(null)
   const [promptOpen, setPromptOpen] = useState(false)
 
@@ -52,9 +69,19 @@ export const StepIdeationChat: React.FC<StepIdeationChatProps> = ({ session }) =
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.session_id])
 
+  // 编辑框同步：文件值变化或会话切换时回填（文件值优先，否则带出最近格式化草稿）；
+  // 与会话切换合并依赖，避免切会话时被上一个会话的旧值同步覆盖、清空草稿
   useEffect(() => {
-    setStoryLogicEdit(storyLogic)
-  }, [storyLogic])
+    const msgs = session.step_results?.story_ideation?.result_data?.messages || []
+    setStoryLogicEdit(draftStoryLogic(msgs, storyLogic))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.session_id, storyLogic])
+
+  // 剧本名同步（同上，合并依赖防切会话旧值覆盖）
+  useEffect(() => {
+    setTitleEdit(storyTitle)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.session_id, storyTitle])
 
   // 新消息 / 流式增量时滚动到底部
   useEffect(() => {
@@ -149,6 +176,12 @@ export const StepIdeationChat: React.FC<StepIdeationChatProps> = ({ session }) =
           ...(kind === 'finalize' && finalContent ? { kind: 'story_logic' as const } : {}),
         },
       ])
+      // 盘问中 AI 直接给出新版故事逻辑：自动填入下方编辑框，免去手动复制
+      // （中断的残缺内容不刷入，避免「（已中断）」标记混入草稿）
+      if (kind === 'chat' && !aborted && looksLikeStoryLogic(content)) {
+        setStoryLogicEdit(content)
+        message.info('AI 给出了新版故事逻辑，已填入下方编辑框')
+      }
     }
     setRound(null)
     abortRef.current = null
@@ -166,6 +199,45 @@ export const StepIdeationChat: React.FC<StepIdeationChatProps> = ({ session }) =
   const handleSend = () => void runStream('chat', input)
   const handleFinalize = () => void runStream('finalize')
   const handleStop = () => abortRef.current?.abort()
+
+  // 采纳编辑框当前内容为故事逻辑并完成第 1 步（不经 LLM 收敛）
+  const handleAdopt = async () => {
+    if (!storyLogicEdit.trim()) return
+    setBusy('adopt')
+    try {
+      await scriptStepApi.adoptStoryLogic(session.session_id, storyLogicEdit)
+      message.success('已采纳故事逻辑，第 1 步完成')
+      await refreshSession()
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  // 手动采纳某条 AI 回复到编辑框
+  const adoptMessage = (content: string) => {
+    setStoryLogicEdit(content)
+    message.success('已采纳到下方故事逻辑编辑框')
+  }
+
+  // 保存剧本名（侧栏显示名；生成大纲后以大纲根标题为准）
+  const saveTitle = async () => {
+    if (!titleEdit.trim()) {
+      message.warning('剧名不能为空')
+      return
+    }
+    setSavingTitle(true)
+    try {
+      await scriptStepApi.setStoryTitle(session.session_id, titleEdit)
+      message.success('剧本名已保存')
+      await Promise.all([refreshSession(), loadSessions()])
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setSavingTitle(false)
+    }
+  }
 
   const saveStoryLogic = async () => {
     if (!storyLogicEdit.trim()) {
@@ -201,6 +273,13 @@ export const StepIdeationChat: React.FC<StepIdeationChatProps> = ({ session }) =
             </Tag>
           )}
           {m.content}
+          {!isUser && m.kind !== 'story_logic' && (
+            <div style={{ marginTop: 4, textAlign: 'right' }}>
+              <Button type="link" size="small" style={{ padding: 0, height: 'auto', fontSize: 12 }} onClick={() => adoptMessage(m.content)}>
+                采纳为故事逻辑
+              </Button>
+            </div>
+          )}
         </div>
       </div>
     )
@@ -258,7 +337,7 @@ export const StepIdeationChat: React.FC<StepIdeationChatProps> = ({ session }) =
         style={{ marginTop: 16 }}
       >
         <Text type="secondary">
-          与 AI 编剧多轮讨论故事方向（题材 / 人物 / 主线 / 结局走向），聊得差不多后点击底部「确认故事逻辑」收敛设定。
+          与 AI 编剧多轮讨论故事方向（题材 / 人物 / 主线 / 结局走向）。AI 给出的新版故事逻辑会自动填入下方编辑框（也可在消息上点「采纳为故事逻辑」），满意后点「采纳并完成第一步」；需要 AI 汇总整理时点「让 AI 收敛故事逻辑」。
         </Text>
 
         <div ref={listRef} style={{ marginTop: 16, maxHeight: 420, overflow: 'auto' }}>
@@ -284,12 +363,14 @@ export const StepIdeationChat: React.FC<StepIdeationChatProps> = ({ session }) =
             placeholder={busy ? '生成中…' : '输入你的故事想法，与 AI 编剧讨论'}
             autoSize={{ minRows: 2, maxRows: 6 }}
             disabled={busy !== ''}
+            onPressEnter={(e) => {
+              if (!e.shiftKey) {
+                e.preventDefault()
+                handleSend()
+              }
+            }}  
           />
-          {busy ? (
-            <Button danger icon={<StopOutlined />} onClick={handleStop}>
-              停止
-            </Button>
-          ) : (
+          {busy ? null : (
             <Button type="primary" icon={<SendOutlined />} disabled={!input.trim()} onClick={handleSend}>
               发送
             </Button>
@@ -300,37 +381,72 @@ export const StepIdeationChat: React.FC<StepIdeationChatProps> = ({ session }) =
           <Button
             type="primary"
             ghost={isCompleted}
+            icon={<CheckOutlined />}
+            loading={busy === 'adopt'}
+            disabled={busy !== '' || !storyLogicEdit.trim()}
+            onClick={() => void handleAdopt()}
+          >
+            {isCompleted ? '重新采纳并更新' : '采纳并完成第一步'}
+          </Button>
+          <Button
+            style={{ marginLeft: 8 }}
             icon={<CheckCircleOutlined />}
             loading={busy === 'finalize'}
-            disabled={busy === 'chat' || messages.length === 0}
+            disabled={busy !== '' || messages.length === 0}
             onClick={handleFinalize}
           >
-            {isCompleted ? '重新收敛故事逻辑' : '确认故事逻辑（完成第 1 步）'}
+            让 AI 收敛故事逻辑
           </Button>
-          {messages.length === 0 && (
+          {(busy === 'chat' || busy === 'finalize') ? (
+            <Button style={{ marginLeft: 8 }} danger icon={<StopOutlined />} onClick={handleStop}>
+              停止
+            </Button>
+          ) : null}
+
+          {messages.length === 0 && !storyLogicEdit && (
             <div style={{ marginTop: 4 }}>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                至少进行一轮对话后才能确认
+                先聊一轮让 AI 生成故事逻辑，或直接在下方编辑框粘贴后采纳
               </Text>
             </div>
           )}
           {isCompleted && (
             <div style={{ marginTop: 4 }}>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                步骤已完成，仍可继续盘问（直接发送消息）或重新收敛故事逻辑
+                步骤已完成，仍可继续盘问（直接发送消息）后重新采纳
               </Text>
             </div>
           )}
         </div>
       </Card>
 
-      {storyLogic && (
-        <Card
-          size="small"
-          title="故事逻辑"
-          style={{ marginTop: 16 }}
-          extra={isCompleted ? <Tag color="success">已确认</Tag> : <Tag color="warning">待确认</Tag>}
-        >
+      <Card
+        size="small"
+        title="故事逻辑"
+        style={{ marginTop: 16 }}
+        extra={isCompleted ? <Tag color="success">已确认</Tag> : <Tag color="warning">待确认</Tag>}
+      >
+          <div style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center' }}>
+            <Text type="secondary" style={{ flexShrink: 0 }}>
+              剧本名
+            </Text>
+            <Input
+              value={titleEdit}
+              onChange={(e) => setTitleEdit(e.target.value)}
+              placeholder="侧边栏与会话显示名（AI 收敛时自动起名，可手动修改）"
+              maxLength={60}
+              onPressEnter={() => void saveTitle()}
+              disabled={savingTitle}
+            />
+            <Button
+              icon={<SaveOutlined />}
+              loading={savingTitle}
+              disabled={savingTitle || !titleEdit.trim() || titleEdit.trim() === storyTitle.trim()}
+              onClick={() => void saveTitle()}
+            >
+              保存
+            </Button>
+          </div>
           <TextArea
             value={storyLogicEdit}
             onChange={(e) => setStoryLogicEdit(e.target.value)}
@@ -341,8 +457,7 @@ export const StepIdeationChat: React.FC<StepIdeationChatProps> = ({ session }) =
               保存
             </Button>
           </div>
-        </Card>
-      )}
+      </Card>
 
       <PromptViewerModal
         open={promptOpen}

@@ -189,6 +189,29 @@ class SessionManager(BaseSQLiteManager):
 
         return True
 
+    def save_aux_state(self, session_id: str, key: str, result_data: dict) -> bool:
+        """保存辅助状态（如 comfyui_import 导入暂存）
+
+        与 save_step_result 共用 step_results 表，但不校验步骤名、
+        不推进 current_step（辅助状态不属于步骤状态机）。
+        读取直接用 get_step_result(session_id, key)。
+        """
+        now = self._now()
+        result_json = dump_json(result_data)
+        with self._connect() as conn:
+            conn.execute("""
+                INSERT INTO step_results (session_id, step_name, result_data, completed_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(session_id, step_name)
+                DO UPDATE SET result_data = ?, completed_at = ?
+            """, (session_id, key, result_json, now, result_json, now))
+            conn.execute(
+                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+                (now, session_id)
+            )
+            conn.commit()
+        return True
+
     def get_step_result(self, session_id: str, step_name: str) -> Optional[dict]:
         """获取步骤结果
 

@@ -9,8 +9,9 @@ from backend.core.persistence.workspace_store import WorkspaceStore
 
 
 def script_title(store: WorkspaceStore, session_id: str) -> str:
-    """剧本展示名（outline 文件 meta.title，即大纲根节点剧名）"""
-    return (store.read_outline(session_id) or {}).get("title", "")
+    """剧本展示名：大纲生成后以 outline title 为准，此前用故事逻辑阶段定的剧名"""
+    outline_title = (store.read_outline(session_id) or {}).get("title", "")
+    return outline_title or store.read_story_title(session_id)
 
 
 def script_step_results(sm: SessionManager, store: WorkspaceStore, session_id: str) -> dict:
@@ -19,7 +20,7 @@ def script_step_results(sm: SessionManager, store: WorkspaceStore, session_id: s
     for step_name, row in sm.get_step_results_map(session_id).items():
         rd = row.get("result_data") or {}
         if step_name == "story_ideation":
-            rd = {**rd, "story_logic": store.read_story_logic(session_id)}
+            rd = {**rd, "story_logic": store.read_story_logic(session_id), "title": store.read_story_title(session_id)}
         elif step_name == "story_outline":
             rd = store.read_outline(session_id) or {}
         results[step_name] = {**row, "result_data": rd}
@@ -40,4 +41,8 @@ def video_step_results(sm: SessionManager, store: WorkspaceStore, session_id: st
                 if sb:
                     rd = sb
         results[step_name] = {**row, "result_data": rd}
+    # 辅助状态（非步骤状态机）：ComfyUI 导入暂存，前端据此显示「已导入」
+    comfyui_import = sm.get_step_result(session_id, "comfyui_import")
+    if comfyui_import:
+        results["comfyui_import"] = comfyui_import
     return results

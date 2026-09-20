@@ -6,20 +6,21 @@ class VideoParams(BaseModel):
     """视频参数"""
     resolution: str = Field(default="1080p", description="分辨率")
     aspect_ratio: str = Field(default="16:9", description="宽高比")
+    film_style: str = Field(default="现实主义", description="影视风格（如：现实主义、二次元动漫、3D动画、赛博朋克、国风水墨、复古胶片）")
     max_segment_duration: int = Field(default=15, description="最大分片时长（秒），注意：当前即梦和wan2.2模型仅支持5秒或10秒视频生成", ge=5, le=30)
-    overlap_seconds: float = Field(default=0.0, description="相邻分片之间的重叠时长（秒），用于视频生成时段间过渡衔接", ge=0, le=5)
 
     def to_prompt_context(self) -> str:
         """转换为提示词上下文"""
         return f"""视频参数:
 - 分辨率: {self.resolution}
 - 宽高比: {self.aspect_ratio}
+- 影视风格: {self.film_style}
 - 最大分片时长: {self.max_segment_duration}秒"""
 
 
 class SegmentReferenceImage(BaseModel):
     """分镜引用的素材图（全能参考模式；description 为分镜侧独立副本）"""
-    image_id: str = Field(description="素材池 ID（mat_* 分集素材 / lookbook_lb_* 定妆照）")
+    image_id: str = Field(description="素材池 ID（mat_* 分集素材 / lookbook_lb_* 核心素材）")
     image_path: str = Field(default="", description="图片本地路径或URL（保存时从素材源刷新）")
     description: str = Field(default="", description="对图片描述（分镜侧独立编辑，默认带出库内描述）")
 

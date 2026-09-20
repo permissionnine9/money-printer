@@ -49,6 +49,7 @@ async def step_1_select_episode(
     video_params = {
         "resolution": request.resolution,
         "aspect_ratio": request.aspect_ratio,
+        "film_style": request.film_style,
         "max_segment_duration": request.max_segment_duration,
     }
     result = get_workflow().step_select_episode(
@@ -200,7 +201,11 @@ async def generate_segment_prompt(
     index: int,
     _session_info: dict = Depends(load_video_session),
 ):
-    """步骤3：用 video-prompt skill 生成分镜提示词 → {run_id}（仅全能参考模式）"""
+    """步骤3：用 video-prompt skill 生成分镜提示词 → {run_id}（仅全能参考模式）
+
+    提示词生成后，若分镜进入 run 时无参考图，同一 run 内自动从素材池
+    （核心素材 + 本集素材）匹配参考图写入；匹配失败不影响已生成的提示词。
+    """
     workflow = get_storyboard_workflow()
 
     def factory(on_event, interrupt):
@@ -250,6 +255,53 @@ async def step_4_generate_videos(
     )
 
 
+@router.post("/{session_id}/comfyui/import", response_model=StepResponse)
+async def step_4_comfyui_import(
+    session_id: str,
+    body: GenerateVideosRequest | None = None,
+    _session_info: dict = Depends(load_video_session),
+):
+    """步骤4两段式-阶段一：导入到 ComfyUI（上传素材+构造 timeline+注入工作流并暂存，不执行）"""
+    logger.info(f"[API] 步骤4 - 导入到 ComfyUI - 会话: {session_id[:8]}...")
+
+    segment_indexes = body.segment_indexes if body else None
+    global_prompt = body.global_prompt if body else ""
+    summary = await get_workflow().prepare_comfyui_import(session_id, segment_indexes, global_prompt)
+
+    return StepResponse(
+        success=True,
+        message=f"已导入到 ComfyUI：{summary['segment_count']} 段 / {summary['image_count']} 图 / 约 {summary['total_duration']}s",
+        data=summary,
+    )
+
+
+@router.post("/{session_id}/comfyui/start", response_model=StepResponse)
+async def step_4_comfyui_start(
+    session_id: str,
+    background_tasks: BackgroundTasks,
+    session_manager: SessionManager = Depends(get_session_manager),
+    _session_info: dict = Depends(load_video_session),
+):
+    """步骤4两段式-阶段二：开始生成（执行已导入的工作流；后台任务 + 前端轮询）"""
+    logger.info(f"[API] 步骤4 - 开始生成（已导入工作流）- 会话: {session_id[:8]}...")
+
+    import_result = session_manager.get_step_result(session_id, "comfyui_import")
+    if not import_result or not (import_result.get("result_data") or {}).get("timeline_data"):
+        raise HTTPException(status_code=400, detail="尚未导入到 ComfyUI，请先点击「导入到 ComfyUI」")
+    segment_indexes = import_result["result_data"]["segment_indexes"]
+
+    workflow = get_workflow()
+    initial_data = workflow.mark_videos_generating(session_id, segment_indexes=segment_indexes)
+    background_tasks.add_task(workflow.run_generate_videos_sync, session_id)
+    logger.info(f"[API] 已导入工作流的生成任务已提交到后台队列 - 会话: {session_id[:8]}...")
+
+    return StepResponse(
+        success=True,
+        message="视频生成任务已启动，正在生成中...",
+        data=initial_data,
+    )
+
+
 @router.post("/{session_id}/cancel-videos", response_model=StepResponse)
 async def step_4_cancel_videos(
     session_id: str,
@@ -274,29 +326,6 @@ async def step_4_cancel_videos(
         message="取消请求已发送，正在停止生成任务...",
         data={"cancelled": True},
     )
-
-
-@router.post("/{session_id}/regenerate-videos", response_model=StepResponse)
-async def step_4_regenerate_videos(
-    session_id: str,
-    background_tasks: BackgroundTasks,
-    _session_info: dict = Depends(load_video_session),
-):
-    """步骤4重新生成：保留旧视频数据作为备份，标记为待重新生成状态"""
-    logger.info(f"[API] 步骤4 - 重新生成视频 - 会话: {session_id[:8]}...")
-
-    workflow = get_workflow()
-    initial_data = workflow.mark_videos_generating(session_id, regenerate=True)
-    backed_up_count = initial_data.get("_backed_up_count", 0)
-    logger.info(f"[API] 已标记为待重新生成状态（保留 {backed_up_count} 个旧视频作为备份）- 会话: {session_id[:8]}...")
-
-    background_tasks.add_task(workflow.run_generate_videos_sync, session_id)
-
-    message = "视频重新生成任务已启动，正在生成中..."
-    if backed_up_count > 0:
-        message += f"（已保留 {backed_up_count} 个旧视频作为备份）"
-
-    return StepResponse(success=True, message=message, data=initial_data)
 
 
 @router.post("/{session_id}/restore-videos-backup", response_model=StepResponse)

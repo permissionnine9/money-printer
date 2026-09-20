@@ -38,6 +38,7 @@ const SUBSEQUENT_STEPS: { step: string; label: string }[] = [
 interface VideoParamsFormValues {
   resolution: string
   aspect_ratio: string
+  film_style: string
   max_segment_duration?: number
 }
 
@@ -64,7 +65,7 @@ export const StepSelectEpisode: React.FC<StepSelectEpisodeProps> = ({ session })
         script_session_id?: string
         episode_id?: string
         episode_title?: string
-        video_params?: { resolution?: string; aspect_ratio?: string; max_segment_duration?: number }
+        video_params?: { resolution?: string; aspect_ratio?: string; film_style?: string; max_segment_duration?: number }
       }
     | undefined
 
@@ -129,6 +130,7 @@ export const StepSelectEpisode: React.FC<StepSelectEpisodeProps> = ({ session })
         episode_id: selectedEpisodeId,
         resolution: values.resolution,
         aspect_ratio: values.aspect_ratio,
+        film_style: values.film_style,
         max_segment_duration: values.max_segment_duration || 15,
       })
       if (response.success) {
@@ -151,8 +153,9 @@ export const StepSelectEpisode: React.FC<StepSelectEpisodeProps> = ({ session })
     setSelectedScriptSessionId(stepResult?.script_session_id)
     setSelectedEpisodeId(stepResult?.episode_id)
     form.setFieldsValue({
-      resolution: stepResult?.video_params?.resolution || '1080p',
+      resolution: stepResult?.video_params?.resolution || '480p',
       aspect_ratio: stepResult?.video_params?.aspect_ratio || '16:9',
+      film_style: stepResult?.video_params?.film_style || '现实主义',
       max_segment_duration: stepResult?.video_params?.max_segment_duration || 15,
     })
   }
@@ -207,6 +210,7 @@ export const StepSelectEpisode: React.FC<StepSelectEpisodeProps> = ({ session })
             <Space wrap>
               <span>分辨率: {stepResult.video_params?.resolution || '1080p'}</span>
               <span>宽高比: {stepResult.video_params?.aspect_ratio || '16:9'}</span>
+              <span>影视风格: {stepResult.video_params?.film_style || '现实主义'}</span>
               <span>分片最大时长: {stepResult.video_params?.max_segment_duration || 15}秒</span>
             </Space>
           </Descriptions.Item>
@@ -257,7 +261,7 @@ export const StepSelectEpisode: React.FC<StepSelectEpisodeProps> = ({ session })
             >
               {scriptSessions.map((s) => (
                 <Option key={s.session_id} value={s.session_id}>
-                  {s.session_id.slice(0, 8)} · {new Date(s.updated_at || s.created_at).toLocaleString()}
+                  {s.title || s.session_id.slice(0, 8)} · {new Date(s.updated_at || s.created_at).toLocaleString()}
                 </Option>
               ))}
             </Select>
@@ -328,7 +332,7 @@ export const StepSelectEpisode: React.FC<StepSelectEpisodeProps> = ({ session })
         form={form}
         layout="vertical"
         onFinish={handleSubmit}
-        initialValues={{ resolution: '1080p', aspect_ratio: '16:9', max_segment_duration: 15 }}
+        initialValues={{ resolution: '480p', aspect_ratio: '16:9', film_style: '现实主义', max_segment_duration: 15 }}
       >
         <div style={{ marginBottom: 8 }}>
           <Text strong>③ 视频参数</Text>
@@ -336,6 +340,7 @@ export const StepSelectEpisode: React.FC<StepSelectEpisodeProps> = ({ session })
         <Space wrap style={{ marginBottom: 16 }}>
           <Form.Item name="resolution" label="分辨率" style={{ marginBottom: 0 }}>
             <Select style={{ width: 120 }}>
+              <Option value="480p">480p</Option>
               <Option value="720p">720p</Option>
               <Option value="1080p">1080p</Option>
               <Option value="4K">4K</Option>
@@ -349,6 +354,17 @@ export const StepSelectEpisode: React.FC<StepSelectEpisodeProps> = ({ session })
               <Option value="1:1">1:1</Option>
               <Option value="9:16">9:16</Option>
               <Option value="21:9">21:9</Option>
+            </Select>
+          </Form.Item>
+
+          <Form.Item name="film_style" label="影视风格" style={{ marginBottom: 0 }}>
+            <Select style={{ width: 160 }}>
+              <Option value="现实主义">现实主义</Option>
+              <Option value="二次元动漫">二次元动漫</Option>
+              <Option value="3D动画">3D动画</Option>
+              <Option value="赛博朋克">赛博朋克</Option>
+              <Option value="国风水墨">国风水墨</Option>
+              <Option value="复古胶片">复古胶片</Option>
             </Select>
           </Form.Item>
 

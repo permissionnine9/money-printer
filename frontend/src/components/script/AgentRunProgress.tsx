@@ -152,24 +152,26 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
 
   return (
     <div style={{ border: '1px solid #f0f0f0', borderRadius: 8, padding: '12px 16px', background: '#fafafa' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <Space>
+      <div style={{ display: 'flex', flexDirection: 'column', gap:'6px', justifyContent: 'space-between', alignItems: 'center' }}>
+        <Space style={{ display: 'flex', flexDirection: 'row', padding:'6px 0', justifyContent: 'space-between', width: "100%",background: 'rgba(100, 100, 100, 0.05)' }}>{prompt && (
+          <Button type="link" size="small" icon={<EyeOutlined />} onClick={() => setPromptOpen(true)}>
+            查看提示词
+          </Button>
+        )}
+          {status === 'running' && (
+            <Button size="small" danger icon={<StopOutlined />} loading={cancelling} onClick={handleCancel}>
+              取消
+            </Button>
+          )}
+        </Space>
+        <Space style={{width:'100%'}}>
           {status === 'running' && <Spin size="small" />}
           {status === 'success' && <CheckCircleOutlined style={{ color: '#52c41a' }} />}
           {status === 'error' && <CloseCircleOutlined style={{ color: '#ff4d4f' }} />}
           <Text strong>{label || 'Agent 运行'}</Text>
           <Text type="secondary">{statusText}</Text>
-          {prompt && (
-            <Button type="link" size="small" icon={<EyeOutlined />} onClick={() => setPromptOpen(true)}>
-              查看提示词
-            </Button>
-          )}
         </Space>
-        {status === 'running' && (
-          <Button size="small" danger icon={<StopOutlined />} loading={cancelling} onClick={handleCancel}>
-            取消
-          </Button>
-        )}
+
       </div>
 
       {errorMsg && (

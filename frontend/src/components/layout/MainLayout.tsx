@@ -2,15 +2,18 @@
  * 主布局组件：顶部导航 + 左侧会话管理（视频 / 剧本两页各自渲染）+ 内容区
  */
 import React, { useCallback, useEffect, useState } from 'react'
-import { Layout, Menu } from 'antd'
+import { Layout, Menu, Button, Tooltip } from 'antd'
 import {
   VideoCameraOutlined,
   AppstoreOutlined,
   FileTextOutlined,
   FormOutlined,
+  CloudServerOutlined,
 } from '@ant-design/icons'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { SessionSider } from '@/components/common/SessionSider'
+import { ComfyUIConnectionModal } from '@/components/settings/ComfyUIConnectionModal'
+import { AgentRunDock } from './AgentRunDock'
 import type { Session, ScriptSessionDetail } from '@/types'
 import { sessionApi, scriptSessionApi } from '@/api/client'
 import { useSessionStore } from '@/stores/sessionStore'
@@ -147,6 +150,9 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     { key: '/prompts', icon: <FileTextOutlined />, label: '提示词管理' },
   ]
 
+  // ComfyUI 服务器连接设置（GPU 容器重启后 SSH 凭据变化时手动录入）
+  const [connectionModalOpen, setConnectionModalOpen] = useState(false)
+
   // 侧边栏展示名：剧本页 = 剧本名平铺；视频页 = 按引用剧本二级分组（组头剧本名，二级「第N集·集名」按集数降序）
   const scriptSessionItems = scriptSessions.map((s) => ({
     ...s,
@@ -173,8 +179,16 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           selectedKeys={[location.pathname]}
           items={navItems}
           onClick={({ key }) => navigate(key)}
-          style={{ marginLeft: 48, background: 'transparent', borderBottom: 'none', minWidth: 480 }}
+          style={{ marginLeft: 48, background: 'transparent', borderBottom: 'none', minWidth: 480, flex: 1 }}
         />
+        <Tooltip title="ComfyUI 服务器连接（容器重启后更新 SSH 信息）">
+          <Button
+            type="text"
+            icon={<CloudServerOutlined style={{ color: '#fff', fontSize: 18 }} />}
+            onClick={() => setConnectionModalOpen(true)}
+          />
+        </Tooltip>
+        <ComfyUIConnectionModal open={connectionModalOpen} onClose={() => setConnectionModalOpen(false)} />
       </Header>
       <Layout>
         {isWorkflowPage && (
@@ -210,8 +224,9 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
         )}
         <Content className={styles.content}>{children}</Content>
       </Layout>
+      <AgentRunDock />
       <Footer className={styles.footer}>
-        AI视频创作智能体 ©2026 - 创作剧本（构思 → 大纲 → 分集 → 定妆照） + 视频工作流（选集 → 分镜大纲 → 分镜管理 → 视频）
+        AI视频创作智能体 ©2026 - 创作剧本（构思 → 大纲 → 分集 → 核心素材） + 视频工作流（选集 → 分镜大纲 → 分镜管理 → 视频）
       </Footer>
     </Layout>
   )

@@ -86,7 +86,7 @@ export const StepOutline: React.FC<StepOutlineProps> = ({ session }) => {
     Modal.confirm({
       title: '确认重新生成大纲？',
       icon: <ExclamationCircleOutlined />,
-      content: '重新生成将清空下游已生成的分集设计、实体库与定妆照，此操作不可撤销。是否继续？',
+      content: '重新生成将清空下游已生成的分集设计、实体库与核心素材，此操作不可撤销。是否继续？',
       onOk: () => executeGenerate(promptModal.extraPrompt),
     })
   }
@@ -144,7 +144,7 @@ export const StepOutline: React.FC<StepOutlineProps> = ({ session }) => {
       width={600}
     >
       <div style={{ marginBottom: 16 }}>
-        <Text type="secondary">重新生成将级联清空下游分集 / 实体 / 定妆照；可输入补充要求（可选，留空使用当前参数）。</Text>
+        <Text type="secondary">重新生成将级联清空下游分集 / 实体 / 核心素材；可输入补充要求（可选，留空使用当前参数）。</Text>
       </div>
       <TextArea
         rows={4}
@@ -308,7 +308,7 @@ export const StepOutline: React.FC<StepOutlineProps> = ({ session }) => {
           <div style={{ marginTop: 16, padding: 12, background: '#fff7e6', borderRadius: 4 }}>
             <ExclamationCircleOutlined style={{ color: '#fa8c16', marginRight: 8 }} />
             <span style={{ color: '#ad6800' }}>
-              下游已生成分集 / 定妆照数据，重新生成大纲将清空这些数据；仅保存编辑不会清空
+              下游已生成分集 / 核心素材数据，重新生成大纲将清空这些数据；仅保存编辑不会清空
             </span>
           </div>
         )}

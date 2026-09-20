@@ -25,7 +25,7 @@ def _episode_number(episode_id: str | None) -> int | None:
 
 
 @router.post("", response_model=SessionResponse, status_code=201)
-async def create_session(
+def create_session(
     session_manager: SessionManager = Depends(get_session_manager),
 ):
     """创建新会话"""
@@ -44,7 +44,7 @@ async def create_session(
 
 
 @router.get("", response_model=SessionListResponse)
-async def list_sessions(
+def list_sessions(
     session_manager: SessionManager = Depends(get_session_manager),
 ):
     """获取所有会话列表（旧版 5/7 步会话标记 legacy，前端隐藏）"""
@@ -99,7 +99,7 @@ async def list_sessions(
 
 
 @router.get("/{session_id}", response_model=SessionDetailResponse)
-async def get_session(
+def get_session(
     session_id: str,
     session_manager: SessionManager = Depends(get_session_manager),
     session_info: dict = Depends(load_video_session),
@@ -117,7 +117,7 @@ async def get_session(
 
 
 @router.delete("/{session_id}")
-async def delete_session(
+def delete_session(
     session_id: str,
     session_manager: SessionManager = Depends(get_session_manager),
     _session_info: dict = Depends(load_video_session),

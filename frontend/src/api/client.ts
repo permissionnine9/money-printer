@@ -16,7 +16,7 @@ import type {
 
 const client = axios.create({
   baseURL: '/api/v1',
-  timeout: 300000,  // 5分钟
+  timeout: 600000,  // 10 分钟
   headers: {
     'Content-Type': 'application/json',
   },
@@ -188,9 +188,18 @@ export const stepApi = {
     return data
   },
 
-  // 步骤4：重新生成视频
-  regenerateVideos: async (sessionId: string): Promise<StepResponse> => {
-    const { data } = await client.post(`/steps/${sessionId}/regenerate-videos`, {})
+  // 步骤4两段式-阶段一：导入到 ComfyUI（上传素材+注入工作流暂存，不执行；段间重叠沿用分镜 overlap）
+  importComfyUI: async (sessionId: string, segmentIndexes?: number[], globalPrompt?: string): Promise<StepResponse> => {
+    const payload: Record<string, unknown> = {}
+    if (segmentIndexes) payload.segment_indexes = segmentIndexes
+    if (globalPrompt) payload.global_prompt = globalPrompt
+    const { data } = await client.post(`/steps/${sessionId}/comfyui/import`, payload)
+    return data
+  },
+
+  // 步骤4两段式-阶段二：开始生成（执行已导入的工作流）
+  startComfyUIVideo: async (sessionId: string): Promise<StepResponse> => {
+    const { data } = await client.post(`/steps/${sessionId}/comfyui/start`, {})
     return data
   },
 
@@ -346,6 +355,20 @@ export const scriptStepApi = {
     return data.data
   },
 
+  // 第 1 步：手动设定剧名（manual 锁定，AI 收敛不再覆盖）
+  setStoryTitle: async (sessionId: string, title: string): Promise<any> => {
+    const { data } = await client.put(`/script-sessions/${sessionId}/ideation/title`, { title })
+    return data.data
+  },
+
+  // 第 1 步：采纳文本为故事逻辑并完成步骤（不经 LLM 收敛）
+  adoptStoryLogic: async (sessionId: string, storyLogic: string): Promise<any> => {
+    const { data } = await client.post(`/script-sessions/${sessionId}/ideation/adopt`, {
+      story_logic: storyLogic,
+    })
+    return data.data
+  },
+
   // 第 2 步：人工编辑大纲
   updateOutline: async (sessionId: string, mindmap: string): Promise<any> => {
     const { data } = await client.put(`/script-sessions/${sessionId}/outline`, { mindmap })
@@ -448,6 +471,28 @@ export const entityApi = {
 export const agentRunApi = {
   cancel: async (runId: string): Promise<{ success: boolean; message: string }> => {
     const { data } = await client.post(`/agent-runs/${runId}/cancel`)
+    return data
+  },
+}
+
+// 系统设置：远程 ComfyUI SSH 连接信息（hosts.json + 隧道重连）
+export interface ComfyUIConnection {
+  host: string
+  port: number | null
+  user: string
+  password_set: boolean
+  connected: boolean
+}
+
+export const settingsApi = {
+  getComfyUIConnection: async (): Promise<ComfyUIConnection> => {
+    const { data } = await client.get(`/settings/comfyui-connection`)
+    return data
+  },
+  updateComfyUIConnection: async (payload: {
+    host: string; port: number; user: string; password?: string;
+  }): Promise<{ connected: boolean; message: string }> => {
+    const { data } = await client.put(`/settings/comfyui-connection`, payload, { timeout: 60000 })
     return data
   },
 }

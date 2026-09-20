@@ -158,8 +158,8 @@ export interface AgentEvent {
 export interface VideoParams {
   resolution: string
   aspect_ratio: string
+  film_style?: string  // 影视风格
   max_segment_duration?: number  // 最大分片时长（秒）
-  overlap_seconds?: number  // 相邻分片重叠时长（秒），用于视频生成时段间过渡
 }
 
 // 分镜引用的素材图（description 为分镜侧独立副本，默认带出库内描述）
@@ -216,8 +216,23 @@ export interface FinalVideo {
   video_path: string
   prompt_id: string
   mock: boolean
-  overlap_seconds: number
+  overlap_seconds: number  // 段间重叠合计秒数（逐段值见 timeline_data._overlap_seconds）
   segment_count: number
+}
+
+// 「导入到 ComfyUI」暂存摘要（两段式阶段一结果，session.step_results.comfyui_import）
+export interface ComfyUIImport {
+  segment_indexes: number[]
+  segment_count: number
+  image_count: number
+  audio_count: number
+  total_duration: number
+  global_prompt: string
+  mock: boolean
+  imported_at: string
+  // UI 工作流落盘结果（mock/落盘失败时无）：ComfyUI 网页「在 ComfyUI 中打开」直达链接用
+  ui_workflow_name?: string
+  comfyui_url?: string
 }
 
 // 生图/chat/agent 模型配置

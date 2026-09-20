@@ -1,9 +1,10 @@
 /**
  * 步骤 3（索引2）：分镜管理
  * 左侧分镜列表 + 右侧选中分镜详情（布局参照剧本工作流「分集设计」）。
- * 详情含：分镜大纲展示、分镜配置（分镜形式下拉框；全能参考模式时出现 overlap 滑块、
+ * 详情含：分镜配置（分镜形式下拉框；全能参考模式时出现 overlap 滑块、
  * 参考素材图编辑区，且「分镜提示词生成」可用）、已生成提示词展示；
- * 每个分镜独立「完成当前分镜配置」按钮（≥1 个完成即可进入第 4 步勾选生成视频）。
+ * 分镜大纲收拢为「分镜配置」卡片右上角「查看分镜大纲」弹窗；
+ * 「完成当前分镜配置」需已生成分镜提示词（≥1 个完成即可进入第 4 步勾选生成视频）。
  */
 import React, { useMemo, useState } from 'react'
 import {
@@ -34,10 +35,10 @@ import {
   SwapOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
-import type { AgentEvent, SessionDetail, SegmentReferenceImage, StoryboardSegment } from '@/types'
+import type { SessionDetail, SegmentReferenceImage, StoryboardSegment } from '@/types'
 import { stepApi } from '@/api/client'
 import { useSessionStore } from '@/stores/sessionStore'
-import { AgentRunProgress } from '@/components/script/AgentRunProgress'
+import { useAgentRunStore, hasRunningSegmentPrompt } from '@/stores/agentRunStore'
 import { MaterialPickerModal } from './material/MaterialPickerModal'
 import { MaterialGenerateModal } from './material/MaterialGenerateModal'
 import { imageSrc } from '@/utils/imageSrc'
@@ -86,18 +87,19 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [configLoading, setConfigLoading] = useState(false)
   const [completing, setCompleting] = useState(false)
+  // 分镜大纲查看弹窗（大纲收拢到「分镜配置」右上角按钮）
+  const [outlineOpen, setOutlineOpen] = useState(false)
   // 参考素材图编辑
   const [refsSaving, setRefsSaving] = useState(false)
   const [descDrafts, setDescDrafts] = useState<Record<string, string>>({}) // image_id → 描述草稿（onBlur 保存）
   const [picker, setPicker] = useState<{ open: boolean; replaceIndex: number | null }>({ open: false, replaceIndex: null })
   const [genOpen, setGenOpen] = useState(false)
-  // 提示词生成弹窗
+  // 提示词生成弹窗（生成前的上下文预览确认；生成进度由全局 AgentRunDock 跟踪）
   const [promptModal, setPromptModal] = useState<{
     open: boolean
     context: PromptContextView | null
     loading: boolean
-    run: { id: string; active: boolean } | null
-  }>({ open: false, context: null, loading: false, run: null })
+  }>({ open: false, context: null, loading: false })
 
   const selected = useMemo(
     () => segments.find((s) => s.index === selectedIndex) || segments[0],
@@ -190,34 +192,34 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
 
   const openPromptModal = async () => {
     if (!selected) return
-    setPromptModal({ open: true, context: null, loading: true, run: null })
+    setPromptModal({ open: true, context: null, loading: true })
     try {
       const ctx = await stepApi.getSegmentPromptContext(session.session_id, selected.index)
-      setPromptModal({ open: true, context: ctx as PromptContextView, loading: false, run: null })
+      setPromptModal({ open: true, context: ctx as PromptContextView, loading: false })
     } catch (e) {
       message.error((e as Error).message)
-      setPromptModal({ open: false, context: null, loading: false, run: null })
+      setPromptModal({ open: false, context: null, loading: false })
     }
   }
 
   const confirmGeneratePrompt = async () => {
     if (!selected) return
+    if (hasRunningSegmentPrompt(session.session_id, selected.index)) {
+      message.warning(`分镜 ${selected.index + 1} 的提示词正在生成中（见右上角任务卡片），请等待完成后再试`)
+      return
+    }
     try {
       const runId = await stepApi.generateSegmentPrompt(session.session_id, selected.index)
-      setPromptModal((m) => ({ ...m, run: { id: runId, active: true } }))
+      // 任务交给全局 AgentRunDock：进度弹窗可收起到右上角，跨步骤/跨页面持续跟踪
+      useAgentRunStore.getState().addRun({
+        runId,
+        sessionId: session.session_id,
+        segmentIndex: selected.index,
+        segmentTitle: selected.title,
+      })
+      setPromptModal({ open: false, context: null, loading: false })
     } catch (e) {
       message.error((e as Error).message)
-    }
-  }
-
-  const handlePromptRunDone = async (ev: AgentEvent) => {
-    setPromptModal((m) => (m.run ? { ...m, run: { ...m.run, active: false } } : m))
-    if (ev.success) {
-      message.success('分镜提示词已生成')
-      setPromptModal({ open: false, context: null, loading: false, run: null })
-      await refreshSession()
-    } else {
-      message.error(ev.error || '分镜提示词生成失败')
     }
   }
 
@@ -250,22 +252,15 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
     <Modal
       title={`生成分镜提示词 - 分镜 ${(selected?.index ?? 0) + 1}${selected?.title ? `《${selected.title}》` : ''}`}
       open={promptModal.open}
-      onCancel={() => {
-        if (promptModal.run?.active) return // 生成中不允许关闭
-        setPromptModal({ open: false, context: null, loading: false, run: null })
-      }}
-      footer={
-        promptModal.run
-          ? null
-          : [
-              <Button key="cancel" onClick={() => setPromptModal({ open: false, context: null, loading: false, run: null })}>
-                取消
-              </Button>,
-              <Button key="ok" type="primary" icon={<ThunderboltOutlined />} onClick={confirmGeneratePrompt}>
-                确定（调用 video-prompt skill 生成）
-              </Button>,
-            ]
-      }
+      onCancel={() => setPromptModal({ open: false, context: null, loading: false })}
+      footer={[
+        <Button key="cancel" onClick={() => setPromptModal({ open: false, context: null, loading: false })}>
+          取消
+        </Button>,
+        <Button key="ok" type="primary" icon={<ThunderboltOutlined />} onClick={confirmGeneratePrompt}>
+          确定（调用 video-prompt skill 生成）
+        </Button>,
+      ]}
       width={720}
       destroyOnHidden
     >
@@ -295,11 +290,6 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
           </div>
         )}
       </Spin>
-      {promptModal.run && (
-        <div style={{ marginTop: 8 }}>
-          <AgentRunProgress runId={promptModal.run.id} onDone={handlePromptRunDone} />
-        </div>
-      )}
     </Modal>
   )
 
@@ -350,7 +340,7 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
                     <Tag color="blue">分镜 {seg.index + 1}</Tag>
                     {tag && <Tag color={tag.color}>{tag.text}</Tag>}
                     {seg.configured && <Tag color="success">已配置</Tag>}
-                    {seg.prompt && <Tag color="green">已生成提示词</Tag>}
+                    {seg.prompt && <Tag color="info">已生成提示词</Tag>}
                   </Space>
                   <div
                     style={{
@@ -376,52 +366,39 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
           <div style={{ flex: 1, minWidth: 0 }}>
             {selected && (
               <>
-                {/* 分镜大纲 */}
-                <Card
-                  size="small"
-                  title={
-                    <Space size={8}>
-                      <FileTextOutlined />
-                      <span>分镜大纲</span>
-                      {modeTag && <Tag color={modeTag.color}>{modeTag.text}模式</Tag>}
-                    </Space>
-                  }
-                >
-                  <Paragraph
-                    style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}
-                    ellipsis={{ rows: 6, expandable: true, symbol: '展开' }}
-                  >
-                    <Text strong>{selected.title && `【${selected.title}】`}</Text>
-                    {selected.outline || '（无大纲）'}
-                  </Paragraph>
-                </Card>
-
                 {/* 分镜配置 */}
                 <Card
                   size="small"
                   title="分镜配置"
-                  style={{ marginTop: 12 }}
                   extra={
-                    selected.configured ? (
-                      <Popconfirm
-                        title="取消完成该分镜的配置？"
-                        onConfirm={() => completeSegment(selected.index, false)}
-                      >
-                        <Button size="small" icon={<CheckCircleOutlined />} loading={completing}>
-                          已完成配置（点击取消）
-                        </Button>
-                      </Popconfirm>
-                    ) : (
-                      <Button
-                        size="small"
-                        type="primary"
-                        icon={<CheckCircleOutlined />}
-                        loading={completing}
-                        onClick={() => completeSegment(selected.index, true)}
-                      >
-                        完成当前分镜配置
+                    <Space size={8}>
+                      {selected.configured ? (
+                        <Popconfirm
+                          title="取消完成该分镜的配置？"
+                          onConfirm={() => completeSegment(selected.index, false)}
+                        >
+                          <Button size="small" icon={<CheckCircleOutlined />} loading={completing}>
+                            已完成配置（点击取消）
+                          </Button>
+                        </Popconfirm>
+                      ) : (
+                        <Tooltip title={selected.prompt ? undefined : '请先生成分镜提示词，再完成配置'}>
+                          <Button
+                            size="small"
+                            type="primary"
+                            icon={<CheckCircleOutlined />}
+                            loading={completing}
+                            disabled={!selected.prompt}
+                            onClick={() => completeSegment(selected.index, true)}
+                          >
+                            完成当前分镜配置
+                          </Button>
+                        </Tooltip>
+                      )}
+                      <Button size="small" icon={<FileTextOutlined />} onClick={() => setOutlineOpen(true)}>
+                        查看分镜大纲
                       </Button>
-                    )
+                    </Space>
                   }
                 >
                   <Spin spinning={configLoading}>
@@ -459,6 +436,54 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
                       </div>
                     )}
                   </Spin>
+                </Card>
+
+                {/* 已生成的提示词 */}
+                <Card
+                  size="small"
+                  title="分镜提示词"
+                  style={{ marginTop: 12 }}
+                  extra={
+                    <Space size={12}>
+                      <Tooltip title="分镜大纲阶段 AI 分析的建议时长，仅作参考">
+                        <Text type="secondary" style={{ fontSize: 13 }}>
+                          建议时长：{selected.duration ? `${selected.duration} 秒` : '—'}
+                        </Text>
+                      </Tooltip>
+                      <Tooltip
+                        title={
+                          selected.mode === 'all_reference'
+                            ? '基于剧本大纲、本集脚本、当前分镜大纲与 overlap 信息，调用 video-prompt skill 生成当前分镜的提示词'
+                            : '仅「全能参考模式」支持分镜提示词生成'
+                        }
+                      >
+                        <Button
+                          size="small"
+                          type={selected.prompt ? 'default' : 'primary'}
+                          icon={<ThunderboltOutlined />}
+                          disabled={selected.mode !== 'all_reference'}
+                          onClick={openPromptModal}
+                        >
+                          {selected.prompt ? '重新生成分镜提示词' : '分镜提示词生成'}
+                        </Button>
+                      </Tooltip>
+                      {selected.prompt && (
+                        <Button size="small" icon={<CopyOutlined />} onClick={copyPrompt}>
+                          复制
+                        </Button>
+                      )}
+                    </Space>
+                  }
+                >
+                  {selected.prompt ? (
+                    <Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 ,maxHeight: '350px', display: 'block', overflowY: 'auto'}} copyable={false}>
+                      {selected.prompt}
+                    </Paragraph>
+                  ) : (
+                    <Text type="secondary">
+                      尚未生成。将分镜形式切换为「全能参考模式」后点击「分镜提示词生成」。
+                    </Text>
+                  )}
                 </Card>
 
                 {/* 参考素材图（仅全能参考模式） */}
@@ -540,60 +565,12 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
                         ))
                       ) : (
                         <Text type="secondary">
-                          尚未关联素材图。可从素材库选择（定妆照/本集素材/其他集素材），或用 AI 生成专属素材图。
+                          尚未关联素材图。可从素材库选择（核心素材/本集素材/其他集素材），或用 AI 生成专属素材图。
                         </Text>
                       )}
                     </Spin>
                   </Card>
                 )}
-
-                {/* 已生成的提示词 */}
-                <Card
-                  size="small"
-                  title="分镜提示词"
-                  style={{ marginTop: 12 }}
-                  extra={
-                    <Space size={12}>
-                      <Tooltip title="分镜大纲阶段 AI 分析的建议时长，仅作参考">
-                        <Text type="secondary" style={{ fontSize: 13 }}>
-                          建议时长：{selected.duration ? `${selected.duration} 秒` : '—'}
-                        </Text>
-                      </Tooltip>
-                      <Tooltip
-                        title={
-                          selected.mode === 'all_reference'
-                            ? '基于剧本大纲、本集脚本、当前分镜大纲与 overlap 信息，调用 video-prompt skill 生成当前分镜的提示词'
-                            : '仅「全能参考模式」支持分镜提示词生成'
-                        }
-                      >
-                        <Button
-                          size="small"
-                          type="primary"
-                          icon={<ThunderboltOutlined />}
-                          disabled={selected.mode !== 'all_reference'}
-                          onClick={openPromptModal}
-                        >
-                          分镜提示词生成
-                        </Button>
-                      </Tooltip>
-                      {selected.prompt && (
-                        <Button size="small" icon={<CopyOutlined />} onClick={copyPrompt}>
-                          复制
-                        </Button>
-                      )}
-                    </Space>
-                  }
-                >
-                  {selected.prompt ? (
-                    <Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }} copyable={false}>
-                      {selected.prompt}
-                    </Paragraph>
-                  ) : (
-                    <Text type="secondary">
-                      尚未生成。将分镜形式切换为「全能参考模式」后点击「分镜提示词生成」。
-                    </Text>
-                  )}
-                </Card>
               </>
             )}
           </div>
@@ -609,6 +586,28 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
         )}
       </Card>
       {promptModalNode}
+      {/* 分镜大纲查看弹窗 */}
+      <Modal
+        title={
+          <Space size={8}>
+            <FileTextOutlined />
+            <span>
+              分镜大纲 - 分镜 {(selected?.index ?? 0) + 1}
+              {selected?.title ? `《${selected.title}》` : ''}
+            </span>
+            {modeTag && <Tag color={modeTag.color}>{modeTag.text}模式</Tag>}
+          </Space>
+        }
+        open={outlineOpen}
+        onCancel={() => setOutlineOpen(false)}
+        footer={null}
+        width={640}
+      >
+        <Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>
+          {selected?.title && <Text strong>【{selected.title}】</Text>}
+          {selected?.outline || '（无大纲）'}
+        </Paragraph>
+      </Modal>
       <MaterialPickerModal
         sessionId={session.session_id}
         open={picker.open}

@@ -316,12 +316,57 @@ class WorkspaceStore:
     def write_story_logic(self, script_session_id: str, story_logic: str) -> None:
         story = self.ensure_story(script_session_id)
         with self._story_lock(script_session_id):
-            self._write_doc(story / DIR_IDEATION / "story-logic.md", {"updated_at": _now()}, story_logic)
+            path = story / DIR_IDEATION / "story-logic.md"
+            meta = {"updated_at": _now()}
+            old = self._read_doc(path)
+            # 剧名：正文「剧名：X」行提取进 frontmatter；手动定名（manual）不被 AI 覆盖
+            if old and old[0].get("title_source") == "manual":
+                meta["title"] = old[0].get("title", "")
+                meta["title_source"] = "manual"
+            else:
+                # [^\S\n]*：空白但不跨行（「剧名：」空值行不得把下一行提为剧名）；
+                # 提取到非空才写入（空值等价于无剧名行，保留旧值）；AI 提取同手动路径 60 字上限
+                m = re.search(r"^剧名[:：][^\S\n]*(.+)$", story_logic or "", re.M)
+                picked = m.group(1).strip().strip("《》").strip()[:60] if m else ""
+                if picked:
+                    meta["title"] = picked
+                    meta["title_source"] = "ai"
+                elif old and old[0].get("title"):
+                    meta["title"] = old[0].get("title", "")
+                    meta["title_source"] = old[0].get("title_source", "ai")
+            self._write_doc(path, meta, story_logic)
+            self._refresh(story)
 
     def read_story_logic(self, script_session_id: str) -> str:
         doc = self._read_doc(self.story_dir(script_session_id) / DIR_IDEATION / "story-logic.md") \
             if self.story_dir(script_session_id) else None
         return doc[1].strip() if doc else ""
+
+    def read_story_title(self, script_session_id: str) -> str:
+        """剧名（第 1 步阶段权威源；大纲生成后以 outline title 为准）"""
+        doc = self._read_doc(self.story_dir(script_session_id) / DIR_IDEATION / "story-logic.md") \
+            if self.story_dir(script_session_id) else None
+        return (doc[0].get("title", "") if doc else "") or ""
+
+    def set_story_title(self, script_session_id: str, title: str) -> None:
+        """手动设定剧名（manual 锁定，AI 收敛不再覆盖）；置空则解除锁定"""
+        story = self.ensure_story(script_session_id)
+        with self._story_lock(script_session_id):
+            path = story / DIR_IDEATION / "story-logic.md"
+            old = self._read_doc(path)
+            meta = {"updated_at": _now()}
+            if old:
+                for k in ("title", "title_source"):
+                    if old[0].get(k) is not None:
+                        meta[k] = old[0].get(k)
+            if title:
+                meta["title"] = title
+                meta["title_source"] = "manual"
+            else:
+                meta.pop("title", None)
+                meta.pop("title_source", None)
+            self._write_doc(path, meta, old[1] if old else "")
+            self._refresh(story)
 
     # ==================== 全剧大纲（第 2 步产物） ====================
 

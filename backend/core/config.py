@@ -27,8 +27,19 @@ WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 COMFYUI_BASE_URL = os.getenv("COMFYUI_BASE_URL", "http://127.0.0.1:8188")
 # 远程 ComfyUI 暂不可用时置为 true，用本地 mock 视频代替真实调用
 COMFYUI_MOCK = os.getenv("COMFYUI_MOCK", "true").lower() in ("1", "true", "yes")
-# ComfyUI API 格式工作流模板文件（MiniMaxH3TimelinePlanner 节点的 timeline_data 会被自动注入）
-COMFYUI_WORKFLOW_PATH = BASE_DIR / "comfyui_workflow.json"
+# ComfyUI API 格式工作流模板（MiniMaxH3TimelinePlanner 节点的 timeline_data 会被自动注入）。
+# 模板由 comfyUI-flow/ComfyUI-MiniMaxH3-TimelineDirector 工程的
+# scripts/build_comfyui_workflow_template.py 从 UI 工作流生成（工作流改版后重跑）。
+COMFYUI_WORKFLOW_PATH = BASE_DIR.parent / (
+    "comfyUI-flow/ComfyUI-MiniMaxH3-TimelineDirector/example_workflows/"
+    "MiniMaxH3全功能合一完全体导演台工作流_api.json"
+)
+# UI 格式工作流模板：「导入到 ComfyUI」时注入 timeline_data 后落到远程
+# user/default/workflows/money-printer/，供 ComfyUI 网页打开检查/微调
+COMFYUI_WORKFLOW_UI_PATH = BASE_DIR.parent / (
+    "comfyUI-flow/ComfyUI-MiniMaxH3-TimelineDirector/example_workflows/"
+    "MiniMaxH3全功能合一完全体导演台工作流.json"
+)
 # ComfyUI 时间轴帧率（段时长/overlap 均以帧为单位换算）
 COMFYUI_TIMELINE_FPS = 24
 
@@ -51,7 +62,7 @@ DEFAULT_VIDEO_PARAMS = {
 }
 
 # 视频分辨率选项
-RESOLUTION_OPTIONS = ["720p", "1080p", "4K"]
+RESOLUTION_OPTIONS = ["480p", "720p", "1080p", "4K"]
 
 # 宽高比选项
 ASPECT_RATIO_OPTIONS = ["16:9", "9:16", "1:1", "4:3"]

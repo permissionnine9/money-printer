@@ -1,5 +1,5 @@
 /**
- * 创作剧本工作流页面（4 步向导：故事构思 → 故事大纲 → 分集设计 → 剧本定妆照）
+ * 创作剧本工作流页面（4 步向导：故事构思 → 故事大纲 → 分集设计 → 全剧核心素材生成）
  */
 import { useEffect, useState, type CSSProperties } from 'react'
 import { message, Steps } from 'antd'
@@ -15,7 +15,7 @@ const STEPS = [
   { title: '故事构思', description: '与 AI 多轮讨论并收敛故事逻辑' },
   { title: '故事大纲', description: '生成可编辑的思维导图大纲' },
   { title: '分集设计', description: '逐集设计矛盾与因果链，维护实体库' },
-  { title: '剧本定妆照', description: '为人物 / 场景生成定妆照' },
+  { title: '全剧核心素材生成', description: '人物三视图设定图 + 场景全景素材图' },
 ]
 
 // 隐藏而非卸载（keep-alive）：切步骤不断开 SSE 观流、不丢流式/生成进度

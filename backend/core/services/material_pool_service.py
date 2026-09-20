@@ -51,7 +51,7 @@ class MaterialPoolService:
             for m in self._fetch_lookbook_images(script_session_id)
         ]
         if lookbook:
-            groups.append({"key": "lookbook", "label": "定妆照", "materials": lookbook})
+            groups.append({"key": "lookbook", "label": "核心素材", "materials": lookbook})
 
         episode_titles = {e["episode_id"]: (e.get("title") or "") for e in self.store.list_episodes(script_session_id)}
         by_episode: dict[str, list[dict]] = {}

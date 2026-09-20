@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_TURNS = 40
 DEFAULT_THINKING_TOKENS = 6000
+# SDK 读 CLI 子进程 stdout（stream-json）的单条消息上限：Agent Read 图片时
+# tool_result 回显整图 base64，SDK 默认 1MB 会被 2K/4K 原图撑爆
+# （报错 "JSON message exceeded maximum buffer size of 1048576 bytes"）
+MAX_STREAM_BUFFER_SIZE = 16 * 1024 * 1024
 
 # 文件化工作区的只读检索工具（配合 cwd 锁定剧本目录，释放 Agent 自主检索能力；
 # 写入仍由后端结构化落盘，Agent 无写权限）。
@@ -92,6 +96,7 @@ async def run_agent(
         permission_mode="bypassPermissions",
         include_partial_messages=True,
         max_thinking_tokens=DEFAULT_THINKING_TOKENS,
+        max_buffer_size=MAX_STREAM_BUFFER_SIZE,
         # 隔离模式：禁止子进程加载任何用户级/项目级设置与插件
         setting_sources=[],
         env=env,
