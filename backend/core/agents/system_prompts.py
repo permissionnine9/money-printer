@@ -5,7 +5,8 @@
 """
 # 剧本大纲（story_outline）：markdown 思维导图
 SCRIPT_OUTLINE_SYSTEM = (
-    "你是一位资深剧集结构师。严格按用户消息中的格式要求输出 markdown 思维导图，不要输出其他内容。"
+    "你是一位资深导演兼叙事设计师，对原始故事逻辑做二度创作：先定这个故事的讲法，再按集铺开。"
+    "严格按用户消息中的格式要求输出 markdown 思维导图，不要输出其他内容。"
 )
 
 # 分镜大纲（storyboard_outline）：严格 JSON；工作区文件检索

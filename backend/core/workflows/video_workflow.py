@@ -8,6 +8,7 @@
 """
 import asyncio
 import logging
+import re
 from datetime import datetime
 
 import httpx
@@ -357,6 +358,42 @@ class VideoCreationWorkflowV2:
             return None
         return data
 
+    def _auto_global_prompt(self, session_id: str) -> str:
+        """用户未填全局提示词时，从剧本上下文自动生成本集戏剧基调（整条时间轴语境统一）。
+
+        best-effort：任何异常都返回空串，绝不阻断主流程。
+        """
+        try:
+            selected = self.get_selected_episode(session_id)
+        except Exception:
+            return ""
+        script_session_id = selected.get("script_session_id", "")
+        episode_id = selected.get("episode_id", "")
+        parts: list[str] = []
+        if script_session_id and episode_id:
+            try:
+                episode = self.store.get_episode(script_session_id, episode_id) or {}
+            except Exception:
+                episode = {}
+            logline = (episode.get("logline") or "").strip()
+            if logline:
+                parts.append(f"本集剧情语境：{logline[:200]}")
+        if script_session_id:
+            try:
+                logic = self.store.read_story_logic(script_session_id) or ""
+            except Exception:
+                logic = ""
+            # [ \t]* 只吞同行空白（\s 会跨行吸入下一行正文）；截到首个句号，丢弃同行拖带的「主题内核」等后续字段
+            m = re.search(r"情感基调与题材[：:][ \t]*(.+)", logic)
+            if m and m.group(1).strip():
+                tone = m.group(1).strip()
+                tone = tone.split("。", 1)[0] + "。" if "。" in tone else tone
+                parts.append(f"全剧基调：{tone[:150]}")
+        if not parts:
+            return ""
+        parts.append("所有分镜共享以上语境，画面气质、光线情绪与节奏密度须与本集戏剧走向保持一致")
+        return "\n".join(parts)
+
     async def prepare_comfyui_import(
         self, session_id: str, segment_indexes: list[int] | None = None, global_prompt: str = "",
     ) -> dict:
@@ -371,6 +408,13 @@ class VideoCreationWorkflowV2:
         logger.info(f"[步骤4] 导入到 ComfyUI - 会话: {session_id[:8]}...")
         if not self.session_manager.is_step_completed(session_id, "storyboard_outline"):
             raise WorkflowError("请先完成步骤2：分镜大纲")
+
+        # 用户未填全局提示词时自动注入本集戏剧基调，避免逐段各唱各调
+        if not global_prompt.strip():
+            auto_prompt = self._auto_global_prompt(session_id)
+            if auto_prompt:
+                logger.info("[步骤4] 未填全局提示词，已自动注入本集戏剧基调")
+                global_prompt = auto_prompt
 
         materials = self._collect_generation_materials(session_id, segment_indexes, gate=True)
         segments = materials["segments"]
@@ -555,8 +599,10 @@ class VideoCreationWorkflowV2:
             # 生成期间取消某分镜 configured 不应中断任务）；异常走 except 落失败快照
             materials = self._collect_generation_materials(session_id, segment_indexes, extra_prompt=extra_prompt, gate=False)
 
-            # 生成最终视频（mock 模式本地合成演示视频）
-            result = await self.comfyui_service.generate_full_video(**materials)
+            # 生成最终视频（mock 模式本地合成演示视频）；globalPrompt 用本集戏剧基调（一步式无用户填写入口）
+            result = await self.comfyui_service.generate_full_video(
+                **materials, global_prompt=self._auto_global_prompt(session_id),
+            )
 
             seg_indexes = [s.get("index", i) for i, s in enumerate(materials["segments"])]
             result_data = self._finalize_video_result(session_id, result, seg_indexes)

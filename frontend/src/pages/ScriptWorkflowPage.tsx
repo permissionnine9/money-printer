@@ -95,18 +95,19 @@ function ScriptWorkflowPage() {
             style={{ marginTop: 8, marginBottom: 8 }}
           />
 
-          {/* 步骤内容区域（4 步，keep-alive：仅隐藏非当前步骤，SSE 与生成进度保活） */}
+          {/* 步骤内容区域（4 步，keep-alive：仅隐藏非当前步骤，SSE 与生成进度保活；
+              key=会话 id —— 切换步骤保活，切换会话重挂载以重置 run/选中/草稿等本地状态） */}
           <div style={viewStep === 0 ? undefined : HIDDEN}>
-            <StepIdeationChat session={currentSession} />
+            <StepIdeationChat key={currentSession.session_id} session={currentSession} />
           </div>
           <div style={viewStep === 1 ? undefined : HIDDEN}>
-            <StepOutline session={currentSession} />
+            <StepOutline key={currentSession.session_id} session={currentSession} />
           </div>
           <div style={viewStep === 2 ? undefined : HIDDEN}>
-            <StepEpisodeDesign session={currentSession} />
+            <StepEpisodeDesign key={currentSession.session_id} session={currentSession} />
           </div>
           <div style={viewStep === 3 ? undefined : HIDDEN}>
-            <StepLookbook session={currentSession} />
+            <StepLookbook key={currentSession.session_id} session={currentSession} />
           </div>
         </>
       )}

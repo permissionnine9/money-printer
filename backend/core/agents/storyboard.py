@@ -578,9 +578,32 @@ class StoryboardWorkflow(StepWorkflowBase):
         if seg.get("mode") != "all_reference":
             raise StoryboardError("仅「全能参考模式」支持分镜提示词生成")
 
-        segments_count = len(self._get_outline_data(session_id).get("segments", []))
         effective_overlap = ctx["effective_overlap"]
         prev_seg = ctx["prev_segment"]
+
+        # 本集戏剧结构注入：逐段生成必须对齐整集弧线，不能各自为戏
+        outline_data = self._get_outline_data(session_id)
+        segments = outline_data.get("segments", [])
+        segments_count = len(segments)
+        mindmap = (outline_data.get("mindmap") or "").strip()
+        drama_section = ""
+        if mindmap:
+            by_index = {s.get("index"): s for s in segments}
+            position_parts = [f"本分镜位置：第 {index + 1} 段 / 共 {segments_count} 段"]
+            prev_by_index = by_index.get(index - 1)
+            next_by_index = by_index.get(index + 1)
+            if prev_by_index:
+                position_parts.append(f"上一段：《{prev_by_index.get('title', '')}》")
+            if next_by_index:
+                position_parts.append(f"下一段：《{next_by_index.get('title', '')}》")
+            drama_section = (
+                f"\n## 本集戏剧结构（生成必须对齐整集弧线，不是孤立的一段）\n"
+                f"本集分镜导图（幕·起承转合结构）：\n{mindmap}\n\n"
+                f"{'；'.join(position_parts)}\n"
+                f"生成时先在导图中定位本分镜所属的幕与起承转合位置——提示词的画面强度、节奏、情绪密度必须与该位置匹配："
+                f"起（钩子）抓人、承（推进）加码、转（高潮）全集最重、合（收束）留白落点+钩子；"
+                f"本集的视觉锚点与观众认知要求（见大纲「观众设计」分支或分集设计的节点进展）优先落实到对应分镜的提示词。\n"
+            )
 
         prev_section = ""
         if effective_overlap > 0 and prev_seg:
@@ -636,7 +659,7 @@ class StoryboardWorkflow(StepWorkflowBase):
 
 ## 视频参数
 {video_params.to_prompt_context()}
-
+{drama_section}
 ## 当前分镜（第 {index + 1} 个，共 {segments_count} 个）
 文件：{seg_path or '（无）'}
 标题：{seg.get('title', '')}

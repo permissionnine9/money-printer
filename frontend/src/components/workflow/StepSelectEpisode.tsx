@@ -155,7 +155,7 @@ export const StepSelectEpisode: React.FC<StepSelectEpisodeProps> = ({ session })
     form.setFieldsValue({
       resolution: stepResult?.video_params?.resolution || '480p',
       aspect_ratio: stepResult?.video_params?.aspect_ratio || '16:9',
-      film_style: stepResult?.video_params?.film_style || '现实主义',
+      film_style: stepResult?.video_params?.film_style || '现实主义·照片级真人实拍与纪录片级质感',
       max_segment_duration: stepResult?.video_params?.max_segment_duration || 15,
     })
   }
@@ -210,7 +210,7 @@ export const StepSelectEpisode: React.FC<StepSelectEpisodeProps> = ({ session })
             <Space wrap>
               <span>分辨率: {stepResult.video_params?.resolution || '1080p'}</span>
               <span>宽高比: {stepResult.video_params?.aspect_ratio || '16:9'}</span>
-              <span>影视风格: {stepResult.video_params?.film_style || '现实主义'}</span>
+              <span>影视风格: {stepResult.video_params?.film_style || '现实主义·照片级真人实拍与纪录片级质感'}</span>
               <span>分片最大时长: {stepResult.video_params?.max_segment_duration || 15}秒</span>
             </Space>
           </Descriptions.Item>
@@ -332,7 +332,7 @@ export const StepSelectEpisode: React.FC<StepSelectEpisodeProps> = ({ session })
         form={form}
         layout="vertical"
         onFinish={handleSubmit}
-        initialValues={{ resolution: '480p', aspect_ratio: '16:9', film_style: '现实主义', max_segment_duration: 15 }}
+        initialValues={{ resolution: '480p', aspect_ratio: '16:9', film_style: '现实主义·照片级真人实拍与纪录片级质感', max_segment_duration: 15 }}
       >
         <div style={{ marginBottom: 8 }}>
           <Text strong>③ 视频参数</Text>
@@ -358,13 +358,13 @@ export const StepSelectEpisode: React.FC<StepSelectEpisodeProps> = ({ session })
           </Form.Item>
 
           <Form.Item name="film_style" label="影视风格" style={{ marginBottom: 0 }}>
-            <Select style={{ width: 160 }}>
-              <Option value="现实主义">现实主义</Option>
-              <Option value="二次元动漫">二次元动漫</Option>
-              <Option value="3D动画">3D动画</Option>
-              <Option value="赛博朋克">赛博朋克</Option>
-              <Option value="国风水墨">国风水墨</Option>
-              <Option value="复古胶片">复古胶片</Option>
+            <Select style={{ width: 300 }}>
+              <Option value="现实主义·照片级真人实拍与纪录片级质感">现实主义·照片级真人实拍与纪录片级质感</Option>
+              <Option value="二次元动漫·日式赛璐璐手绘与高饱和鲜艳色彩">二次元动漫·日式赛璐璐手绘与高饱和鲜艳色彩</Option>
+              <Option value="3D动画·皮克斯式卡通渲染与电影级柔和光照">3D动画·皮克斯式卡通渲染与电影级柔和光照</Option>
+              <Option value="赛博朋克·霓虹光影与潮湿未来都市质感">赛博朋克·霓虹光影与潮湿未来都市质感</Option>
+              <Option value="国风水墨·写意留白与东方水墨氤氲意境">国风水墨·写意留白与东方水墨氤氲意境</Option>
+              <Option value="复古胶片·35mm胶片颗粒与暖调怀旧色彩">复古胶片·35mm胶片颗粒与暖调怀旧色彩</Option>
             </Select>
           </Form.Item>
 
