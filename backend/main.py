@@ -63,7 +63,8 @@ app = FastAPI(
 # CORS 配置
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],  # React 开发服务器
+    # 5174：5173 被残留 vite 占用时新实例自动跳到 5174，需一并放行
+    allow_origins=["http://localhost:5173", "http://localhost:5174", "http://localhost:3000"],  # React 开发服务器
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

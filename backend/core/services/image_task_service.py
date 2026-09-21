@@ -30,10 +30,18 @@ class ImageTaskSpec:
 async def _run_completed_hook(
     on_completed: Callable[[str, dict], Optional[dict]], image_id: str, poll: dict,
 ) -> Optional[dict]:
-    """执行完成钩子（兼容同步/异步钩子；返回 dict 时供调用方并入完成态回写）"""
-    extra = on_completed(image_id, poll)
-    if inspect.isawaitable(extra):
-        extra = await extra
+    """执行完成钩子（兼容同步/异步钩子；返回 dict 时供调用方并入完成态回写）
+
+    钩子是 best-effort 增强（归档/锚点回写）：异常降级为日志返回 None，
+    完成态用 poll 原始路径回写——不让单张卡 processing 或连坐整批。
+    """
+    try:
+        extra = on_completed(image_id, poll)
+        if inspect.isawaitable(extra):
+            extra = await extra
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"[生图] 完成钩子异常 {image_id}（降级为未归档完成态）: {e}")
+        return None
     return extra if isinstance(extra, dict) else None
 
 
@@ -92,7 +100,13 @@ class ImageTaskService:
                 logger.error(f"[生图] 生成失败 {image_id}: {poll.get('error')}")
 
         if submitted:
-            await asyncio.gather(*(poll_one(iid, rid) for iid, rid in submitted))
+            # 单张轮询异常不连坐整批（模块承诺：单张失败不中断，其余继续）
+            results = await asyncio.gather(
+                *(poll_one(iid, rid) for iid, rid in submitted), return_exceptions=True,
+            )
+            for res in results:
+                if isinstance(res, Exception):
+                    logger.error(f"[生图] 轮询异常（已跳过该张）: {res}")
         return submitted
 
     async def run_single(

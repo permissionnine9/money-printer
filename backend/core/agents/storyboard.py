@@ -40,9 +40,7 @@ from backend.core.services.workspace_sections import (
     workspace_section,
 )
 from backend.core.utils.image_store import archive_generated_image
-from backend.core.utils.image_utils import ensure_agent_thumbnail
 from backend.core.utils.json_parser import is_valid_mindmap, parse_json_response
-from backend.core.utils.path_utils import resolve_project_path
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +64,9 @@ class StoryboardWorkflow(StepWorkflowBase):
 
     Error = StoryboardError
 
-    # 自动匹配参考图上限：提示词通常涉及 1-4 个主体/场景，与生图参考上限（OpenAI edits 协议 4 张）一致；
+    # 自动选图上限：去重后超过 5 张截断到 5（≤5 含 5 张不截断）；
     # 手动关联的 schema 上限（8 张）不受影响
-    MAX_AUTO_MATCH_REFS = 4
+    MAX_AUTO_MATCH_REFS = 5
 
     def __init__(
         self,
@@ -454,7 +452,7 @@ class StoryboardWorkflow(StepWorkflowBase):
                     f"标题：{seg.get('title', '')}\n大纲：{seg.get('outline', '')}\n建议时长：{seg.get('duration', '')} 秒"
                 ),
                 "mentioned_images": "\n".join(
-                    f"- {m['image_id']}《{m['description'] or '（无描述）'}》{_ref_abs_path(m['image_path'])}" for m in mentioned
+                    f"- {m['image_id']}《{m['description'] or '（无描述）'}》" for m in mentioned
                 ) or "（无）",
                 "uploaded_refs": "\n".join(f"- {p}" for p in reference_paths) or "（无）",
                 "user_prompt": (user_prompt or "").strip() or "（无自定义要求，按分镜内容自由发挥）",
@@ -628,18 +626,24 @@ class StoryboardWorkflow(StepWorkflowBase):
 
         video_params = VideoParams(**ctx["video_params"])
 
-        reference_images = ctx.get("reference_images") or []
+        # 第一步·选图：进入 run 时无参考图才跑（失败降级不阻断，写词照常无图进行）；
+        # 已有参考图（手动配置或上次自动选定）则沿用，重新匹配需手动清图
+        entry_refs = ctx.get("reference_images") or []
+        match = {"status": "skipped", "images": entry_refs}
+        if not entry_refs:
+            match = await self._select_reference_images(session_id, index, on_event=on_event, interrupt=interrupt)
+        reference_images = match.get("images") or []
+
         if reference_images:
             ref_lines = "\n".join(
-                f"- {r.get('image_id', '')}《{r.get('description', '') or '（无描述）'}》{_ref_abs_path(r.get('image_path', ''))}"
+                f"- {r.get('image_id', '')}《{r.get('description', '') or '（无描述）'}》"
                 for r in reference_images
             )
             reference_section = (
-                f"\n## 本分镜参考素材图（生成视频时将以这些图为全能参考，提示词须结合其画面内容；"
-                f"本地图片可直接 Read 查看画面）\n{ref_lines}\n"
+                f"\n## 本分镜参考素材图（生成视频时将以这些图为全能参考，提示词须结合其描述的画面内容）\n{ref_lines}\n"
             )
         else:
-            reference_section = "\n## 本分镜参考素材图\n（无素材图）\n"
+            reference_section = "\n## 本分镜参考素材图\n（无素材图，按分镜大纲自由创作画面）\n"
 
         script_session_id, episode_id = self._storyboard_loc(session_id)
         seg_path = self.store.segment_path(script_session_id, episode_id, session_id, index)
@@ -698,46 +702,43 @@ class StoryboardWorkflow(StepWorkflowBase):
             parse=_parse_prompt,
         )
 
+        # 第二步·落库：提示词与参考图一次写入；run 期间用户手动改过参考图则尊重用户（只落提示词）
         with self._segment_lock(session_id):
             script_session_id, episode_id = self._storyboard_loc(session_id)
-            seg = self.store.update_segment_fields(
-                script_session_id, episode_id, session_id, index, {"prompt": prompt_text},
-            )
+            current = self.store.read_segment(script_session_id, episode_id, session_id, index) or {}
+            fields: dict = {"prompt": prompt_text}
+            if (current.get("reference_images") or []) == entry_refs:
+                fields["reference_images"] = reference_images
+            self.store.update_segment_fields(script_session_id, episode_id, session_id, index, fields)
+            final_refs = fields.get("reference_images", current.get("reference_images") or [])
 
-        # 第二阶段：进入本 run 时无参考图 → 按刚生成的提示词自动匹配（失败不阻断已落盘的提示词）
-        match = {"status": "skipped", "image_ids": []}
-        if not reference_images:
-            match = await self._auto_match_reference_images(
-                session_id, index, prompt_text, on_event=on_event, interrupt=interrupt,
-            )
-
+        matched_ids = [r.get("image_id") for r in final_refs]
         logger.info(
             f"[分镜管理] 会话 {session_id[:8]}... 分镜 {index} 提示词已生成（{len(prompt_text)} 字，"
-            f"参考图自动匹配: {match['status']} {len(match['image_ids'])} 张）"
+            f"参考图: {match['status']} {len(matched_ids)} 张）"
         )
         return {
             "index": index,
             "prompt": prompt_text,
             "match_status": match["status"],
-            "matched_image_ids": match["image_ids"],
+            "matched_image_ids": matched_ids,
         }
 
-    async def _auto_match_reference_images(
+    async def _select_reference_images(
         self,
         session_id: str,
         index: int,
-        prompt_text: str,
         on_event: Optional[OnEvent] = None,
         interrupt: Optional[object] = None,
     ) -> dict:
-        """提示词生成后的第二阶段：从素材池自动匹配参考图（轻量 agent run）
+        """写词前的第一步：从素材池为分镜挑选参考图（轻量 agent run，输出小 JSON）
 
         候选范围 = 素材池「核心素材」（lookbook 核心素材）+「本集素材」，不含其他集；
-        图是按刚生成的提示词挑的 → 写入时 stale_prompt=False（与手动换图清提示词的联动相反）。
-        任何失败仅记日志/thinking 提示，不抛错（提示词已保存，绝不阻断主流程）。
+        Agent 只按 ID+描述选图（chat 模型无多模态能力，不注入图片路径、不授予工具）。
+        任何失败仅记日志/thinking 提示并返回空（写词照常无图进行，绝不阻断主流程）。
 
         Returns:
-            {"status": matched|no_match|empty_pool|skipped|failed, "image_ids": [...]}
+            {"status": selected|no_match|empty_pool|failed, "images": [{image_id, image_path, description}]}
         """
         def _emit(delta: str) -> None:
             if on_event:
@@ -754,8 +755,8 @@ class StoryboardWorkflow(StepWorkflowBase):
                 for m in g.get("materials", [])
             ]
             if not candidates:
-                logger.info(f"[分镜管理] 会话 {session_id[:8]}... 分镜 {index} 素材池无候选，跳过自动匹配")
-                return {"status": "empty_pool", "image_ids": []}
+                logger.info(f"[分镜管理] 会话 {session_id[:8]}... 分镜 {index} 素材池无候选，跳过自动选图")
+                return {"status": "empty_pool", "images": []}
 
             seg = self._find_segment(self._get_outline_data(session_id), index)
             segment_context = (
@@ -763,7 +764,7 @@ class StoryboardWorkflow(StepWorkflowBase):
             )
             candidate_lines = "\n".join(
                 f"- {m['image_id']}《{(m.get('title') + '：') if m.get('title') else ''}"
-                f"{m.get('description') or '（无描述）'}》{_ref_abs_path(m['image_path'])}"
+                f"{m.get('description') or '（无描述）'}》"
                 for m in candidates
             )
 
@@ -774,40 +775,37 @@ class StoryboardWorkflow(StepWorkflowBase):
                     parsed = None
                 ids = parsed.get("image_ids") if isinstance(parsed, dict) else None
                 if not isinstance(ids, list):  # 空数组合法（宁缺毋滥），非 list 才算格式异常
-                    raise StoryboardError("参考图匹配输出格式异常（未解析到 image_ids 列表）")
+                    raise StoryboardError("参考图选择输出格式异常（未解析到 image_ids 列表）")
                 return [i for i in ids if isinstance(i, str)]
 
-            # 2. 轻量 agent run：LLM 可 Read 候选缩略图看画面（cwd 授予只读工具）
-            _emit("\n正在从素材池自动匹配参考素材图...\n")
+            # 2. 轻量 agent run：按分镜大纲与候选描述选图（输出仅 image_ids 数组，任务小输出小）
+            _emit("\n正在从素材池挑选参考素材图...\n")
             image_ids = await self.agent_steps.run(
-                "参考素材图匹配",
+                "参考素材图选择",
                 template="segment_material_match",
                 variables={
                     "segment_context": segment_context,
-                    "segment_prompt": prompt_text,
                     "candidate_images": candidate_lines,
                     "max_images": self.MAX_AUTO_MATCH_REFS,
                 },
                 system_prompt=SEGMENT_REF_MATCH_SYSTEM,
-                cwd=self.store.story_cwd(script_session_id),
-                max_turns=12,
+                max_turns=4,
                 interrupt=interrupt,
                 on_event=on_event,
                 parse=_parse_match,
             )
 
-            # 3. 校验收敛：过滤候选外 ID（防幻觉）→ 保序去重 → resolve（中途被删则跳过）→ 截断上限
+            # 3. 校验收敛：过滤候选外 ID（防幻觉）→ 保序去重 → 截断上限（去重后 >5 张截为 5）→ resolve
             valid_ids = {m["image_id"] for m in candidates}
-            picked = [i for i in dict.fromkeys(image_ids) if i in valid_ids]
-            if len(picked) > self.MAX_AUTO_MATCH_REFS:
-                logger.warning(f"[分镜管理] 匹配 {len(picked)} 张超上限，截断为 {self.MAX_AUTO_MATCH_REFS}")
-                picked = picked[:self.MAX_AUTO_MATCH_REFS]
+            picked, truncated = _converge_picked_ids(image_ids, valid_ids, self.MAX_AUTO_MATCH_REFS)
+            if truncated:
+                logger.warning(f"[分镜管理] 选图超上限，已截断为 {self.MAX_AUTO_MATCH_REFS} 张")
             resolved = []
             for image_id in picked:
                 try:
                     row = self.materials.resolve_pool_image(script_session_id, image_id)
                 except StoryboardError:
-                    logger.warning(f"[分镜管理] 匹配结果 {image_id} 解析失败，跳过")
+                    logger.warning(f"[分镜管理] 选图结果 {image_id} 解析失败，跳过")
                     continue
                 resolved.append({
                     "image_id": image_id,
@@ -815,34 +813,23 @@ class StoryboardWorkflow(StepWorkflowBase):
                     "description": row["description"],
                 })
 
-            # 4. 锁内重读后写入：run 期间用户手动关联了参考图 → 不覆盖；stale_prompt=False 保留提示词
-            with self._segment_lock(session_id):
-                seg = self._find_segment(self._get_outline_data(session_id), index)
-                if seg.get("reference_images"):
-                    logger.info(f"[分镜管理] 会话 {session_id[:8]}... 分镜 {index} 已有参考图，跳过自动匹配写入")
-                    return {"status": "skipped", "image_ids": []}
-                if resolved:
-                    self._save_segment_change(
-                        session_id, index, {"reference_images": resolved}, stale_prompt=False,
-                    )
-
-            status = "matched" if resolved else "no_match"
+            status = "selected" if resolved else "no_match"
             if resolved:
-                _emit(f"\n已自动匹配 {len(resolved)} 张参考素材图（{', '.join(r['image_id'] for r in resolved)}）。\n")
-            logger.info(f"[分镜管理] 会话 {session_id[:8]}... 分镜 {index} 自动匹配参考图: {status} {len(resolved)} 张")
-            return {"status": status, "image_ids": [r["image_id"] for r in resolved]}
+                _emit(f"\n已选定 {len(resolved)} 张参考素材图（{', '.join(r['image_id'] for r in resolved)}）。\n")
+            logger.info(f"[分镜管理] 会话 {session_id[:8]}... 分镜 {index} 参考图选择: {status} {len(resolved)} 张")
+            return {"status": status, "images": resolved}
 
         except StoryboardError as e:
             # 用户主动取消（interrupt 置位导致 run 失败）→ 尊重取消意图，向上抛让 run 以失败终态结束
             if interrupt is not None and getattr(interrupt, "is_set", lambda: False)():
                 raise
-            logger.warning(f"[分镜管理] 会话 {session_id[:8]}... 分镜 {index} 参考图自动匹配失败: {e}")
-            _emit(f"\n[参考图自动匹配失败: {e}｜已跳过，不影响已生成的提示词]\n")
-            return {"status": "failed", "image_ids": []}
-        except Exception:  # noqa: BLE001 — 兜底：匹配绝不阻断提示词结果
-            logger.warning(f"[分镜管理] 会话 {session_id[:8]}... 分镜 {index} 参考图自动匹配异常", exc_info=True)
-            _emit("\n[参考图自动匹配异常，已跳过，不影响已生成的提示词]\n")
-            return {"status": "failed", "image_ids": []}
+            logger.warning(f"[分镜管理] 会话 {session_id[:8]}... 分镜 {index} 参考图选择失败: {e}")
+            _emit(f"\n[参考图选择失败: {e}｜已跳过，写词将不带参考图进行]\n")
+            return {"status": "failed", "images": []}
+        except Exception:  # noqa: BLE001 — 兜底：选图绝不阻断写词
+            logger.warning(f"[分镜管理] 会话 {session_id[:8]}... 分镜 {index} 参考图选择异常", exc_info=True)
+            _emit("\n[参考图选择异常，已跳过，写词将不带参考图进行]\n")
+            return {"status": "failed", "images": []}
 
     def complete_segment(self, session_id: str, index: int, completed: bool = True) -> dict:
         """完成/取消完成单个分镜的配置（per-segment 确认；≥1 个完成即可进入视频生成）"""
@@ -863,16 +850,16 @@ class StoryboardWorkflow(StepWorkflowBase):
 # ==================== 模块级辅助 ====================
 
 
-def _ref_abs_path(image_path: str) -> str:
-    """参考图路径渲染：本地相对路径展开为绝对路径（供 Agent Read 看图），URL 原样
+def _converge_picked_ids(image_ids: list[str], valid_ids: set[str], limit: int) -> tuple[list[str], bool]:
+    """选图结果收敛：过滤候选外 ID（防幻觉）→ 保序去重 → 截断上限
 
-    本地图先换 Agent 缩略图（大图 base64 回显会撑爆 SDK 流式 buffer 且 token 昂贵）。
+    Returns:
+        (收敛后的 ID 列表, 是否发生截断)
     """
-    if not image_path:
-        return ""
-    if image_path.startswith(("http://", "https://")):
-        return f"（在线图：{image_path}）"
-    return f"（本地图：{resolve_project_path(ensure_agent_thumbnail(image_path)).resolve()}）"
+    picked = [i for i in dict.fromkeys(image_ids) if i in valid_ids]
+    if len(picked) > limit:
+        return picked[:limit], True
+    return picked, False
 
 
 # 分镜标题行（`### `，与前端 /^###\s/ 一致；#### 更深层级不构成分镜）

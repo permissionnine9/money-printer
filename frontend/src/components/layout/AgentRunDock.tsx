@@ -46,10 +46,10 @@ export const AgentRunDock: React.FC = () => {
         case 'segment_prompt': {
           const r = ev.result as { match_status?: string; matched_image_ids?: string[] } | undefined
           const matched = r?.matched_image_ids?.length ?? 0
-          if (r?.match_status === 'matched' && matched > 0) {
-            message.success(`${name} 提示词已生成，已自动匹配 ${matched} 张参考素材图`)
+          if (r?.match_status === 'selected' && matched > 0) {
+            message.success(`${name} 提示词已生成，已选定 ${matched} 张参考素材图`)
           } else if (r?.match_status === 'failed') {
-            message.warning(`${name} 提示词已生成（参考图自动匹配失败，可在分镜中手动关联素材图）`)
+            message.warning(`${name} 提示词已生成（参考图自动选择失败，可在分镜中手动关联素材图）`)
           } else {
             message.success(`${name} 提示词已生成`)
           }
@@ -103,6 +103,7 @@ export const AgentRunDock: React.FC = () => {
           {runs.map((run) => (
             <div
               key={run.runId}
+              style={{border:'1px solid #ccc'}}
               className={`${styles.card}${run.status === 'error' ? ` ${styles.cardError}` : ''}`}
               onClick={() => {
                 expandRun(run.runId)

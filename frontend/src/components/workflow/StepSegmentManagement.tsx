@@ -107,6 +107,8 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
   // 批量生成分镜脚本：勾选的分镜索引集合（仅全能参考模式可勾选）与批量提交中状态
   const [checkedIndexes, setCheckedIndexes] = useState<Set<number>>(new Set())
   const [batchStarting, setBatchStarting] = useState(false)
+  // 批量完成分镜配置提交中
+  const [batchCompleting, setBatchCompleting] = useState(false)
 
   const selected = useMemo(
     () => segments.find((s) => s.index === selectedIndex) || segments[0],
@@ -268,6 +270,38 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
     }
   }
 
+  // 勾选中「已生成分镜提示词」的数量（批量完成配置仅对这些分镜生效，其余勾选无效）
+  const checkedPromptCount = segments.filter((s) => checkedIndexes.has(s.index) && s.prompt).length
+
+  // 批量完成分镜配置：仅勾选中已生成提示词的分镜生效，未生成提示词的勾选忽略并提示
+  const handleBatchComplete = async () => {
+    const list = segments
+      .filter((s) => checkedIndexes.has(s.index) && s.prompt)
+      .sort((a, b) => a.index - b.index)
+    if (!list.length) return
+    const skipped = checkedIndexes.size - list.length
+    if (skipped > 0) {
+      message.warning(`已忽略 ${skipped} 个未生成分镜提示词的分镜（仅已生成提示词的分镜可完成配置）`)
+    }
+    setBatchCompleting(true)
+    let failed = 0
+    try {
+      for (const seg of list) {
+        try {
+          await stepApi.completeSegment(session.session_id, seg.index, true)
+        } catch {
+          failed++
+        }
+      }
+      if (failed) message.error(`${failed} 个分镜配置完成失败，请重试`)
+      else message.success(`已批量完成 ${list.length} 个分镜配置，可进入第 4 步勾选生成视频`)
+      setCheckedIndexes(new Set())
+      await refreshSession()
+    } finally {
+      setBatchCompleting(false)
+    }
+  }
+
   const completeSegment = async (index: number, completed: boolean) => {
     setCompleting(true)
     try {
@@ -368,6 +402,17 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
                 onClick={() => void handleBatchGenerate()}
               >
                 批量生成分镜脚本
+              </Button>
+            </Tooltip>
+            <Tooltip title="仅对勾选中「已生成分镜提示词」的分镜生效，未生成提示词的勾选将被忽略">
+              <Button
+                size="small"
+                icon={<CheckCircleOutlined />}
+                disabled={!checkedPromptCount}
+                loading={batchCompleting}
+                onClick={() => void handleBatchComplete()}
+              >
+                批量完成分镜配置
               </Button>
             </Tooltip>
           </Space>

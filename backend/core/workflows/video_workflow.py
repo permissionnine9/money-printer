@@ -105,6 +105,9 @@ class VideoCreationWorkflowV2:
         ):
             self._cleanup_storyboard_on_reselect(session_id, prev)
             self.session_manager.clear_steps_after(session_id, "select_episode")
+            # aux 暂存不在步骤状态机内，clear_steps_after 清不到——必须显式删，
+            # 否则重选集后新分镜段数与旧暂存一致时会按旧 timeline 生成旧剧情视频
+            self.session_manager.delete_step_result(session_id, "comfyui_import")
 
         result_data = {
             "script_session_id": script_session_id,
@@ -415,7 +418,8 @@ class VideoCreationWorkflowV2:
                 parts.append(f"全剧基调：{tone[:150]}")
         if not parts:
             return ""
-        parts.append("所有分镜共享以上语境，画面气质、光线情绪与节奏密度须与本集戏剧走向保持一致")
+        parts.append("所有分镜共享以上语境，画面气质、光线情绪与节奏密度须与本集戏剧走向保持一致;")
+        parts.append("人物标准语言为普通话。")
         return "\n".join(parts)
 
     async def prepare_comfyui_import(

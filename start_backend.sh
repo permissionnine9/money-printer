@@ -72,5 +72,22 @@ echo -e "${BLUE}Python 版本：$(python --version)${NC}"
 echo -e "${GREEN}正在启动 FastAPI 服务...${NC}"
 echo -e "${GREEN}API 文档将运行在：http://localhost:8000/docs${NC}"
 
-# 使用虚拟环境中的 uvicorn
-.venv/bin/uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+# 清理残留后端：uvicorn --reload 的 graceful shutdown 可能被未完成的后台任务
+# （如视频生成）卡住，上次未退干净的进程会一直占着 8000，导致本次启动直接失败。
+# 按进程组整体清理（reloader 与 worker 同组，只杀 reloader 会留下占着 socket 的 worker）
+if [ -n "$(lsof -ti :8000 2>/dev/null)" ]; then
+    STALE_UVICORN=$(pgrep -f "uvicorn backend.main:app" | head -1)
+    if [ -n "$STALE_UVICORN" ]; then
+        STALE_PGID=$(ps -o pgid= -p "$STALE_UVICORN" | tr -d ' ')
+        echo -e "${YELLOW}端口 8000 被残留后端占用（PID $STALE_UVICORN），正在按进程组清理...${NC}"
+        kill -9 -- -"$STALE_PGID" 2>/dev/null
+        sleep 1
+    fi
+fi
+if [ -n "$(lsof -ti :8000 2>/dev/null)" ]; then
+    echo -e "${RED}错误：端口 8000 被其他进程占用（PID: $(lsof -ti :8000 | tr '\n' ' ')），请手动处理${NC}"
+    exit 1
+fi
+
+# 使用虚拟环境中的 uvicorn（graceful shutdown 限时 10 秒，防止退出被后台任务卡住）
+.venv/bin/uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 10

@@ -212,6 +212,16 @@ class SessionManager(BaseSQLiteManager):
             conn.commit()
         return True
 
+    def delete_step_result(self, session_id: str, step_name: str) -> bool:
+        """删除单个步骤/辅助状态结果（如重新选集时清 comfyui_import 导入暂存）"""
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM step_results WHERE session_id = ? AND step_name = ?",
+                (session_id, step_name)
+            )
+            conn.commit()
+        return True
+
     def get_step_result(self, session_id: str, step_name: str) -> Optional[dict]:
         """获取步骤结果
 

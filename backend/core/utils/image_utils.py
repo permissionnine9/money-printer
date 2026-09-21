@@ -1,21 +1,14 @@
-"""图片公共工具：压缩 / 字节读取 / Agent 缩略图（视频服务与生图服务共享）"""
-import hashlib
+"""图片公共工具：压缩 / 字节读取（视频服务与生图服务共享）"""
 import io
 import logging
 import mimetypes
-import os
-from pathlib import Path
 
 import httpx
 from PIL import Image
 
-from backend.core.utils.path_utils import PROJECT_ROOT, resolve_project_path
+from backend.core.utils.path_utils import resolve_project_path
 
 logger = logging.getLogger(__name__)
-
-# Agent 看图缩略图缓存目录（源图 > AGENT_THUMB_SOURCE_LIMIT 时才生成）
-AGENT_THUMB_DIR = PROJECT_ROOT / "data" / "cache" / "agent_thumbs"
-AGENT_THUMB_SOURCE_LIMIT = 512 * 1024  # 小于该字节数的源图直接用原图
 
 
 def compress_image(image_data: bytes, max_size: int, quality: int) -> tuple[bytes, str]:
@@ -87,35 +80,3 @@ async def load_image_bytes(image_path: str, compress: bool = False, *, max_size:
     except Exception as e:
         logger.error(f"读取参考图失败 {image_path}: {e}")
         return None, None
-
-
-def ensure_agent_thumbnail(image_path: str, max_size: int = 1024, quality: int = 80) -> str:
-    """为 Agent Read 看图准备缩略图：大图压缩到 max_size 边长的 JPEG，小图/URL 原样返回
-
-    Agent 读原图时 CLI 会把整图 base64 回显进 stream-json（SDK 默认 1MB 单条上限），
-    高分辨率素材图会撑爆 buffer 且图片 token 昂贵；Agent 理解画面用缩略图足够。
-    缓存于 data/cache/agent_thumbs/{stem}_{hash8}.jpg（hash 取源图大小+mtime，源图变化自动失效）；
-    任何异常返回原路径兜底。
-    """
-    if image_path.startswith(("http://", "https://")):
-        return image_path
-    try:
-        path = resolve_project_path(image_path)
-        if not path.exists() or path.stat().st_size < AGENT_THUMB_SOURCE_LIMIT:
-            return image_path
-
-        thumb = AGENT_THUMB_DIR / (
-            f"{path.stem}_{hashlib.md5(f'{path.stat().st_size}:{path.stat().st_mtime_ns}'.encode()).hexdigest()[:8]}.jpg"
-        )
-        if not thumb.exists():
-            data, _ = compress_image(path.read_bytes(), max_size, quality)
-            AGENT_THUMB_DIR.mkdir(parents=True, exist_ok=True)
-            # 原子落盘：先写临时文件再 os.replace，进程中途被杀（如 uvicorn reload）
-            # 只会残留 .tmp，不会留下截断的缩略图被缓存永久命中
-            tmp = thumb.with_name(f"{thumb.stem}.{os.getpid()}.tmp")
-            tmp.write_bytes(data)
-            os.replace(tmp, thumb)
-        return thumb.as_posix()
-    except Exception as e:
-        logger.warning(f"生成 Agent 缩略图失败（回退原图）{image_path}: {e}")
-        return image_path
