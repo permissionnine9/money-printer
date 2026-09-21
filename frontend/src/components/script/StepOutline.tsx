@@ -2,7 +2,7 @@
  * 第 2 步：故事大纲（参数化生成思维导图 → run 观流；预览/编辑双模式与重新生成）
  */
 import React, { useEffect, useState } from 'react'
-import { Button, Card, Input, InputNumber, Modal, Segmented, Space, Spin, Tag, Typography, message } from 'antd'
+import { Button, Card, Input, InputNumber, Modal, Segmented, Space, Tag, Typography, message } from 'antd'
 import {
   CheckCircleOutlined,
   EditFilled,
@@ -17,8 +17,7 @@ import type { ScriptSessionDetail } from '@/types'
 import client, { scriptStepApi } from '@/api/client'
 import { MindmapView, RunTaskBanner } from '@/components/common'
 import { useScriptSessionStore } from '@/stores/scriptSessionStore'
-import { useAgentRunStore } from '@/stores/agentRunStore'
-import { guardRunStart, useRunActive, useRunError } from '@/hooks/useRunTask'
+import { useRunActive, useRunError, useStartRun } from '@/hooks/useRunTask'
 
 const { Text } = Typography
 const { TextArea } = Input
@@ -44,7 +43,6 @@ export const StepOutline: React.FC<StepOutlineProps> = ({ session }) => {
   const [viewMode, setViewMode] = useState<'preview' | 'edit'>('preview')
   const [editingMarkdown, setEditingMarkdown] = useState('')
   const [saving, setSaving] = useState(false)
-  const [starting, setStarting] = useState(false)
   const [promptModal, setPromptModal] = useState<{ open: boolean; extraPrompt: string }>({
     open: false,
     extraPrompt: '',
@@ -53,6 +51,7 @@ export const StepOutline: React.FC<StepOutlineProps> = ({ session }) => {
   // 大纲生成任务在全局 store 中跟踪（跨菜单切换不丢失，按钮据此防重复触发）
   const outlineRunning = useRunActive(session.session_id, 'outline')
   const outlineError = useRunError(session.session_id, 'outline')
+  const { starting, launch } = useStartRun(session.session_id)
 
   // 会话切换时还原生成参数
   useEffect(() => {
@@ -72,27 +71,23 @@ export const StepOutline: React.FC<StepOutlineProps> = ({ session }) => {
   }
 
   // 发起生成（POST outline/generate → run_id → 任务交给全局 AgentRunDock 跟踪）
-  const executeGenerate = async (regenExtraPrompt: string) => {
-    if (guardRunStart(session.session_id, 'outline', '故事大纲', starting)) return
-    setStarting(true)
-    setPromptModal({ open: false, extraPrompt: '' })
-    try {
-      const { data } = await client.post(`/script-sessions/${session.session_id}/outline/generate`, {
-        episode_count: episodeCount || 0,
-        total_word_count: totalWordCount || 0,
-        scene_count: sceneCount || 0,
-        extra_prompt: regenExtraPrompt || extraPrompt || '',
-      })
-      const runId = data?.data?.run_id
-      if (!runId) throw new Error('未获取到 run_id')
-      useAgentRunStore.getState().addRun({ runId, sessionId: session.session_id, kind: 'outline' })
-      message.info('大纲生成已发起，进度见右上角后台任务')
-    } catch (e) {
-      message.error((e as Error).message)
-    } finally {
-      setStarting(false)
-    }
-  }
+  const executeGenerate = (regenExtraPrompt: string) =>
+    launch({
+      kind: 'outline',
+      label: '故事大纲',
+      close: () => setPromptModal({ open: false, extraPrompt: '' }),
+      invoke: async () => {
+        const { data } = await client.post(`/script-sessions/${session.session_id}/outline/generate`, {
+          episode_count: episodeCount || 0,
+          total_word_count: totalWordCount || 0,
+          scene_count: sceneCount || 0,
+          extra_prompt: regenExtraPrompt || extraPrompt || '',
+        })
+        const runId = data?.data?.run_id
+        if (!runId) throw new Error('未获取到 run_id')
+        return runId
+      },
+    })
 
   const handleModalOk = () => {
     Modal.confirm({
@@ -264,17 +259,15 @@ export const StepOutline: React.FC<StepOutlineProps> = ({ session }) => {
               />
             </div>
             <div style={{ marginTop: 16 }}>
-              <Spin spinning={starting}>
-                <Button
-                  type="primary"
-                  size="large"
-                  icon={<ThunderboltOutlined />}
-                  loading={starting || outlineRunning}
-                  onClick={() => executeGenerate('')}
-                >
-                  生成大纲
-                </Button>
-              </Spin>
+              <Button
+                type="primary"
+                size="large"
+                icon={<ThunderboltOutlined />}
+                loading={starting || outlineRunning}
+                onClick={() => executeGenerate('')}
+              >
+                生成大纲
+              </Button>
             </div>
           </div>
         )}

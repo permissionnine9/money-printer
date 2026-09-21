@@ -15,7 +15,7 @@ SCRIPT_STEPS = [
     "story_ideation",     # 1. 故事构思（多轮对话盘问）
     "story_outline",      # 2. 故事大纲（markmap）
     "episode_design",     # 3. 分集设计（agent 工具增量落库）
-    "lookbook_images",    # 4. 剧本定妆照（agent 出 prompt + 确定性生图）
+    "lookbook_images",    # 4. 剧本核心素材（agent 出 prompt + 确定性生图）
 ]
 
 # 视频生成工作流 4 步（重构后）

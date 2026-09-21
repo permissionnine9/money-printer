@@ -1,6 +1,8 @@
 """
 会话管理 API
 """
+import logging
+
 from fastapi import APIRouter, Depends
 from typing import List
 import re
@@ -11,11 +13,18 @@ from backend.schemas.sessions import (
     SessionDetailResponse,
     SessionListResponse,
 )
-from backend.deps import get_session_manager, get_workspace_store, load_video_session
+from backend.deps import (
+    get_script_manager,
+    get_session_manager,
+    get_workspace_store,
+    load_video_session,
+)
 from backend.core.persistence.session_manager import SessionManager
 from backend.core.services.step_payload import script_title, video_step_results
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 
 def _episode_number(episode_id: str | None) -> int | None:
@@ -120,8 +129,24 @@ def get_session(
 def delete_session(
     session_id: str,
     session_manager: SessionManager = Depends(get_session_manager),
-    _session_info: dict = Depends(load_video_session),
+    session_info: dict = Depends(load_video_session),
 ):
-    """删除会话"""
+    """删除会话
+
+    剧本会话按 script-sessions 专属端点同样的顺序级联清理（delete_session →
+    delete_script_data → delete_story），否则 lookbook 表残留孤儿行——素材库
+    侧的 alive 过滤只是对该残留的防御，不能作为常规路径。
+    视频会话级联删除工作区分镜目录（先回收分镜素材，素材图保留可复用）。
+    """
     session_manager.delete_session(session_id)
+    if session_info.get("workflow_type") == "script":
+        get_script_manager().delete_script_data(session_id)
+        get_workspace_store().delete_story(session_id)
+    else:
+        from backend.core.services.material_pool_service import MaterialPoolService
+
+        materials = MaterialPoolService(get_workspace_store(), get_script_manager())
+        removed = materials.remove_video_storyboard(session_id, session_manager)
+        if removed:
+            logger.info(f"[删除会话] 视频会话 {session_id[:8]}... 级联清理 {removed} 个分镜目录")
     return {"success": True, "message": f"会话 {session_id} 已删除"}

@@ -2,7 +2,7 @@
  * 主布局组件：顶部导航 + 左侧会话管理（视频 / 剧本两页各自渲染）+ 内容区
  */
 import React, { useCallback, useEffect, useState } from 'react'
-import { Layout, Menu, Button, Tooltip } from 'antd'
+import { Layout, Menu, Button, Dropdown, Tooltip } from 'antd'
 import {
   VideoCameraOutlined,
   AppstoreOutlined,
@@ -10,6 +10,8 @@ import {
   FormOutlined,
   CloudServerOutlined,
   PictureOutlined,
+  SettingOutlined,
+  ThunderboltOutlined,
 } from '@ant-design/icons'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { SessionSider } from '@/components/common/SessionSider'
@@ -147,9 +149,15 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   const navItems = [
     { key: '/script', icon: <FormOutlined />, label: '创作剧本' },
     { key: '/', icon: <VideoCameraOutlined />, label: '视频生成工作流' },
-    { key: '/materials', icon: <PictureOutlined />, label: '素材管理' },
-    { key: '/models', icon: <AppstoreOutlined />, label: '模型管理' },
+  ]
+
+  // 右上角设置下拉：管理类页面入口 + Agent 并发配置
+  const settingMenuItems = [
     { key: '/prompts', icon: <FileTextOutlined />, label: '提示词管理' },
+    { key: '/models', icon: <AppstoreOutlined />, label: '模型管理' },
+    { key: '/materials', icon: <PictureOutlined />, label: '素材管理' },
+    { type: 'divider' as const },
+    { key: '/settings/agent-concurrency', icon: <ThunderboltOutlined />, label: 'Agent 并发配置' },
   ]
 
   // ComfyUI 服务器连接设置（GPU 容器重启后 SSH 凭据变化时手动录入）
@@ -181,15 +189,25 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           selectedKeys={[location.pathname]}
           items={navItems}
           onClick={({ key }) => navigate(key)}
-          style={{ marginLeft: 48, background: 'transparent', borderBottom: 'none', minWidth: 480, flex: 1 }}
+          style={{ marginLeft: 48, background: 'transparent', borderBottom: 'none', minWidth: 320, flex: 1 }}
         />
         <Tooltip title="ComfyUI 服务器连接（容器重启后更新 SSH 信息）">
           <Button
             type="text"
+            style={{ marginRight: 8 }}
             icon={<CloudServerOutlined style={{ color: '#fff', fontSize: 18 }} />}
             onClick={() => setConnectionModalOpen(true)}
           />
         </Tooltip>
+        <Dropdown
+          placement="bottomRight"
+          menu={{
+            items: settingMenuItems,
+            onClick: ({ key }) => navigate(key),
+          }}
+        >
+          <Button type="text" icon={<SettingOutlined style={{ color: '#fff', fontSize: 18 }} />} />
+        </Dropdown>
         <ComfyUIConnectionModal open={connectionModalOpen} onClose={() => setConnectionModalOpen(false)} />
       </Header>
       <Layout>

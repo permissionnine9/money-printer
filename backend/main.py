@@ -21,7 +21,10 @@ from backend.api.v1 import (
     materials,
 )
 from backend.config import override_src_config
+from backend.core.agent_sdk import get_run_registry
 from backend.core.errors import WorkflowError
+from backend.core.persistence.settings_manager import AGENT_CONCURRENCY_KEY
+from backend.deps import get_settings_manager
 
 # 配置日志
 logging.basicConfig(
@@ -39,6 +42,11 @@ async def lifespan(app: FastAPI):
 
     # 打印实际生效的模型配置（模型管理默认配置 > 系统内置常量）
     override_src_config()
+
+    # 恢复持久化的 Agent 并发上限（未配置过则保持默认值）
+    saved = get_settings_manager().get(AGENT_CONCURRENCY_KEY)
+    if saved:
+        get_run_registry().set_max_concurrent(int(saved))
 
     yield
     # 关闭时清理

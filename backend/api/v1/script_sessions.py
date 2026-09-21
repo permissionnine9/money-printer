@@ -6,6 +6,7 @@
 
 业务异常（ScriptWorkflowError）由 main.py 的全局异常 handler 统一转 HTTP detail。
 """
+import asyncio
 import logging
 import uuid
 from typing import Annotated, Optional
@@ -336,7 +337,7 @@ async def delete_entity(session_id: str, entity_id: Annotated[str, ENTITY_ID_PAT
     return {"success": True, "message": f"实体 {entity_id} 已删除"}
 
 
-# ==================== 第 4 步：定妆照 ====================
+# ==================== 第 4 步：核心素材 ====================
 
 
 def _require_default_image_model(model_config_id: Optional[str]) -> None:
@@ -350,7 +351,7 @@ def _require_default_image_model(model_config_id: Optional[str]) -> None:
 
 @router.post("/{session_id}/lookbook/generate")
 async def generate_lookbook(session_id: str, body: LookbookGenerateRequest, _info: dict = Depends(load_script_session)):
-    """勾选实体生成定妆照 → {run_id}（agent 出 prompt + 确定性生图）"""
+    """勾选实体生成核心素材 → {run_id}（agent 出 prompt + 确定性生图）"""
     _require_default_image_model(body.model_config_id)
     workflow = get_script_workflow()
 
@@ -378,8 +379,10 @@ async def list_lookbook(session_id: str, entity_id: Optional[str] = None, task_s
 
 @router.get("/{session_id}/lookbook/library")
 async def get_lookbook_library(session_id: str, _info: dict = Depends(load_script_session)):
-    """素材库：全部存活剧本会话的已完成定妆照（含当前剧本历史素材），按会话分组"""
-    data = list_lookbook_library(
+    """素材库：全部存活剧本会话的已完成核心素材（含当前剧本历史素材），按会话分组"""
+    # to_thread：跨全部会话的 SQLite 扫描 + 逐会话磁盘 IO，同步执行会阻塞事件循环（SSE 观流卡顿）
+    data = await asyncio.to_thread(
+        list_lookbook_library,
         get_script_session_manager(), get_workspace_store(), get_script_manager(), session_id,
     )
     return {"success": True, "data": data}
@@ -388,7 +391,8 @@ async def get_lookbook_library(session_id: str, _info: dict = Depends(load_scrip
 @router.post("/{session_id}/lookbook/import")
 async def import_lookbook_image(session_id: str, body: LookbookImportRequest, _info: dict = Depends(load_script_session)):
     """从素材库复制素材到当前会话并锚定到实体（引用同一图片 URL，无额外存储）"""
-    data = import_lookbook_from_library(
+    data = await asyncio.to_thread(
+        import_lookbook_from_library,
         get_workspace_store(), get_script_manager(),
         session_id, body.entity_id, body.source_image_id,
     )
@@ -397,7 +401,7 @@ async def import_lookbook_image(session_id: str, body: LookbookImportRequest, _i
 
 @router.post("/{session_id}/lookbook/{image_id}/regenerate")
 async def regenerate_lookbook_image(session_id: str, image_id: str, body: LookbookRegenerateRequest, _info: dict = Depends(load_script_session)):
-    """单张定妆照重生成 → {run_id}"""
+    """单张核心素材重生成 → {run_id}"""
     _require_default_image_model(body.model_config_id)
     workflow = get_script_workflow()
 

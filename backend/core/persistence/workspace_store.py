@@ -183,15 +183,17 @@ def _doc_name(doc_id: str, name: str) -> str:
 class WorkspaceStore:
     """文件化工作区存储（剧本会话一棵 story 树的读写入口）"""
 
-    def __init__(self, workspace_dir: Path | str | None = None, session_manager=None):
+    def __init__(self, workspace_dir: Path | str | None = None, session_manager=None, script_manager=None):
         """
         Args:
             workspace_dir: 工作区根目录（默认项目根 workspace/；测试可注入临时目录）
             session_manager: 剧本会话 SessionManager（读锚点用；缺省延迟取 deps 单例）
+            script_manager: ScriptManager（实体 ID 防撞查 lookbook 保留行；缺省延迟取 deps 单例）
         """
         self.root = Path(workspace_dir) if workspace_dir else WORKSPACE_DIR
         self.root.mkdir(parents=True, exist_ok=True)
         self._sm = session_manager
+        self._scm = script_manager
         # per-story 可重入锁（公开方法可能嵌套调用：write_outline → rename_story）
         self._locks: dict[str, threading.RLock] = {}
         self._locks_guard = threading.Lock()
@@ -204,6 +206,16 @@ class WorkspaceStore:
             from backend.deps import get_script_session_manager
             self._sm = get_script_session_manager()
         return self._sm
+
+    def _anchor_scm(self):
+        """ScriptManager（实体 ID 防撞）；不可用时返回 None（回退纯文件扫描）"""
+        if self._scm is None:
+            try:
+                from backend.deps import get_script_manager
+                self._scm = get_script_manager()
+            except Exception:  # noqa: BLE001 — 独立测试环境无 deps 单例，回退文件扫描
+                return None
+        return self._scm
 
     def _story_lock(self, script_session_id: str) -> threading.RLock:
         with self._locks_guard:
@@ -433,13 +445,21 @@ class WorkspaceStore:
     # ==================== 实体注册表（全局实体卡） ====================
 
     def _scan_next_entity_id(self, entity_type: str) -> str:
-        """无锁扫描实现（调用方须持有 _ENTITY_ID_LOCK）；跨全工作区 MAX+1，与旧 DB 全局唯一语义一致"""
+        """无锁扫描实现（调用方须持有 _ENTITY_ID_LOCK）；跨全工作区 MAX+1，与旧 DB 全局唯一语义一致
+
+        文件扫描之外并入 lookbook 表保留行的最大序号：级联删除（大纲重生成）保留的
+        历史核心素材行仍占用 entity_id，若只扫文件会从 001 重新分配，新实体与保留行
+        撞号导致跨代错配（旧角色素材图被当作新实体展示）。
+        """
         prefix = ENTITY_ID_PREFIXES[entity_type]
         max_num = 0
         for path in self.root.glob(f"*/{DIR_ENTITIES}/{prefix}_*.md"):
             m = re.match(rf"{prefix}_(\d+)", path.name)
             if m:
                 max_num = max(max_num, int(m.group(1)))
+        scm = self._anchor_scm()
+        if scm is not None:
+            max_num = max(max_num, scm.max_entity_seq(prefix))
         return f"{prefix}_{max_num + 1:03d}"
 
     def _find_entity_file(self, script_session_id: str, entity_id: str) -> Optional[Path]:
@@ -614,7 +634,7 @@ class WorkspaceStore:
         return True
 
     def set_entity_lookbook(self, script_session_id: str, entity_id: str, image_id: str, image_path: str) -> bool:
-        """回写实体的定妆照引用（限定本 story；定妆照任务本体仍在 DB，文件只存引用）"""
+        """回写实体的核心素材引用（限定本 story；核心素材任务本体仍在 DB，文件只存引用）"""
         _require_entity_id(entity_id)
         with self._story_lock(script_session_id):
             path = self._find_entity_file(script_session_id, entity_id)
@@ -772,7 +792,7 @@ class WorkspaceStore:
     def delete_story_content(self, script_session_id: str) -> dict:
         """大纲重生成的级联清理：清空分集与实体（02/03），返回清理计数
 
-        （与旧 delete_script_data 对应；定妆照/素材图任务表仍在 DB，由调用方另行清理。
+        （与旧 delete_script_data 对应；核心素材/素材图任务表仍在 DB，由调用方另行清理。
         04-storyboards 保留——视频会话数据不因剧本侧操作被删，与旧行为一致。）
         """
         story = self.story_dir(script_session_id)
@@ -813,6 +833,19 @@ class WorkspaceStore:
         _require_episode_id(episode_id)
         story = self.ensure_story(script_session_id)
         return story / DIR_STORYBOARDS / episode_id / f"vs-{video_session_id[:8]}"
+
+    def delete_storyboard(self, script_session_id: str, episode_id: str, video_session_id: str) -> bool:
+        """删除指定视频会话的分镜目录（重新选集/删除视频会话时清理；素材图不在此目录）"""
+        _require_episode_id(episode_id)
+        story = self.story_dir(script_session_id)
+        if not story:
+            return False
+        vs_dir = story / DIR_STORYBOARDS / episode_id / f"vs-{video_session_id[:8]}"
+        if not vs_dir.exists():
+            return False
+        import shutil
+        shutil.rmtree(vs_dir)
+        return True
 
     def episode_path(self, script_session_id: str, episode_id: str) -> Optional[Path]:
         """分集文件绝对路径（供 Agent prompt 注入；不存在返回 None）"""

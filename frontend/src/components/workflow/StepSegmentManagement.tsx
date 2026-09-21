@@ -11,6 +11,7 @@ import {
   Alert,
   Button,
   Card,
+  Checkbox,
   Empty,
   Image,
   Input,
@@ -38,7 +39,8 @@ import {
 import type { SessionDetail, SegmentReferenceImage, StoryboardSegment } from '@/types'
 import { stepApi } from '@/api/client'
 import { useSessionStore } from '@/stores/sessionStore'
-import { useAgentRunStore, hasRunningSegmentPrompt } from '@/stores/agentRunStore'
+import { hasRunningSegmentPrompt } from '@/stores/agentRunStore'
+import { useStartRun } from '@/hooks/useRunTask'
 import { MaterialPickerModal } from './material/MaterialPickerModal'
 import { MaterialGenerateModal } from './material/MaterialGenerateModal'
 import { imageSrc } from '@/utils/imageSrc'
@@ -87,8 +89,8 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [configLoading, setConfigLoading] = useState(false)
   const [completing, setCompleting] = useState(false)
-  // 提示词生成提交中：防重复点击（守卫依赖 addRun，POST 挂起期间连点会穿透守卫重复入队）
-  const [confirming, setConfirming] = useState(false)
+  // 提示词生成提交中（POST 在途防重复，由 useStartRun 的 starting 驱动按钮 loading）
+  const { starting: confirming, launch } = useStartRun(session.session_id)
   // 分镜大纲查看弹窗（大纲收拢到「分镜配置」右上角按钮）
   const [outlineOpen, setOutlineOpen] = useState(false)
   // 参考素材图编辑
@@ -102,6 +104,9 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
     context: PromptContextView | null
     loading: boolean
   }>({ open: false, context: null, loading: false })
+  // 批量生成分镜脚本：勾选的分镜索引集合（仅全能参考模式可勾选）与批量提交中状态
+  const [checkedIndexes, setCheckedIndexes] = useState<Set<number>>(new Set())
+  const [batchStarting, setBatchStarting] = useState(false)
 
   const selected = useMemo(
     () => segments.find((s) => s.index === selectedIndex) || segments[0],
@@ -204,29 +209,62 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
     }
   }
 
-  const confirmGeneratePrompt = async () => {
-    if (!selected || confirming) return
-    if (hasRunningSegmentPrompt(session.session_id, selected.index)) {
-      message.warning(`分镜 ${selected.index + 1} 的提示词正在生成中（见右上角任务卡片），请等待完成后再试`)
-      return
-    }
-    setConfirming(true)
+  const confirmGeneratePrompt = () => {
+    if (!selected) return
+    void launch({
+      kind: 'segment_prompt',
+      label: `分镜 ${selected.index + 1} 提示词`,
+      // 分镜粒度守卫（同分镜防重复；不同分镜可并行），替换默认的 kind 级守卫
+      guard: () => {
+        if (hasRunningSegmentPrompt(session.session_id, selected.index)) {
+          message.warning(`分镜 ${selected.index + 1} 的提示词正在生成中（见右上角后台任务），请等待完成后再试`)
+          return true
+        }
+        return false
+      },
+      close: () => setPromptModal({ open: false, context: null, loading: false }),
+      extra: { segmentIndex: selected.index, segmentTitle: selected.title },
+      invoke: () => stepApi.generateSegmentPrompt(session.session_id, selected.index),
+    })
+  }
+
+  const toggleChecked = (index: number, checked: boolean) => {
+    setCheckedIndexes((prev) => {
+      const next = new Set(prev)
+      if (checked) next.add(index)
+      else next.delete(index)
+      return next
+    })
+  }
+
+  // 批量生成分镜脚本：勾选的分镜按顺序逐个加入任务队列（每个间隔 1 秒，相当于逐个点击；跳过弹窗预览）
+  const handleBatchGenerate = async () => {
+    const list = segments
+      .filter((s) => checkedIndexes.has(s.index) && s.mode === 'all_reference')
+      .sort((a, b) => a.index - b.index)
+    if (!list.length) return
+    setBatchStarting(true)
     try {
-      const runId = await stepApi.generateSegmentPrompt(session.session_id, selected.index)
-      // 任务交给全局 AgentRunDock：进度弹窗可收起到右上角，跨步骤/跨页面持续跟踪
-      useAgentRunStore.getState().addRun({
-        runId,
-        sessionId: session.session_id,
-        kind: 'segment_prompt',
-        segmentIndex: selected.index,
-        segmentTitle: selected.title,
-      })
-      message.info(`分镜 ${selected.index + 1} 提示词生成已发起，进度见右上角后台任务`)
-      setPromptModal({ open: false, context: null, loading: false })
-    } catch (e) {
-      message.error((e as Error).message)
+      for (let i = 0; i < list.length; i++) {
+        const seg = list[i]
+        if (i > 0) await new Promise((resolve) => setTimeout(resolve, 1000))
+        await launch({
+          kind: 'segment_prompt',
+          label: `分镜 ${seg.index + 1} 提示词`,
+          guard: () => {
+            if (hasRunningSegmentPrompt(session.session_id, seg.index)) {
+              message.warning(`分镜 ${seg.index + 1} 的提示词正在生成中，已跳过`)
+              return true
+            }
+            return false
+          },
+          extra: { segmentIndex: seg.index, segmentTitle: seg.title },
+          invoke: () => stepApi.generateSegmentPrompt(session.session_id, seg.index),
+        })
+      }
+      setCheckedIndexes(new Set())
     } finally {
-      setConfirming(false)
+      setBatchStarting(false)
     }
   }
 
@@ -314,11 +352,25 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
         }
         style={{ marginTop: 16 }}
         extra={
-          configuredCount > 0 ? (
-            <Tag icon={<CheckCircleOutlined />} color="success">
-              {configuredCount}/{segments.length} 已配置
-            </Tag>
-          ) : undefined
+          <Space size={8}>
+            {configuredCount > 0 && (
+              <Tag icon={<CheckCircleOutlined />} color="success">
+                {configuredCount}/{segments.length} 已配置
+              </Tag>
+            )}
+            <Tooltip title="将勾选的分镜按顺序逐个加入提示词生成任务队列（仅全能参考模式，跳过生成前预览）">
+              <Button
+                size="small"
+                type="primary"
+                icon={<ThunderboltOutlined />}
+                disabled={!checkedIndexes.size}
+                loading={batchStarting}
+                onClick={() => void handleBatchGenerate()}
+              >
+                批量生成分镜脚本
+              </Button>
+            </Tooltip>
+          </Space>
         }
       >
         <div style={{ display: 'flex', gap: 16, alignItems: 'stretch' }}>
@@ -344,6 +396,15 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
                   }}
                 >
                   <Space size={6} wrap>
+                    <span onClick={(e) => e.stopPropagation()}>
+                      <Tooltip title={seg.mode === 'all_reference' ? undefined : '仅「全能参考模式」支持分镜提示词生成'}>
+                        <Checkbox
+                          checked={checkedIndexes.has(seg.index)}
+                          disabled={seg.mode !== 'all_reference'}
+                          onChange={(e) => toggleChecked(seg.index, e.target.checked)}
+                        />
+                      </Tooltip>
+                    </span>
                     <Tag color="blue">分镜 {seg.index + 1}</Tag>
                     {tag && <Tag color={tag.color}>{tag.text}</Tag>}
                     {seg.configured && <Tag color="success">已配置</Tag>}

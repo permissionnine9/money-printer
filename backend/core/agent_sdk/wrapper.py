@@ -11,6 +11,7 @@
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from claude_agent_sdk import (
@@ -43,11 +44,24 @@ MAX_STREAM_BUFFER_SIZE = 16 * 1024 * 1024
 
 # 文件化工作区的只读检索工具（配合 cwd 锁定剧本目录，释放 Agent 自主检索能力；
 # 写入仍由后端结构化落盘，Agent 无写权限）。
-# 信任模型说明：cwd 不是沙箱——bypassPermissions 下 Read/Grep/Glob 技术上可读任意
-# 绝对路径，「仅限工作区」由 system prompt 与 MAP.md 边界声明软约束。当前产品为
-# 单机单用户 CLI 服务（攻击者=受害者本人），此权衡可接受；若后端暴露到网络或
-# 多人共用，必须补 deny 规则或 OS 级沙箱。
+# 边界说明：权限采用 dontAsk 模式 + allowed_tools 路径规则（Read/Grep/Glob 仅
+# 放行 cwd 目录内，绝对路径越界由 CLI 权限系统硬拒绝；MCP 工具按 server 白名单放行）。
 READ_ONLY_TOOLS = ["Read", "Grep", "Glob"]
+
+
+def _build_allowed_tools(cwd: Optional[str], mcp_servers: Optional[dict]) -> list[str]:
+    """构造 dontAsk 模式下的自动放行清单：工作区路径规则 + MCP server 白名单
+
+    Read/Grep/Glob 必须带路径 specifier（裸 "Grep" 会放行任意 path 参数，可越界检索）；
+    绝对路径规则用 // 前缀（gitignore 风格，见 Claude Code 权限规则语法）。
+    """
+    allowed: list[str] = []
+    if cwd:
+        root = str(Path(cwd).resolve()).rstrip("/")
+        allowed += [f"Read(//{root}/**)", f"Grep(//{root}/**)", f"Glob(//{root}/**)"]
+    for server_name in (mcp_servers or {}):
+        allowed.append(f"mcp__{server_name}")
+    return allowed
 
 
 @dataclass
@@ -60,7 +74,8 @@ class AgentRunOptions:
     # 传 READ_ONLY_TOOLS 可开放工作区文件检索（需配合 cwd）
     tools: Optional[list[str]] = None
     mcp_servers: Optional[dict] = None
-    # 工作目录（Agent 的 Read/Grep/Glob 边界锚点；缺省继承后端进程 cwd）
+    # 工作目录（Read/Grep/Glob 的硬边界锚点：仅该目录内放行，越界路径由 CLI 权限系统拒绝；
+    # 同时作为相对路径基准；缺省继承后端进程 cwd）
     cwd: Optional[str] = None
     # 多轮会话：要 resume 的 agent session_id（首轮留空由 SDK 生成）
     resume: Optional[str] = None
@@ -93,7 +108,9 @@ async def run_agent(
         max_turns=options.max_turns,
         tools=options.tools if options.tools is not None else [],
         mcp_servers=options.mcp_servers or {},
-        permission_mode="bypassPermissions",
+        # dontAsk：未在 allowed_tools 白名单内的调用一律硬拒绝（无头模式无人工确认）
+        permission_mode="dontAsk",
+        allowed_tools=_build_allowed_tools(options.cwd, options.mcp_servers),
         include_partial_messages=True,
         max_thinking_tokens=DEFAULT_THINKING_TOKENS,
         max_buffer_size=MAX_STREAM_BUFFER_SIZE,
@@ -184,7 +201,7 @@ async def run_agent(
     except asyncio.CancelledError:
         result.interrupted = True
         result.error = "已取消"
-        emit(AgentEvent(type="error", message="已取消"))
+        emit(AgentEvent(type="error", message="已取消", reason="cancelled"))
         raise
     finally:
         if interrupt_watcher is not None:

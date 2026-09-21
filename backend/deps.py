@@ -13,6 +13,7 @@ from backend.core.persistence.session_manager import (
 )
 from backend.core.persistence.model_manager import ModelManager
 from backend.core.persistence.script_manager import ScriptManager
+from backend.core.persistence.settings_manager import SettingsManager
 from backend.core.persistence.workspace_store import WorkspaceStore
 from backend.core.agents.script_workflow import ScriptWorkflow
 from backend.core.agents.storyboard import StoryboardWorkflow
@@ -54,9 +55,15 @@ def get_model_manager() -> ModelManager:
 
 
 @lru_cache()
+def get_settings_manager() -> SettingsManager:
+    """获取系统设置管理器实例（单例，与 SessionManager 共用同一个 SQLite）"""
+    return SettingsManager()
+
+
+@lru_cache()
 def get_workspace_store() -> WorkspaceStore:
     """获取文件化工作区存储实例（单例；剧本/分镜 markdown 产物的权威数据源）"""
-    return WorkspaceStore(session_manager=get_script_session_manager())
+    return WorkspaceStore(session_manager=get_script_session_manager(), script_manager=get_script_manager())
 
 
 @lru_cache()

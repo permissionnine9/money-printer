@@ -1,4 +1,5 @@
-"""系统设置：远程 ComfyUI 连接信息（读写 hosts.json + SSH 隧道重连）
+"""系统设置：远程 ComfyUI 连接信息（读写 hosts.json + SSH 隧道重连）、
+Agent 并发上限（SQLite 持久化 + 运行时动态调整）
 
 ComfyUI GPU 容器每次重启/重建后 SSH host/port/密码都会变化，此路由提供
 手动录入界面所需的后端：凭据写在 ~/.claude/skills/comfyui-restart/hosts.json
@@ -12,10 +13,13 @@ import subprocess
 from pathlib import Path
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from backend.core.agent_sdk import get_run_registry
 from backend.core.config import BASE_DIR
+from backend.core.persistence.settings_manager import AGENT_CONCURRENCY_KEY, SettingsManager
+from backend.deps import get_settings_manager
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +40,11 @@ class ComfyUIConnectionRequest(BaseModel):
     port: int = Field(..., ge=1, le=65535, description="SSH 端口")
     user: str = Field(default="root", description="SSH 用户名")
     password: str = Field(default="", description="SSH 密码（留空 = 保留原密码，仅改其他字段时用）")
+
+
+class AgentConcurrencyRequest(BaseModel):
+    """Agent 并发上限设置"""
+    max_concurrent: int = Field(..., ge=1, le=20, description="同时执行的 agent run 上限")
 
 
 def _load_hosts() -> dict:
@@ -119,3 +128,25 @@ async def update_comfyui_connection(request: ComfyUIConnectionRequest):
         "connected": False,
         "message": "已保存，但隧道未能连通 ComfyUI（凭据错误或远程服务未启动），请检查后重试",
     }
+
+
+@router.get("/agent-concurrency")
+async def get_agent_concurrency(sm: SettingsManager = Depends(get_settings_manager)):
+    """读取 Agent 并发上限配置与当前实际 worker 数"""
+    value = sm.get(AGENT_CONCURRENCY_KEY)
+    return {
+        "max_concurrent": int(value) if value else get_run_registry().max_concurrent,
+        "active_workers": get_run_registry().active_workers,
+    }
+
+
+@router.put("/agent-concurrency")
+async def update_agent_concurrency(
+    request: AgentConcurrencyRequest,
+    sm: SettingsManager = Depends(get_settings_manager),
+):
+    """保存 Agent 并发上限（持久化）并立即生效：扩容补 worker，缩容由多余
+    worker 完成当前 run 后自愿退出（执行中的任务不中断）"""
+    sm.set(AGENT_CONCURRENCY_KEY, str(request.max_concurrent))
+    get_run_registry().set_max_concurrent(request.max_concurrent)
+    return {"success": True, "data": {"max_concurrent": request.max_concurrent}}

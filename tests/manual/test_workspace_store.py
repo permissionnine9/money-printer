@@ -14,6 +14,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from backend.core.persistence.script_manager import ScriptManager
 from backend.core.persistence.session_manager import SCRIPT_STEPS, SessionManager
 from backend.core.persistence.workspace_store import WorkspaceStore, WorkspaceStoreError
 
@@ -34,7 +35,10 @@ def check(name: str, cond: bool, detail: str = ""):
 def main():
     tmp = Path(tempfile.mkdtemp(prefix="ws_store_test_"))
     sm = SessionManager(db_path=str(tmp / "test.db"), steps=SCRIPT_STEPS)
-    store = WorkspaceStore(workspace_dir=tmp / "workspace", session_manager=sm)
+    # 注入独立空库 ScriptManager：ID 分配已并入 lookbook 保留行防撞（B2），
+    # 不注入会延迟取 deps 单例（项目真实 DB，含历史 lookbook 行），chr_001 断言漂移
+    scm = ScriptManager(db_path=str(tmp / "test.db"))
+    store = WorkspaceStore(workspace_dir=tmp / "workspace", session_manager=sm, script_manager=scm)
     try:
         run(store, sm, tmp)
     finally:

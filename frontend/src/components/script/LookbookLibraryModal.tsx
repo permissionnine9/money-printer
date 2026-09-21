@@ -1,11 +1,12 @@
 /**
- * 定妆照素材库选择弹窗（第 4 步复用）：跨剧本会话 + 本剧本历史素材，单选绑定到实体。
+ * 核心素材素材库选择弹窗（第 4 步复用）：跨剧本会话 + 本剧本历史素材，单选绑定到实体。
  * 选中后复制素材到当前剧本（引用同一图片 URL）并锚定，源剧本删除不受影响。
  */
 import React, { useEffect, useState } from 'react'
 import { Button, Empty, Modal, Spin, Typography, message } from 'antd'
 import type { LookbookImage, LookbookLibraryGroup, PoolMaterial, ScriptEntity } from '@/types'
 import { scriptStepApi } from '@/api/client'
+import { useMaterialLibrary } from '@/hooks/useMaterialLibrary'
 import { MaterialGrid } from '@/components/workflow/material/MaterialPickerModal'
 
 const { Text } = Typography
@@ -26,23 +27,18 @@ export const LookbookLibraryModal: React.FC<LookbookLibraryModalProps> = ({
   onClose,
   onImported,
 }) => {
-  const [groups, setGroups] = useState<LookbookLibraryGroup[]>([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
+  const { groups, loading, error } = useMaterialLibrary<LookbookLibraryGroup>(
+    scriptStepApi.getLookbookLibrary,
+    sessionId,
+    open,
+  )
   const [selected, setSelected] = useState<PoolMaterial | null>(null)
   const [importing, setImporting] = useState(false)
 
+  // 打开时重置选择（素材加载由 useMaterialLibrary 负责）
   useEffect(() => {
-    if (!open) return
-    setSelected(null)
-    setError('')
-    setLoading(true)
-    scriptStepApi
-      .getLookbookLibrary(sessionId)
-      .then(setGroups)
-      .catch((e) => setError((e as Error).message))
-      .finally(() => setLoading(false))
-  }, [sessionId, open])
+    if (open) setSelected(null)
+  }, [open])
 
   // 排除目标实体当前已锚定的那张；映射为 MaterialGrid 展示形态（源实体已重建/删除时标注）
   const displayGroups = entity
@@ -111,7 +107,7 @@ export const LookbookLibraryModal: React.FC<LookbookLibraryModalProps> = ({
           <Text type="danger">{error}</Text>
         ) : displayGroups.length ? (
           <MaterialGrid groups={displayGroups} selected={selected ? [selected] : []} onItemClick={handleItemClick} />
-        ) : (
+        ) : loading ? null : (
           <Empty
             description="素材库为空：可先生成核心素材，之后修改大纲/分集设计时已完成的素材会自动保留"
             style={{ padding: '24px 0' }}

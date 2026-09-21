@@ -1,5 +1,7 @@
 export { LazyVideo } from './LazyVideo'
 export { MindmapView } from './MindmapView'
 export { PromptViewerModal } from './PromptViewerModal'
+export { RunStatusIcon, runStatusText } from './RunStatus'
+export type { RunStatus } from './RunStatus'
 export { RunTaskBanner } from './RunTaskBanner'
 export { SessionSider } from './SessionSider'

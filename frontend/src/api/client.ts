@@ -112,7 +112,7 @@ export const stepApi = {
     return data
   },
 
-  // 步骤3：素材池（选择弹窗分组数据：定妆照 / 本集素材 / 其他集素材）
+  // 步骤3：素材池（选择弹窗分组数据：核心素材 / 本集素材 / 其他集素材）
   getMaterialPool: async (
     sessionId: string
   ): Promise<MaterialPoolGroup[]> => {
@@ -238,6 +238,7 @@ export const modelApi = {
     model_id: string
     is_default?: boolean
     model_type?: 'image' | 'chat'
+    enabled?: boolean
   }): Promise<{ success: boolean; data: { model: ImageModelConfig } }> => {
     const { data } = await client.post('/models', payload)
     return data
@@ -253,9 +254,19 @@ export const modelApi = {
       model_id: string
       is_default?: boolean
       model_type?: 'image' | 'chat' | 'agent'
+      enabled?: boolean
     }
   ): Promise<{ success: boolean; data: { model: ImageModelConfig } }> => {
     const { data } = await client.put(`/models/${modelId}`, payload)
+    return data
+  },
+
+  // 启用/停用模型配置
+  setEnabled: async (
+    modelId: string,
+    enabled: boolean
+  ): Promise<{ success: boolean; data: { model: ImageModelConfig } }> => {
+    const { data } = await client.post(`/models/${modelId}/set-enabled`, { enabled })
     return data
   },
 
@@ -405,7 +416,7 @@ export const scriptStepApi = {
     return data.data
   },
 
-  // 第 4 步：定妆照
+  // 第 4 步：核心素材
   generateLookbook: async (
     sessionId: string,
     entityIds: string[],
@@ -454,7 +465,7 @@ export const scriptStepApi = {
     await client.delete(`/script-sessions/${sessionId}/lookbook/${imageId}`)
   },
 
-  // 素材库：全部剧本会话的已完成定妆照（含本剧本历史素材），按会话分组
+  // 素材库：全部剧本会话的已完成核心素材（含本剧本历史素材），按会话分组
   getLookbookLibrary: async (sessionId: string): Promise<LookbookLibraryGroup[]> => {
     const { data } = await client.get(`/script-sessions/${sessionId}/lookbook/library`)
     return data.data.groups
@@ -493,13 +504,18 @@ export const agentRunApi = {
   },
 }
 
-// 系统设置：远程 ComfyUI SSH 连接信息（hosts.json + 隧道重连）
+// 系统设置：远程 ComfyUI SSH 连接信息（hosts.json + 隧道重连）、Agent 并发上限
 export interface ComfyUIConnection {
   host: string
   port: number | null
   user: string
   password_set: boolean
   connected: boolean
+}
+
+export interface AgentConcurrencyInfo {
+  max_concurrent: number
+  active_workers: number
 }
 
 export const settingsApi = {
@@ -513,12 +529,20 @@ export const settingsApi = {
     const { data } = await client.put(`/settings/comfyui-connection`, payload, { timeout: 60000 })
     return data
   },
+  getAgentConcurrency: async (): Promise<AgentConcurrencyInfo> => {
+    const { data } = await client.get(`/settings/agent-concurrency`)
+    return data
+  },
+  updateAgentConcurrency: async (maxConcurrent: number): Promise<{ success: boolean; data: { max_concurrent: number } }> => {
+    const { data } = await client.put(`/settings/agent-concurrency`, { max_concurrent: maxConcurrent })
+    return data
+  },
 }
 
 // ==================== 素材管理 API（/materials） ====================
 
 export const materialApi = {
-  // 素材列表（kind: lookbook 定妆照 / episode 分集素材图 / upload 上传参考图 / video 视频）
+  // 素材列表（kind: lookbook 核心素材 / episode 分集素材图 / upload 上传参考图 / video 视频）
   list: async (kind: string): Promise<MaterialListResponse> => {
     const { data } = await client.get('/materials', { params: { kind } })
     return data.data

@@ -174,6 +174,7 @@ export const StepSelectEpisode: React.FC<StepSelectEpisodeProps> = ({ session })
                 <li key={s.step}>{s.label}</li>
               ))}
             </ul>
+            <p>分镜中已使用的素材图会保留在「素材管理」，可复用或手动删除。</p>
             <p>此操作不可撤销，是否继续？</p>
           </div>
         ),
@@ -219,7 +220,7 @@ export const StepSelectEpisode: React.FC<StepSelectEpisodeProps> = ({ session })
           <div style={{ marginTop: 16, padding: 12, background: '#fff7e6', borderRadius: 4 }}>
             <ExclamationCircleOutlined style={{ color: '#fa8c16', marginRight: 8 }} />
             <span style={{ color: '#ad6800' }}>
-              后续已完成 {completedSubsequentSteps} 个步骤，重新选集将重置这些步骤
+              后续已完成 {completedSubsequentSteps} 个步骤，重新选集将重置这些步骤；分镜素材图会保留在「素材管理」
             </span>
           </div>
         )}

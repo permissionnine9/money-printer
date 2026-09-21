@@ -96,6 +96,16 @@ class VideoCreationWorkflowV2:
         except Exception as e:
             raise WorkflowError(f"视频参数非法: {e}")
 
+        # 重新选集（选集/参数变化）：清空后续步骤并删旧分镜目录——先回收分镜素材再删
+        # （素材图保留在素材库，素材管理可见、素材池可复用；与前端确认弹窗承诺一致）
+        prev = (self.session_manager.get_step_result(session_id, "select_episode") or {}).get("result_data") or {}
+        if prev.get("script_session_id") and (
+            (prev.get("script_session_id"), prev.get("episode_id"), prev.get("video_params"))
+            != (script_session_id, episode_id, video_params)
+        ):
+            self._cleanup_storyboard_on_reselect(session_id, prev)
+            self.session_manager.clear_steps_after(session_id, "select_episode")
+
         result_data = {
             "script_session_id": script_session_id,
             "episode_id": episode_id,
@@ -105,6 +115,20 @@ class VideoCreationWorkflowV2:
         self.session_manager.save_step_result(session_id, "select_episode", result_data)
         logger.info(f"[步骤1] 完成 - 已选择 {episode_id}《{episode.get('title', '')}》")
         return {"success": True, "message": f"已选择分集 {episode_id}《{episode.get('title', '')}》", "data": result_data}
+
+    def _cleanup_storyboard_on_reselect(self, session_id: str, prev: dict) -> None:
+        """重新选集清理：回收分镜素材 → 删除旧分镜目录（分镜脚本作废，素材图保留）"""
+        from backend.deps import get_script_manager
+        from backend.core.services.material_pool_service import MaterialPoolService
+
+        old_sid = prev.get("script_session_id", "")
+        old_ep = prev.get("episode_id", "")
+        materials = MaterialPoolService(self.store, get_script_manager())
+        recycled = materials.recycle_segment_materials(old_sid, old_ep, session_id)
+        if recycled:
+            logger.info(f"[步骤1] 重新选集：回收 {recycled} 张分镜素材（{old_ep}）")
+        if self.store.delete_storyboard(old_sid, old_ep, session_id):
+            logger.info(f"[步骤1] 重新选集：已删除旧分镜目录（{old_ep}/vs-{session_id[:8]}）")
 
     def get_selected_episode(self, session_id: str) -> dict:
         """读取本会话绑定的剧本选集信息（script_session_id / episode_id / video_params）"""

@@ -1,7 +1,7 @@
 """剧本上下文装配器：为视频工作流（分镜脚本/参考图/帧 prompt）构建剧本侧上下文
 
 数据源：工作区文件（WorkspaceStore，markdown 产物权威源）；
-定妆照/素材图任务状态仍读 DB（scm）。
+核心素材/素材图任务状态仍读 DB（scm）。
 优先级：本集分集设计全文 > 上一集结尾摘要 > 人物/场景实体卡 > 伏笔关联集摘要 > 全局大纲摘要
 各段有长度上限（超长截断），保证 prompt 总量可控。
 """
@@ -25,7 +25,7 @@ class ScriptContextService:
     """从剧本会话装配分镜上下文"""
 
     def __init__(self, script_manager: ScriptManager, store: WorkspaceStore):
-        # scm：定妆照/素材图任务表（DB）；markdown 产物（分集/实体/大纲）读工作区文件
+        # scm：核心素材/素材图任务表（DB）；markdown 产物（分集/实体/大纲）读工作区文件
         self.scm = script_manager
         self.store = store
 

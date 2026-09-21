@@ -23,8 +23,7 @@ import type {
   ScriptSessionDetail,
 } from '@/types'
 import { entityApi, scriptStepApi } from '@/api/client'
-import { useAgentRunStore } from '@/stores/agentRunStore'
-import { guardRunStart, useRunActive, useRunError } from '@/hooks/useRunTask'
+import { useActiveRun, useRunError, useStartRun } from '@/hooks/useRunTask'
 import { usePolling } from '@/hooks/usePolling'
 import { RunTaskBanner } from '@/components/common'
 import { ACTION_LABEL, buildScriptMarkdown, downloadTextFile, extractScriptTitle } from '@/utils/scriptMarkdown'
@@ -109,7 +108,6 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
   const [draft, setDraft] = useState<EpisodeDraft>(EMPTY_DRAFT)
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [starting, setStarting] = useState(false)
   const [genModal, setGenModal] = useState<{ open: boolean; episodeId: string; extra: string }>({
     open: false,
     episodeId: '',
@@ -117,18 +115,12 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
   })
 
   // 分集设计任务在全局 store 中跟踪（跨菜单切换不丢失，按钮据此防重复触发；含排队中）
-  const episodesRunning = useRunActive(session.session_id, 'episodes')
+  const activeRun = useActiveRun(session.session_id, 'episodes')
+  const episodesRunning = !!activeRun
   const episodesError = useRunError(session.session_id, 'episodes')
   // 当前进行中的单集重设计目标集（批量生成时为 ''）
-  const regenEpisodeIdRunning = useAgentRunStore(
-    (s) =>
-      s.runs.find(
-        (r) =>
-          r.sessionId === session.session_id &&
-          r.kind === 'episodes' &&
-          (r.status === 'running' || r.status === 'queued'),
-      )?.episodeId || '',
-  )
+  const regenEpisodeIdRunning = activeRun?.episodeId || ''
+  const { starting, launch } = useStartRun(session.session_id)
 
   const [expandedId, setExpandedId] = useState('')
   const [detailId, setDetailId] = useState('')
@@ -245,27 +237,18 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
   }
 
   // 发起生成（批量/单集 → run_id → 任务交给全局 AgentRunDock 跟踪）
-  const executeGenerate = async (episodeId: string, extra: string) => {
-    if (guardRunStart(session.session_id, 'episodes', '分集设计', starting)) return
-    setStarting(true)
-    setGenModal((m) => ({ ...m, open: false }))
-    try {
-      const runId = episodeId
-        ? await scriptStepApi.regenerateEpisode(session.session_id, episodeId, extra)
-        : await scriptStepApi.generateEpisodes(session.session_id, extra)
-      useAgentRunStore.getState().addRun({
-        runId,
-        sessionId: session.session_id,
-        kind: 'episodes',
-        episodeId: episodeId || undefined,
-      })
-      message.info(episodeId ? `${episodeId} 重新设计已发起，进度见右上角后台任务` : '分集设计生成已发起，进度见右上角后台任务')
-    } catch (e) {
-      message.error((e as Error).message)
-    } finally {
-      setStarting(false)
-    }
-  }
+  const executeGenerate = (episodeId: string, extra: string) =>
+    launch({
+      kind: 'episodes',
+      label: '分集设计',
+      close: () => setGenModal((m) => ({ ...m, open: false })),
+      extra: { episodeId: episodeId || undefined },
+      infoText: episodeId ? `${episodeId} 重新设计已发起，进度见右上角后台任务` : undefined,
+      invoke: () =>
+        episodeId
+          ? scriptStepApi.regenerateEpisode(session.session_id, episodeId, extra)
+          : scriptStepApi.generateEpisodes(session.session_id, extra),
+    })
 
   const handleGenOk = () => {
     const { episodeId, extra } = genModal

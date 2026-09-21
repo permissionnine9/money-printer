@@ -18,6 +18,9 @@ class AgentEvent:
     - prompt:     本次运行最终渲染的提示词（system_prompt/user_prompt/model）
     - queued:     已入队等待执行（queue_position 为前面待执行任务数）
     - started:    被 worker 领取开始执行
+
+    reason 非空时标识结构化终态原因（error 事件携带）：
+    - cancelled:  用户主动取消（排队中/执行中）
     """
     type: str
     delta: str = ""
@@ -33,6 +36,7 @@ class AgentEvent:
     user_prompt: str = ""
     model: str = ""
     queue_position: int = -1
+    reason: str = ""
 
     def to_dict(self, seq: int | None = None) -> dict[str, Any]:
         """转为可 JSON 序列化的 dict（过滤空字段，减小 SSE 体积）"""
@@ -65,6 +69,8 @@ class AgentEvent:
             data["model"] = self.model
         if self.queue_position >= 0:
             data["queue_position"] = self.queue_position
+        if self.reason:
+            data["reason"] = self.reason
         return data
 
     def to_sse(self, seq: int) -> str:

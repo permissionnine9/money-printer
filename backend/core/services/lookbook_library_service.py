@@ -1,10 +1,11 @@
-"""定妆照素材库：跨剧本会话/本剧本历史的已完成素材查询 + 复制导入锚定
+"""核心素材素材库：跨剧本会话/本剧本历史的已完成素材查询 + 复制导入锚定
 
-- 查询：全局已完成定妆照按剧本会话分组（当前会话组排第一，其余按最新素材倒序）；
-  仅收录存活剧本会话（通用会话删除端点不清理 lookbook 表、script-sessions 删除
-  中途失败都可能残留孤儿行，死会话素材不进素材库）
+- 查询：全局已完成核心素材按剧本会话分组（当前会话组排第一，其余按最新素材倒序）；
+  仅收录存活剧本会话（script-sessions 删除为三步非事务操作，中途失败仍可能残留
+  孤儿行，死会话素材不进素材库——防御性过滤）
 - 导入：复制源行为当前会话新行（引用同一远程 URL，无额外存储），meta 记 imported_from 溯源，
-  再回写实体 frontmatter 锚点；不做跨会话直接引用（源会话删除不受影响）
+  再回写实体 frontmatter 锚点；不做跨会话直接引用（源会话删除不受影响）；
+  校验源/目标实体类型一致（meta.entity_type → 源实体文件，均无则放行历史素材）
 """
 from backend.core.errors import WorkflowError
 from backend.core.persistence.script_manager import ScriptManager
@@ -28,8 +29,6 @@ def list_lookbook_library(sm: SessionManager, store: WorkspaceStore, scm: Script
         entity_names = {e["entity_id"]: e.get("name", "") for e in store.list_entities(sid)}
         return {
             "key": "current" if sid == session_id else sid,
-            "session_id": sid,
-            "is_current": sid == session_id,
             "label": f"当前剧本《{_session_label(sid)}》" if sid == session_id else f"《{_session_label(sid)}》",
             "materials": [
                 {
@@ -54,7 +53,7 @@ def list_lookbook_library(sm: SessionManager, store: WorkspaceStore, scm: Script
     if session_id in by_session:
         groups.append(_group(session_id, by_session[session_id]))
     groups.extend(_group(sid, rows) for sid, rows in others)
-    return {"groups": groups, "total": sum(len(g["materials"]) for g in groups)}
+    return {"groups": groups}
 
 
 def import_lookbook_from_library(
@@ -70,8 +69,22 @@ def import_lookbook_from_library(
         raise WorkflowError(f"素材不存在: {source_image_id}", status_code=404)
     if source.get("task_status") != "completed" or not source.get("image_path"):
         raise WorkflowError(f"素材尚未生成完成: {source_image_id}")
-    if not store.get_entity(session_id, entity_id):
+    target = store.get_entity(session_id, entity_id)
+    if not target:
         raise WorkflowError(f"实体不存在或不属于该会话: {entity_id}", status_code=404)
+    if target.get("entity_type") not in ("character", "scene"):
+        raise WorkflowError(f"仅人物/场景实体可绑定核心素材: {target.get('entity_type')}")
+    # 源实体类型校验：meta.entity_type（新行/导入复制行都有）→ 源实体文件（可能已被
+    # 级联删除）→ 均无则放行（无法判定的历史素材，用户自担）
+    source_type = (source.get("meta") or {}).get("entity_type") or ""
+    if not source_type:
+        source_entity = store.get_entity(source["script_session_id"], source["entity_id"])
+        source_type = (source_entity or {}).get("entity_type") or ""
+    if source_type and source_type != target["entity_type"]:
+        raise WorkflowError(
+            f"素材类型不匹配：{'人物' if target['entity_type'] == 'character' else '场景'}"
+            f"实体不能绑定{'场景' if source_type == 'scene' else '人物'}素材"
+        )
 
     row = scm.insert_lookbook(
         session_id, entity_id,

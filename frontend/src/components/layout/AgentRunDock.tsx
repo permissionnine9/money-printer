@@ -7,16 +7,15 @@
 import React, { useState } from 'react'
 import { Badge, Button, Modal, Spin, Typography, message } from 'antd'
 import {
-  CheckCircleOutlined,
-  ClockCircleOutlined,
   CloseCircleOutlined,
   CloseOutlined,
   DownOutlined,
 } from '@ant-design/icons'
 import type { AgentEvent } from '@/types'
-import { RUN_KIND_LABEL, runDisplayName, useAgentRunStore } from '@/stores/agentRunStore'
+import { RUN_KIND_META, runDisplayName, useAgentRunStore } from '@/stores/agentRunStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useScriptSessionStore } from '@/stores/scriptSessionStore'
+import { RunStatusIcon, runStatusText } from '@/components/common'
 import { AgentRunProgress } from '@/components/script/AgentRunProgress'
 import styles from './AgentRunDock.module.css'
 
@@ -37,7 +36,7 @@ export const AgentRunDock: React.FC = () => {
   const runningCount = runs.filter((r) => r.status === 'running' || r.status === 'queued').length
   const errorCount = runs.filter((r) => r.status === 'error').length
 
-  // run 终态：成功 → 按类型通知 + 移除 + 刷新所属会话；失败/取消 → 标红留在列表
+  // run 终态：成功 → 按类型通知 + 移除 + 刷新所属会话；失败/取消 → 留在列表（取消中性显示）
   const handleRunDone = async (runId: string, ev: AgentEvent) => {
     const run = useAgentRunStore.getState().runs.find((r) => r.runId === runId)
     if (!run) return
@@ -56,32 +55,28 @@ export const AgentRunDock: React.FC = () => {
           }
           break
         }
-        case 'outline':
-          message.success('故事大纲生成完成')
-          break
         case 'episodes':
-          message.success(run.episodeId ? `${run.episodeId} 重新设计完成` : '分集设计生成完成')
+          message.success(run.episodeId ? `${run.episodeId} 重新设计完成` : `${RUN_KIND_META[run.kind].label}生成完成`)
           break
-        case 'storyboard_outline':
-          message.success('分镜大纲生成完成')
-          break
+        default:
+          message.success(`${RUN_KIND_META[run.kind].label}生成完成`)
       }
       removeRun(runId)
-      // 用户可能已切到其他会话/页面，仅当当前会话匹配时刷新
-      const store =
-        run.kind === 'outline' || run.kind === 'episodes'
-          ? useScriptSessionStore.getState()
-          : useSessionStore.getState()
+      // 用户可能已切到其他会话/页面，仅当当前会话匹配时刷新（哪种 kind 刷新哪个 store 见 RUN_KIND_META）
+      const store = RUN_KIND_META[run.kind].script
+        ? useScriptSessionStore.getState()
+        : useSessionStore.getState()
       if (store.currentSession?.session_id === run.sessionId) {
         await store.refreshSession()
       }
     } else {
-      markRunStatus(runId, 'error', ev.error)
-      // 用户主动取消不算失败，中性提示（文案含「已取消」的均视为取消路径）
-      if ((ev.error || '').includes('已取消')) {
-        message.info(`${runDisplayName(run)} 已取消`)
+      // 结构化 reason 优先；旧后端无 reason 时以取消文案兜底
+      const cancelled = ev.reason === 'cancelled' || (ev.error || '').includes('已取消')
+      markRunStatus(runId, cancelled ? 'cancelled' : 'error', ev.error)
+      if (cancelled) {
+        message.info(`${name} 已取消`)
       } else {
-        message.error(`${RUN_KIND_LABEL[run.kind]}生成失败：${ev.error || '未知错误'}`)
+        message.error(`${RUN_KIND_META[run.kind].label}生成失败：${ev.error || '未知错误'}`)
       }
     }
   }
@@ -114,25 +109,14 @@ export const AgentRunDock: React.FC = () => {
                 setOpen(false)
               }}
             >
-              {run.status === 'queued' && <ClockCircleOutlined style={{ color: '#faad14', fontSize: 14 }} />}
-              {run.status === 'running' && <Spin size="small" />}
-              {run.status === 'error' && <CloseCircleOutlined style={{ color: '#ff4d4f' }} />}
-              {run.status === 'success' && <CheckCircleOutlined style={{ color: '#52c41a' }} />}
+              <RunStatusIcon status={run.status} />
               <Text className={styles.cardName} ellipsis>
                 {runDisplayName(run)}
               </Text>
               <Text type="secondary" className={styles.cardStatus}>
-                {run.status === 'queued'
-                  ? '排队中…'
-                  : run.status === 'running'
-                    ? '生成中…'
-                    : run.status === 'error'
-                      ? (run.error || '').includes('已取消')
-                        ? '已取消'
-                        : '失败'
-                      : '已完成'}
+                {runStatusText(run.status)}
               </Text>
-              {(run.status === 'success' || run.status === 'error') && (
+              {run.status !== 'queued' && run.status !== 'running' && (
                 <CloseOutlined
                   className={styles.cardClose}
                   onClick={(e) => {
@@ -158,7 +142,7 @@ export const AgentRunDock: React.FC = () => {
               ? `生成分镜提示词 - ${runDisplayName(run)}`
               : run.episodeId
                 ? `重新设计 ${run.episodeId}`
-                : `生成${RUN_KIND_LABEL[run.kind]}`
+                : `生成${RUN_KIND_META[run.kind].label}`
           }
           onCancel={() => ((run.status === 'running' || run.status === 'queued') ? collapseRun(run.runId) : removeRun(run.runId))}
           footer={

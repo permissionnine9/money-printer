@@ -2,7 +2,7 @@
 Backend 配置文件
 
 生图/Chat/Agent 模型均由「模型管理」中的默认配置决定；
-未配置默认生图模型时，定妆照等生图功能会显式报错。
+未配置默认生图模型时，核心素材等生图功能会显式报错。
 """
 import logging
 
@@ -24,7 +24,7 @@ def override_src_config():
         if image_model:
             logger.info(f"当前默认生图模型: {image_model['model_id']} @ {image_model['base_url'] or '内置默认地址'}（模型管理配置）")
         else:
-            logger.warning("未配置默认生图模型：定妆照等生图功能将报错，请在「模型管理」配置并设为默认")
+            logger.warning("未配置默认生图模型：核心素材等生图功能将报错，请在「模型管理」配置并设为默认")
 
         if chat_model:
             logger.info(f"当前默认 Chat 模型: {chat_model['model_id']} @ {chat_model['base_url'] or '内置默认地址'}（模型管理配置）")

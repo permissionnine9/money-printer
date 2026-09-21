@@ -23,7 +23,7 @@ async def list_materials(
     sm=Depends(get_script_session_manager),
     scm=Depends(get_script_manager),
 ):
-    """全局素材列表（kind: lookbook 定妆照 / episode 分集素材图 / upload 上传参考图 / video 视频）"""
+    """全局素材列表（kind: lookbook 核心素材 / episode 分集素材图 / upload 上传参考图 / video 视频）"""
     data = material_admin.list_materials(kind, store, sm, scm)
     return {"success": True, "data": data}
 

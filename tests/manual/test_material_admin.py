@@ -95,7 +95,7 @@ def run_service_tests(tmp: Path):
         b_png = str(write_file(images_root / "b.png"))
         c_png = str(write_file(images_root / "c.png"))
         shared_png = str(write_file(images_root / "shared.png"))
-        lb = scm.insert_lookbook(sid, "chr_001", prompt="p", description="定妆照A", task_status="completed", image_path=a_png)
+        lb = scm.insert_lookbook(sid, "chr_001", prompt="p", description="核心素材A", task_status="completed", image_path=a_png)
         mat = scm.insert_episode_material(sid, "ep_01", title="夜班", task_status="completed")
         scm.update_episode_material(mat["image_id"], {"image_path": b_png, "task_status": "completed"})
 
@@ -103,14 +103,14 @@ def run_service_tests(tmp: Path):
         ent = store.upsert_entity(sid, "character", "林夏", "夜班店员")
         store.set_entity_lookbook(sid, ent["entity_id"], lb["image_id"], a_png)
         write_segment_md(story, "ep_01", "vs-abcdef12", 1, "开场", [
-            {"image_id": f"lookbook_{lb['image_id']}", "image_path": a_png, "description": "引用定妆照"},
+            {"image_id": f"lookbook_{lb['image_id']}", "image_path": a_png, "description": "引用核心素材"},
             {"image_id": mat["image_id"], "image_path": b_png, "description": "引用素材图"},
         ])
 
         print("== 1. 引用索引（ID 归一化：实体 lb_xxx / 分镜 lookbook_lb_xxx） ==")
         refs = svc.build_image_reference_index(store, sm)
         lb_refs = refs.get(lb["image_id"], [])
-        check("定妆照被实体+分镜引用（计 2）", len(lb_refs) == 2, f"got {lb_refs}")
+        check("核心素材被实体+分镜引用（计 2）", len(lb_refs) == 2, f"got {lb_refs}")
         check("引用类型齐全", {r["ref_type"] for r in lb_refs} == {"entity", "segment"})
         check("实体引用带名称", all(r.get("entity_name") for r in lb_refs if r["ref_type"] == "entity"))
         check("素材图被分镜引用（计 1）", len(refs.get(mat["image_id"], [])) == 1)
@@ -221,7 +221,7 @@ def run_api_tests():
 
         a_png = str(write_file(images_root / "api_a.png"))
         b_png = str(write_file(images_root / "api_b.png"))
-        lb = scm.insert_lookbook(sid, ent["entity_id"], prompt="p", description="定妆照", task_status="completed", image_path=a_png)
+        lb = scm.insert_lookbook(sid, ent["entity_id"], prompt="p", description="核心素材", task_status="completed", image_path=a_png)
         lb_free = scm.insert_lookbook(sid, ent["entity_id"], prompt="p", description="无引用", task_status="completed", image_path=b_png)
         store.set_entity_lookbook(sid, ent["entity_id"], lb["image_id"], a_png)
 

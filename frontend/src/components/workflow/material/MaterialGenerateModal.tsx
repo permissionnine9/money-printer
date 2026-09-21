@@ -73,7 +73,7 @@ export const MaterialGenerateModal: React.FC<MaterialGenerateModalProps> = ({
       .catch(() => setPool([]))
     modelApi
       .list('image')
-      .then((r) => setModels(r.data?.models || []))
+      .then((r) => setModels((r.data?.models || []).filter((m) => m.enabled !== false)))
       .catch(() => setModels([]))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, open])

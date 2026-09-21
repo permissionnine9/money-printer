@@ -2,13 +2,13 @@
  * Agent run 观流组件：连接 /agent-runs/{run_id}/events 展示状态行 / 思考折叠 / 最新文本，支持取消与断线重连
  */
 import React, { useEffect, useRef, useState } from 'react'
-import { Button, Collapse, Space, Spin, Typography, message } from 'antd'
-import { CheckCircleOutlined, ClockCircleOutlined, CloseCircleOutlined, EyeOutlined, StopOutlined } from '@ant-design/icons'
+import { Button, Collapse, Space, Typography, message } from 'antd'
+import { EyeOutlined, StopOutlined } from '@ant-design/icons'
 import type { AgentEvent } from '@/types'
 import { agentRunApi } from '@/api/client'
 import { fetchSSE } from '@/api/sse'
 import { useAgentRunStore } from '@/stores/agentRunStore'
-import { PromptViewerModal } from '@/components/common'
+import { PromptViewerModal, RunStatusIcon, runStatusText } from '@/components/common'
 
 const { Text } = Typography
 
@@ -26,7 +26,7 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
   const [label, setLabel] = useState('')
   const [thinking, setThinking] = useState('')
   const [text, setText] = useState('')
-  const [status, setStatus] = useState<'queued' | 'running' | 'success' | 'error'>('queued')
+  const [status, setStatus] = useState<'queued' | 'running' | 'success' | 'error' | 'cancelled'>('queued')
   const [queuePosition, setQueuePosition] = useState(-1)
   const [errorMsg, setErrorMsg] = useState('')
   const [cancelling, setCancelling] = useState(false)
@@ -56,11 +56,11 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
     let lastSeq = 0
     const controller = new AbortController()
 
-    const fail = (msg: string) => {
+    const fail = (msg: string, reason = '') => {
       finished = true
-      setStatus('error')
+      setStatus(reason === 'cancelled' ? 'cancelled' : 'error')
       setErrorMsg(msg)
-      onDoneRef.current?.({ type: 'done', success: false, error: msg })
+      onDoneRef.current?.({ type: 'done', success: false, error: msg, reason })
     }
 
     const handleEvent = (ev: AgentEvent) => {
@@ -104,6 +104,9 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
           finished = true
           if (ev.success) {
             setStatus('success')
+          } else if (ev.reason === 'cancelled') {
+            setStatus('cancelled')
+            setErrorMsg(ev.error || '已取消')
           } else {
             setStatus('error')
             setErrorMsg(ev.error || '运行失败')
@@ -111,7 +114,7 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
           onDoneRef.current?.(ev)
           break
         case 'error':
-          fail(ev.message || '运行异常')
+          fail(ev.message || '运行异常', ev.reason)
           break
       }
     }
@@ -163,15 +166,9 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
 
   const inFlight = status === 'running' || status === 'queued'
   const statusText =
-    status === 'queued'
-      ? queuePosition > 0
-        ? `排队中（前面还有 ${queuePosition} 个任务）…`
-        : '排队中…'
-      : status === 'running'
-        ? '进行中…'
-        : status === 'success'
-          ? '已完成'
-          : '失败'
+    status === 'queued' && queuePosition > 0
+      ? `排队中（前面还有 ${queuePosition} 个任务）…`
+      : runStatusText(status)
 
   return (
     <div style={{ border: '1px solid #f0f0f0', borderRadius: 8, padding: '12px 16px', background: '#fafafa' }}>
@@ -188,10 +185,7 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
           )}
         </Space>
         <Space style={{width:'100%'}}>
-          {status === 'queued' && <ClockCircleOutlined style={{ color: '#faad14' }} />}
-          {status === 'running' && <Spin size="small" />}
-          {status === 'success' && <CheckCircleOutlined style={{ color: '#52c41a' }} />}
-          {status === 'error' && <CloseCircleOutlined style={{ color: '#ff4d4f' }} />}
+          <RunStatusIcon status={status} />
           <Text strong>{label || 'Agent 运行'}</Text>
           <Text type="secondary">{statusText}</Text>
         </Space>
@@ -200,7 +194,7 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
 
       {errorMsg && (
         <div style={{ marginTop: 8 }}>
-          <Text type="danger" style={{ fontSize: 13 }}>{errorMsg}</Text>
+          <Text type={status === 'cancelled' ? 'secondary' : 'danger'} style={{ fontSize: 13 }}>{errorMsg}</Text>
         </div>
       )}
 

@@ -10,3 +10,4 @@ class ModelConfigRequest(BaseModel):
     model_id: str = Field(default="", description="模型 ID（服务商提供，一般为 厂商/模型名 格式）")
     is_default: bool = Field(default=False, description="是否设为该类型的默认模型")
     model_type: str = Field(default="image", description="模型类型：'image'（生图）、'chat'（对话/LLM）、'agent'（Agent SDK 端点，Anthropic 协议）")
+    enabled: bool = Field(default=True, description="是否启用（停用后不参与默认模型解析与选择）")

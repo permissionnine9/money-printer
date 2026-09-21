@@ -35,11 +35,14 @@ class ModelManager(BaseSQLiteManager):
         """)
         # 旧表迁移：增加 model_type 列（已存在则忽略）
         self._add_columns_if_missing(conn, "image_models", {"model_type": "TEXT NOT NULL DEFAULT 'image'"})
+        # 旧表迁移：增加 enabled 列（停用开关，默认启用）
+        self._add_columns_if_missing(conn, "image_models", {"enabled": "INTEGER NOT NULL DEFAULT 1"})
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
         data = dict(row)
         data["is_default"] = bool(data.get("is_default", 0))
         data["model_type"] = data.get("model_type", "image")
+        data["enabled"] = bool(data.get("enabled", 1))
         return data
 
     def list_models(self, model_type: str | None = None) -> list[dict]:
@@ -62,9 +65,9 @@ class ModelManager(BaseSQLiteManager):
         return self._row_to_dict(row) if row else None
 
     def get_default_model(self, model_type: str = "image") -> dict | None:
-        """获取指定类型的默认模型配置（无默认时返回 None，使用系统内置配置）"""
+        """获取指定类型的默认模型配置（停用的默认模型视为无默认，返回 None 走系统内置配置）"""
         row = self._fetch_one(
-            "SELECT * FROM image_models WHERE is_default = 1 AND model_type = ? LIMIT 1",
+            "SELECT * FROM image_models WHERE is_default = 1 AND model_type = ? AND enabled = 1 LIMIT 1",
             (model_type,)
         )
         return self._row_to_dict(row) if row else None
@@ -77,6 +80,7 @@ class ModelManager(BaseSQLiteManager):
         model_id: str,
         is_default: bool = False,
         model_type: str = "image",
+        enabled: bool = True,
     ) -> dict:
         """新增模型配置"""
         if model_type not in MODEL_TYPES:
@@ -92,8 +96,8 @@ class ModelManager(BaseSQLiteManager):
                     (model_type,)
                 )
             conn.execute(
-                "INSERT INTO image_models (id, name, api_key, base_url, model_id, is_default, model_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (model_uuid, name, api_key, base_url, model_id, 1 if is_default else 0, model_type, now, now)
+                "INSERT INTO image_models (id, name, api_key, base_url, model_id, is_default, model_type, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (model_uuid, name, api_key, base_url, model_id, 1 if is_default else 0, model_type, 1 if enabled else 0, now, now)
             )
             conn.commit()
 
@@ -109,6 +113,7 @@ class ModelManager(BaseSQLiteManager):
         model_id_field: str,
         is_default: bool = False,
         model_type: str = "image",
+        enabled: bool = True,
     ) -> dict | None:
         """更新模型配置"""
         if model_type not in MODEL_TYPES:
@@ -123,14 +128,28 @@ class ModelManager(BaseSQLiteManager):
                 )
             cursor = conn.execute(
                 """UPDATE image_models
-                   SET name = ?, api_key = ?, base_url = ?, model_id = ?, is_default = ?, model_type = ?, updated_at = ?
+                   SET name = ?, api_key = ?, base_url = ?, model_id = ?, is_default = ?, model_type = ?, enabled = ?, updated_at = ?
                    WHERE id = ?""",
-                (name, api_key, base_url, model_id_field, 1 if is_default else 0, model_type, now, model_id)
+                (name, api_key, base_url, model_id_field, 1 if is_default else 0, model_type, 1 if enabled else 0, now, model_id)
             )
             conn.commit()
             if cursor.rowcount == 0:
                 return None
 
+        return self.get_model(model_id)
+
+    def set_enabled(self, model_id: str, enabled: bool) -> dict | None:
+        """启停模型配置（停用的默认模型不参与默认解析，重新启用后默认关系恢复）"""
+        model = self.get_model(model_id)
+        if not model:
+            return None
+        now = self._now()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE image_models SET enabled = ?, updated_at = ? WHERE id = ?",
+                (1 if enabled else 0, now, model_id)
+            )
+            conn.commit()
         return self.get_model(model_id)
 
     def set_default(self, model_id: str) -> dict | None:

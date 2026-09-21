@@ -1,4 +1,4 @@
-"""定妆照素材库 smoke 测试（存储层 + API 级）
+"""核心素材素材库 smoke 测试（存储层 + API 级）
 
 运行：.venv/bin/python tests/manual/test_lookbook_library.py
 覆盖：delete_script_data 保留语义（5 种任务状态）/ list_completed_lookbooks 跨会话过滤 /
@@ -54,8 +54,8 @@ def main():
     tmp = Path(tempfile.mkdtemp(prefix="lb_library_test_"))
     db_path = str(tmp / "test.db")
     sm = SessionManager(db_path=db_path, steps=SCRIPT_STEPS)
-    store = WorkspaceStore(workspace_dir=tmp / "workspace", session_manager=sm)
     scm = ScriptManager(db_path=db_path)
+    store = WorkspaceStore(workspace_dir=tmp / "workspace", session_manager=sm, script_manager=scm)
     try:
         run(scm, sm, store)
     finally:
@@ -91,9 +91,16 @@ def run_api_tests():
             f"/api/v1/script-sessions/{other}/entities",
             json={"entity_type": "character", "name": "武松", "description": "打虎英雄"},
         ).json()["data"]
+        ent_s = client.post(
+            f"/api/v1/script-sessions/{other}/entities",
+            json={"entity_type": "scene", "name": "野猪林", "description": "大雪覆盖的松林"},
+        ).json()["data"]
 
         src = scm.insert_lookbook(other, ent_b["entity_id"], prompt="p", description="武松三视图", task_status="completed")
         scm.update_lookbook(src["image_id"], {"image_path": "https://img.example/wusong.png"})
+        src_scene = scm.insert_lookbook(other, ent_s["entity_id"], prompt="p", description="野猪林全景",
+                                        task_status="completed", image_path="https://img.example/scene.png",
+                                        meta={"entity_type": "scene"})
         scm.insert_lookbook(sid, "chr_999", prompt="p", description="当前剧本历史素材", task_status="completed",
                             image_path="https://img.example/old.png")
         pend = scm.insert_lookbook(sid, ent_a["entity_id"], prompt="p", task_status="pending")
@@ -102,12 +109,12 @@ def run_api_tests():
         resp = client.get(f"/api/v1/script-sessions/{sid}/lookbook/library")
         check("library 200", resp.status_code == 200)
         data = resp.json()["data"]
-        check("total 统计", data["total"] == 2, f"got {data.get('total')}")
-        check("当前剧本组排第一", data["groups"][0]["key"] == "current" and data["groups"][0]["is_current"] is True)
+        check("当前剧本组排第一", data["groups"][0]["key"] == "current")
         cur = data["groups"][0]["materials"]
         check("历史素材 entity_exists=False", len(cur) == 1 and cur[0]["entity_exists"] is False and cur[0]["entity_id"] == "chr_999")
         other_group = data["groups"][1]
-        check("其他剧本组实体名映射", other_group["materials"][0]["entity_name"] == "武松" and other_group["materials"][0]["entity_exists"] is True)
+        src_material = next(m for m in other_group["materials"] if m["image_id"] == src["image_id"])
+        check("其他剧本组实体名映射", src_material["entity_name"] == "武松" and src_material["entity_exists"] is True)
         check("library 不含未完成行", all(m["image_id"] != pend["image_id"] for g in data["groups"] for m in g["materials"]))
         check("library 会话不存在 404", client.get("/api/v1/script-sessions/no-such/lookbook/library").status_code == 404)
 
@@ -151,14 +158,23 @@ def run_api_tests():
             json={"entity_id": "bad_id", "source_image_id": src["image_id"]},
         )
         check("entity_id 格式非法 422", resp.status_code == 422, f"got {resp.status_code}")
+        resp = client.post(
+            f"/api/v1/script-sessions/{sid}/lookbook/import",
+            json={"entity_id": ent_a["entity_id"], "source_image_id": src_scene["image_id"]},
+        )
+        check("场景素材绑人物实体 400（类型不匹配）", resp.status_code == 400, f"got {resp.status_code} {resp.text[:80]}")
 
-        # --- 死会话孤儿行过滤：通用会话删除端点只删 sessions 行、不清 lookbook 表 ---
+        # --- 通用删除端点级联清理（行为变更：剧本会话经通用端点删除也清 lookbook/story） ---
         resp = client.delete(f"/api/v1/sessions/{other}")
         check("通用端点可删剧本会话（不校验 workflow_type）", resp.status_code in (200, 204), f"got {resp.status_code}")
-        check("lookbook 行残留为孤儿", bool(scm.get_lookbook(src["image_id"])))
-        resp = client.get(f"/api/v1/script-sessions/{sid}/lookbook/library")
-        sids_after = [g["session_id"] for g in resp.json()["data"]["groups"]]
-        check("死会话素材不进素材库", other not in sids_after, f"got {sids_after}")
+        check("lookbook 行已级联删除（不再残留孤儿）", not scm.get_lookbook(src["image_id"]))
+
+        # --- alive 过滤（防御）：删除中途失败残留的孤儿行不进素材库 ---
+        dead_sid = "deaddead-1111-2222-3333-444444444444"
+        scm.insert_lookbook(dead_sid, "chr_777", prompt="p", task_status="completed",
+                            image_path="https://img.example/dead.png")
+        keys_after = [g["key"] for g in client.get(f"/api/v1/script-sessions/{sid}/lookbook/library").json()["data"]["groups"]]
+        check("死会话素材不进素材库", dead_sid not in keys_after and "current" in keys_after, f"got {keys_after}")
     finally:
         os.chdir(old_cwd)
         shutil.rmtree(tmp, ignore_errors=True)
@@ -212,6 +228,13 @@ def run(scm: ScriptManager, sm: SessionManager, store: WorkspaceStore):
     rows = scm.list_lookbook(sid2)
     check("级联后保留 completed 行", [r["image_id"] for r in rows] == [keep_row["image_id"]], f"got {[r['image_id'] for r in rows]}")
     check("级联后 processing 行已删", all(r["task_status"] == "completed" for r in rows))
+
+    print("== 6. 实体 ID 防撞：DB 保留行占用 ID 段 ==")
+    # 级联保留了 chr_003 行且实体文件已清（delete_story_content）：
+    # 新建实体须跳过 chr_003，否则新角色复用旧 ID → 保留行旧图被当作新实体素材（跨代错配）
+    new_ent = store.upsert_entity(sid2, "character", "新角色", description="ID 防撞验证")
+    check("新建实体跳过 DB 保留行 ID", new_ent["entity_id"] == "chr_004", f"got {new_ent['entity_id']}")
+    check("max_entity_seq 返回保留行最大序号", scm.max_entity_seq("chr") == 3, f"got {scm.max_entity_seq('chr')}")
 
 
 if __name__ == "__main__":

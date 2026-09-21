@@ -32,7 +32,7 @@ const { Text, Paragraph } = Typography
 type MaterialKind = 'lookbook' | 'episode' | 'upload' | 'video'
 
 const KIND_TABS: { key: MaterialKind; label: string }[] = [
-  { key: 'lookbook', label: '定妆照' },
+  { key: 'lookbook', label: '核心素材' },
   { key: 'episode', label: '分集素材图' },
   { key: 'upload', label: '上传参考图' },
   { key: 'video', label: '视频' },
@@ -69,6 +69,8 @@ const MaterialsPage: React.FC = () => {
   const [activeKind, setActiveKind] = useState<MaterialKind>('lookbook')
   const [generatedItems, setGeneratedItems] = useState<GeneratedMaterialItem[]>([])
   const [fileItems, setFileItems] = useState<FileMaterialItem[]>([])
+  // 各 tab 的素材数量（列表数据只加载当前 tab，数量需单独记录，否则切换 tab 后其他 tab 数字会被当前 tab 覆盖）
+  const [counts, setCounts] = useState<Record<MaterialKind, number>>({ lookbook: 0, episode: 0, upload: 0, video: 0 })
   const [loading, setLoading] = useState(false)
   const [scriptFilter, setScriptFilter] = useState<string>('all')
 
@@ -83,6 +85,7 @@ const MaterialsPage: React.FC = () => {
     setLoading(true)
     try {
       const result = await materialApi.list(kind)
+      setCounts((prev) => ({ ...prev, [kind]: (result.items || []).length }))
       if (kind === 'lookbook' || kind === 'episode') {
         setGeneratedItems((result.items as GeneratedMaterialItem[]) || [])
         setFileItems([])
@@ -101,6 +104,17 @@ const MaterialsPage: React.FC = () => {
     setScriptFilter('all')
     loadMaterials(activeKind)
   }, [activeKind])
+
+  // 首次挂载：并行拉取非当前 tab 的数量，保证各 tab 徽标正确（当前 tab 由上面的 effect 加载）
+  useEffect(() => {
+    KIND_TABS.filter((tab) => tab.key !== activeKind).forEach((tab) => {
+      materialApi
+        .list(tab.key)
+        .then((result) => setCounts((prev) => ({ ...prev, [tab.key]: (result.items || []).length })))
+        .catch(() => {}) // 失败静默，切换到该 tab 时会重新加载并提示错误
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const scriptOptions = useMemo(() => {
     const titles = Array.from(new Set(generatedItems.map((i) => i.script_title)))
@@ -414,10 +428,7 @@ const MaterialsPage: React.FC = () => {
           onChange={(key) => setActiveKind(key as MaterialKind)}
           items={KIND_TABS.map((tab) => ({
             key: tab.key,
-            label:
-              tab.key === 'lookbook' || tab.key === 'episode'
-                ? `${tab.label}（${generatedItems.length}）`
-                : `${tab.label}（${fileItems.length}）`,
+            label: `${tab.label}（${counts[tab.key]}）`,
             children:
               tab.key === 'lookbook' || tab.key === 'episode' ? renderImageGrid() : renderFileTable(),
           }))}

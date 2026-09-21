@@ -91,7 +91,7 @@ export interface Episode {
   updated_at: string
 }
 
-// 定妆照（状态机：pending/processing/completed/failed）
+// 核心素材（状态机：pending/processing/completed/failed）
 export interface LookbookImage {
   image_id: string
   script_session_id: string
@@ -106,7 +106,7 @@ export interface LookbookImage {
   updated_at: string
 }
 
-// 素材库条目（跨剧本会话/本剧本历史的已完成定妆照）
+// 素材库条目（跨剧本会话/本剧本历史的已完成核心素材）
 export interface LookbookLibraryItem {
   image_id: string
   image_path: string
@@ -120,8 +120,6 @@ export interface LookbookLibraryItem {
 export interface LookbookLibraryGroup {
   key: string // 'current' | 源 session_id
   label: string
-  session_id: string
-  is_current: boolean
   materials: LookbookLibraryItem[]
 }
 
@@ -162,6 +160,8 @@ export interface AgentEvent {
   last_seq?: number
   // queued 事件（入队时前面待执行的任务数）
   queue_position?: number
+  // 结构化终态原因（error/done 事件携带）：cancelled=用户主动取消
+  reason?: string
   // prompt 事件（本次 run 最终渲染的提示词）
   system_prompt?: string
   user_prompt?: string
@@ -185,7 +185,7 @@ export interface VideoParams {
 
 // 分镜引用的素材图（description 为分镜侧独立副本，默认带出库内描述）
 export interface SegmentReferenceImage {
-  image_id: string  // mat_* 分集素材 / lookbook_lb_* 定妆照
+  image_id: string  // mat_* 分集素材 / lookbook_lb_* 核心素材
   image_path: string
   description: string
 }
@@ -208,7 +208,7 @@ export interface PoolMaterial {
   image_id: string
   image_path: string
   description: string
-  title?: string  // 分集素材的素材名（定妆照无）
+  title?: string  // 分集素材的素材名（核心素材无）
 }
 
 export interface MaterialPoolGroup {
@@ -264,6 +264,7 @@ export interface ImageModelConfig {
   base_url: string
   model_id: string
   is_default: boolean
+  enabled: boolean  // 启用开关：停用后不参与默认模型解析与选择
   model_type: 'image' | 'chat' | 'agent'  // image=生图 chat=对话/LLM agent=Agent SDK 端点（Anthropic 协议）
   created_at: string
   updated_at: string
@@ -325,7 +326,7 @@ export interface VideoReference {
   script_title: string
 }
 
-/** 生成图素材条目（定妆照 / 分集素材图） */
+/** 生成图素材条目（核心素材 / 分集素材图） */
 export interface GeneratedMaterialItem {
   image_id: string
   image_path: string
@@ -337,7 +338,7 @@ export interface GeneratedMaterialItem {
   size: number
   reference_count: number
   references: MaterialReference[]
-  entity_id?: string // 定妆照所属实体
+  entity_id?: string // 核心素材所属实体
   episode_id?: string // 分集素材图所属分集
   title?: string // 分集素材图标题
 }

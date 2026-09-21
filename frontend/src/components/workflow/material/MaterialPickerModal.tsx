@@ -1,6 +1,6 @@
 /**
  * 素材图选择组件（可复用）：3 个 tab 分组展示素材池。
- * Tab1 剧本定妆照 / Tab2 本集素材（含其他集素材）/ Tab3 本分镜素材（传入 segmentMaterials 时展示）。
+ * Tab1 剧本核心素材 / Tab2 本集素材（含其他集素材）/ Tab3 本分镜素材（传入 segmentMaterials 时展示）。
  * multi=true 勾选多张确认；否则单选（点击即确认，用于「更换」场景）。
  */
 import React, { useEffect, useState } from 'react'
@@ -8,6 +8,7 @@ import { Button, Card, Empty, Image, Modal, Popconfirm, Spin, Tabs, Tooltip, Typ
 import { CheckSquareFilled, DeleteOutlined, PictureOutlined } from '@ant-design/icons'
 import type { MaterialPoolGroup, PoolMaterial } from '@/types'
 import { stepApi } from '@/api/client'
+import { useMaterialLibrary } from '@/hooks/useMaterialLibrary'
 import { imageSrc } from '@/utils/imageSrc'
 
 const { Text } = Typography
@@ -137,27 +138,17 @@ export const MaterialPickerModal: React.FC<MaterialPickerModalProps> = ({
   onClose,
   onConfirm,
 }) => {
-  const [groups, setGroups] = useState<MaterialPoolGroup[]>([])
-  const [loading, setLoading] = useState(false)
+  const { groups, loading, error, reload } = useMaterialLibrary<MaterialPoolGroup>(
+    stepApi.getMaterialPool,
+    sessionId,
+    open,
+  )
   const [selected, setSelected] = useState<PoolMaterial[]>([])
-  const [error, setError] = useState('')
 
-  const loadPool = () => {
-    setLoading(true)
-    setError('')
-    stepApi
-      .getMaterialPool(sessionId)
-      .then(setGroups)
-      .catch((e) => setError((e as Error).message))
-      .finally(() => setLoading(false))
-  }
-
+  // 打开时重置选择（素材加载由 useMaterialLibrary 负责）
   useEffect(() => {
-    if (!open) return
-    setSelected([])
-    loadPool()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, open])
+    if (open) setSelected([])
+  }, [open])
 
   const filterGroups = (predicate: (g: MaterialPoolGroup) => boolean) =>
     groups
@@ -195,7 +186,7 @@ export const MaterialPickerModal: React.FC<MaterialPickerModalProps> = ({
       await stepApi.deleteMaterial(sessionId, m.image_id)
       message.success('素材图已删除')
       setSelected((prev) => prev.filter((x) => x.image_id !== m.image_id))
-      loadPool()
+      reload()
     } catch (e) {
       message.error((e as Error).message)
     }
@@ -210,7 +201,7 @@ export const MaterialPickerModal: React.FC<MaterialPickerModalProps> = ({
     onClose()
   }
 
-  const emptyHint = (
+  const emptyHint = loading ? null : (
     <Empty
       description="素材池为空：可先在第 4 步剧本工作流生成核心素材，或用「AI 生成素材图」创建"
       style={{ padding: '24px 0' }}

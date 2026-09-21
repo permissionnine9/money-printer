@@ -36,11 +36,12 @@ async def stream_run_events(run_id: str, seq: int = 0):
                 yield sse_frame(event)
         except KeyError as e:
             yield sse_frame({"type": "error", "message": str(e)})
-        # 结束哨兵：附带 run 终态，前端据此刷新 store
+        # 结束哨兵：附带 run 终态，前端据此刷新 store（reason=cancelled 区分用户主动取消）
         yield sse_frame({
             "type": "done",
             "success": handle.success,
             "error": handle.error,
+            "reason": handle.reason,
             "result": handle.result_data,
         })
         yield sse_done()

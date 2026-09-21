@@ -8,6 +8,7 @@ import ScriptWorkflowPage from './pages/ScriptWorkflowPage'
 import ModelsPage from './pages/ModelsPage'
 import PromptsPage from './pages/PromptsPage'
 import MaterialsPage from './pages/MaterialsPage'
+import AgentConcurrencyPage from './pages/AgentConcurrencyPage'
 
 import './App.css'
 
@@ -20,6 +21,7 @@ function App() {
         <Route path="/models" element={<ModelsPage />} />
         <Route path="/prompts" element={<PromptsPage />} />
         <Route path="/materials" element={<MaterialsPage />} />
+        <Route path="/settings/agent-concurrency" element={<AgentConcurrencyPage />} />
       </Routes>
     </MainLayout>
   )

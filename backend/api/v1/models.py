@@ -2,6 +2,7 @@
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 from backend.core.persistence.model_manager import ModelManager, MODEL_TYPES
 from backend.deps import get_model_manager
@@ -56,6 +57,7 @@ async def create_model(
             model_id=request.model_id.strip(),
             is_default=request.is_default,
             model_type=request.model_type,
+            enabled=request.enabled,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -82,6 +84,7 @@ async def update_model(
             model_id_field=request.model_id.strip(),
             is_default=request.is_default,
             model_type=request.model_type,
+            enabled=request.enabled,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -108,6 +111,26 @@ async def set_default_model(
         "message": f"已将「{model['name']}」设为默认{type_label}模型",
         "data": {"model": model},
     }
+
+
+class SetEnabledRequest(BaseModel):
+    """启停模型请求"""
+    enabled: bool
+
+
+@router.post("/{model_uuid}/set-enabled")
+async def set_enabled_model(
+    model_uuid: str,
+    request: SetEnabledRequest,
+    model_manager: ModelManager = Depends(get_model_manager),
+):
+    """启用/停用模型配置（停用后不参与默认模型解析与选择）"""
+    model = model_manager.set_enabled(model_uuid, request.enabled)
+    if not model:
+        raise HTTPException(status_code=404, detail="模型配置不存在")
+
+    logger.info(f"[API] 模型{'启用' if request.enabled else '停用'}: [{model['model_type']}] {model['name']}")
+    return {"success": True, "data": {"model": model}}
 
 
 @router.delete("/{model_uuid}")

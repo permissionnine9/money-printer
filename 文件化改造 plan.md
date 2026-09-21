@@ -47,7 +47,7 @@
  - episode：characters: [chr_001]、scenes、clues/foreshadows: [{entity_id,
  action}]、edited、时间戳；正文固定小节 ## 梗概/矛盾链/因果链/结尾摘要/节点进展
  - entity：entity_type/name/meta（性格/欲望/伤口等）/lookbook_image_id/lookbook_image_path（
- 定妆照任务本体留 DB，文件存引用）
+ 核心素材任务本体留 DB，文件存引用）
  - segment：index/title/mode/overlap/duration/edited/reference_images[{image_id,image_path,de
  scription}]；正文 ## 分镜大纲 + ## 分镜提示词
  - 命名：ep_NN-标题.md、{prefix}_NNN-名字.md、seg_NN-标题.md；第 1 步以 未命名剧本-{sid8}
@@ -101,7 +101,7 @@
  输出与生图链路不变
  - 分集设计（script_workflow.py:381）：upsert_*/save_episode MCP 保留但内部改写
  store（校验逻辑原样）；get_context 废弃 → prompt 改「先 Read MAP.md 与 outline.md」
- - 构思/大纲/定妆照生成：不变（对话型/单文件内联/结构化勾选型）
+ - 构思/大纲/核心素材生成：不变（对话型/单文件内联/结构化勾选型）
  - ScriptContextService 保留但数据源换 store，仅供 prompt-context 预览 API 与素材弹窗，不再进
  Agent prompt；删除全部截断常量（OUTLINE_MAX_CHARS=3500 等）
 

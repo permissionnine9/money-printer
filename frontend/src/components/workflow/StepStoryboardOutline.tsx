@@ -4,7 +4,7 @@
  * 预览/编辑双模式与重新生成（重生成会级联清空分镜配置、提示词与视频数据）
  */
 import React, { useMemo, useState } from 'react'
-import { Button, Card, Input, Modal, Segmented, Select, Space, Spin, Tag, Typography, message } from 'antd'
+import { Button, Card, Input, Modal, Segmented, Select, Space, Tag, Typography, message } from 'antd'
 import {
   CheckCircleOutlined,
   EditFilled,
@@ -18,8 +18,7 @@ import {
 import type { SessionDetail, StoryboardSegment } from '@/types'
 import { stepApi } from '@/api/client'
 import { MindmapView, RunTaskBanner } from '@/components/common'
-import { useAgentRunStore } from '@/stores/agentRunStore'
-import { guardRunStart, useRunActive, useRunError } from '@/hooks/useRunTask'
+import { useRunActive, useRunError, useStartRun } from '@/hooks/useRunTask'
 import { useSessionStore } from '@/stores/sessionStore'
 
 const { Text } = Typography
@@ -104,7 +103,6 @@ export const StepStoryboardOutline: React.FC<StepStoryboardOutlineProps> = ({ se
   const [viewMode, setViewMode] = useState<'preview' | 'edit'>('preview')
   const [editingMarkdown, setEditingMarkdown] = useState('')
   const [saving, setSaving] = useState(false)
-  const [starting, setStarting] = useState(false)
   const [promptModal, setPromptModal] = useState<{ open: boolean; extraPrompt: string }>({
     open: false,
     extraPrompt: '',
@@ -113,6 +111,7 @@ export const StepStoryboardOutline: React.FC<StepStoryboardOutlineProps> = ({ se
   // 分镜大纲生成任务在全局 store 中跟踪（跨菜单切换不丢失，按钮据此防重复触发）
   const outlineRunning = useRunActive(session.session_id, 'storyboard_outline')
   const outlineError = useRunError(session.session_id, 'storyboard_outline')
+  const { starting, launch } = useStartRun(session.session_id)
 
   // 大纲内容变化（生成完成/保存编辑后刷新）时回到预览模式（渲染期调整，避免 effect 级联渲染）
   const [prevMindmap, setPrevMindmap] = useState(mindmap)
@@ -122,21 +121,16 @@ export const StepStoryboardOutline: React.FC<StepStoryboardOutlineProps> = ({ se
   }
 
   // 发起生成（POST storyboard-outline/generate → run_id → 任务交给全局 AgentRunDock 跟踪）
-  const executeGenerate = async (prompt: string) => {
-    if (guardRunStart(session.session_id, 'storyboard_outline', '分镜大纲', starting)) return
-    setStarting(true)
-    setExtraPrompt(prompt)
-    setPromptModal({ open: false, extraPrompt: '' })
-    try {
-      const runId = await stepApi.generateStoryboardOutline(session.session_id, prompt || undefined)
-      useAgentRunStore.getState().addRun({ runId, sessionId: session.session_id, kind: 'storyboard_outline' })
-      message.info('分镜大纲生成已发起，进度见右上角后台任务')
-    } catch (e) {
-      message.error((e as Error).message)
-    } finally {
-      setStarting(false)
-    }
-  }
+  const executeGenerate = (prompt: string) =>
+    launch({
+      kind: 'storyboard_outline',
+      label: '分镜大纲',
+      close: () => {
+        setExtraPrompt(prompt)
+        setPromptModal({ open: false, extraPrompt: '' })
+      },
+      invoke: () => stepApi.generateStoryboardOutline(session.session_id, prompt || undefined),
+    })
 
   // 已有大纲时重新生成需二次确认级联清空；无大纲（失败重试）直接执行
   const handleModalOk = () => {
@@ -250,17 +244,15 @@ export const StepStoryboardOutline: React.FC<StepStoryboardOutlineProps> = ({ se
             placeholder="例如：节奏更紧凑；开场用空镜；把高潮拆成 3 个分镜"
           />
           <div style={{ marginTop: 16 }}>
-            <Spin spinning={starting}>
-              <Button
-                type="primary"
-                size="large"
-                icon={<ThunderboltOutlined />}
-                loading={starting || outlineRunning}
-                onClick={() => executeGenerate(extraPrompt)}
-              >
-                生成分镜大纲
-              </Button>
-            </Spin>
+            <Button
+              type="primary"
+              size="large"
+              icon={<ThunderboltOutlined />}
+              loading={starting || outlineRunning}
+              onClick={() => executeGenerate(extraPrompt)}
+            >
+              生成分镜大纲
+            </Button>
           </div>
         </div>
       )}

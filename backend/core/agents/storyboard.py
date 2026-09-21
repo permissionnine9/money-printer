@@ -329,7 +329,7 @@ class StoryboardWorkflow(StepWorkflowBase):
     # ==================== 第 3 步：分镜参考素材图 ====================
 
     def list_material_pool(self, session_id: str) -> dict:
-        """选择弹窗素材池：定妆照（story 级）+ 本集素材 + 其他集素材（不跨 story）"""
+        """选择弹窗素材池：核心素材（story 级）+ 本集素材 + 其他集素材（不跨 story）"""
         selected = self._get_selected(session_id)
         return self.materials.list_pool(selected["script_session_id"], selected["episode_id"])
 
@@ -470,7 +470,7 @@ class StoryboardWorkflow(StepWorkflowBase):
         description = (item.get("description") or "").strip() or title
         image_prompt = item["image_prompt"].strip()
 
-        # 2. 登记素材池（pending，仿定妆照状态机）
+        # 2. 登记素材池（pending，仿核心素材状态机）
         scm = self.script_context.scm
         row = scm.insert_episode_material(
             script_session_id, episode_id, title=title, description=description,
@@ -732,7 +732,7 @@ class StoryboardWorkflow(StepWorkflowBase):
     ) -> dict:
         """提示词生成后的第二阶段：从素材池自动匹配参考图（轻量 agent run）
 
-        候选范围 = 素材池「核心素材」（lookbook 定妆照）+「本集素材」，不含其他集；
+        候选范围 = 素材池「核心素材」（lookbook 核心素材）+「本集素材」，不含其他集；
         图是按刚生成的提示词挑的 → 写入时 stale_prompt=False（与手动换图清提示词的联动相反）。
         任何失败仅记日志/thinking 提示，不抛错（提示词已保存，绝不阻断主流程）。
 

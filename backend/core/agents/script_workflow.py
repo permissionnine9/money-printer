@@ -3,7 +3,7 @@
 1. story_ideation  故事构思：多轮对话盘问（Agent SDK resume 多轮），finalize 收敛故事逻辑
 2. story_outline   故事大纲：单次 agent run 产出 markmap markdown
 3. episode_design  分集设计：agent 通过进程内 MCP 工具注册全局实体并逐集落库（增量可见）
-4. lookbook_images 定妆照：agent 出中文 prompt + 确定性生图（复用 ImageService）
+4. lookbook_images 核心素材：agent 出中文 prompt + 确定性生图（复用 ImageService）
 """
 import asyncio
 import json
@@ -29,9 +29,10 @@ from backend.core.services.workspace_sections import (
     workspace_envelope,
     workspace_section,
 )
+from backend.core.utils.image_store import archive_generated_image
 from backend.core.utils.json_parser import extract_json_array, extract_markdown, is_valid_mindmap
 
-# 定妆照生图默认参数（锚点图，全剧统一）
+# 核心素材生图默认参数（锚点图，全剧统一）
 LOOKBOOK_VIDEO_PARAMS = VideoParams(resolution="1080p", aspect_ratio="16:9")
 
 # ending_summary 字数约束
@@ -63,7 +64,7 @@ class ScriptWorkflow(StepWorkflowBase):
         store: WorkspaceStore,
     ):
         super().__init__(session_manager)
-        # scm 仅管 DB 侧任务表（定妆照/分集素材图状态机）；markdown 产物权威源为 store
+        # scm 仅管 DB 侧任务表（核心素材/分集素材图状态机）；markdown 产物权威源为 store
         self.scm = script_manager
         self.store = store
         # agent 步骤运行封装 / 生图任务状态机（业务异常统一为 ScriptWorkflowError）
@@ -254,7 +255,7 @@ class ScriptWorkflow(StepWorkflowBase):
             parse=_parse_outline,
         )
 
-        # 重生成 → 清下游（step_results + 工作区分集/实体 + DB 定妆照/素材图任务）
+        # 重生成 → 清下游（step_results + 工作区分集/实体 + DB 核心素材/素材图任务）
         cascade_regenerate(self.sm, self.store, self.scm, session_id, "story_outline")
         # 大纲落工作区文件（story 目录随剧名正名），DB 行只留薄 envelope
         outline = self.store.write_outline(session_id, mindmap, requirements=requirements)
@@ -526,7 +527,7 @@ class ScriptWorkflow(StepWorkflowBase):
                 raise ScriptWorkflowError(f"分集不存在: {regenerate_episode_id}")
             task_prompt = self._build_single_episode_prompt(session_id, regenerate_episode_id, extra_instruction)
         else:
-            # 全量生成前清空旧数据（step 下游 + 工作区实体/分集 + DB 定妆照/素材图任务）
+            # 全量生成前清空旧数据（step 下游 + 工作区实体/分集 + DB 核心素材/素材图任务）
             cascade_regenerate(self.sm, self.store, self.scm, session_id, "episode_design")
             task_prompt = (
                 "请根据大纲完成全部分集设计。\n\n"
@@ -606,7 +607,7 @@ class ScriptWorkflow(StepWorkflowBase):
             parts.append(f"\n补充要求：{extra_instruction}")
         return "\n".join(parts)
 
-    # ==================== 第 4 步：定妆照 ====================
+    # ==================== 第 4 步：核心素材 ====================
 
     async def generate_lookbook(
         self,
@@ -617,7 +618,7 @@ class ScriptWorkflow(StepWorkflowBase):
         on_event: OnEvent,
         interrupt: Optional[asyncio.Event] = None,
     ) -> dict:
-        """定妆照生成：agent 单轮出中文 prompt → 确定性生图（间隔提交+并发轮询）"""
+        """核心素材生成：agent 单轮出中文 prompt → 确定性生图（间隔提交+并发轮询）"""
         self.require_step_data(session_id, "episode_design")
         if not entity_ids:
             raise ScriptWorkflowError("请至少勾选一个实体")
@@ -627,7 +628,7 @@ class ScriptWorkflow(StepWorkflowBase):
         missing = [eid for eid in entity_ids if eid not in owned]
         if missing:
             raise ScriptWorkflowError(f"实体不存在或不属于本会话: {missing}")
-        # 定妆照仅支持人物/场景，线索/伏笔无视觉形象
+        # 核心素材仅支持人物/场景，线索/伏笔无视觉形象
         invalid = [eid for eid in entity_ids if owned[eid]["entity_type"] not in ("character", "scene")]
         if invalid:
             raise ScriptWorkflowError(f"仅人物/场景可生成核心素材，线索/伏笔不支持: {invalid}")
@@ -690,20 +691,31 @@ class ScriptWorkflow(StepWorkflowBase):
                 }
 
         # 2. 确定性生图（间隔提交 + 并发轮询；完成后回写实体的 lookbook 锚点）
+        # meta 记 entity_type：素材库导入时校验源/目标实体类型一致（场景图不得绑到人物实体）
         image_service = build_image_service_from_model_config(model_config_id)
         rows = {}
         for e in entities:
             p = prompts_by_entity[e["entity_id"]]
-            row = self.scm.insert_lookbook(session_id, e["entity_id"], p["prompt"], p["description"])
+            row = self.scm.insert_lookbook(
+                session_id, e["entity_id"], p["prompt"], p["description"],
+                meta={"entity_type": e["entity_type"]},
+            )
             rows[row["image_id"]] = row
 
         on_event(AgentEvent(type="thinking", delta=f"开始生成 {len(rows)} 张核心素材..."))
 
-        def _on_completed(image_id: str, poll: dict) -> None:
+        # 归档 static/images/{story}/lookbook/（story 级锚点图，不落分集）
+        story_name = self.store.story_title(session_id) or f"story_{session_id[:8]}"
+        entity_names = {e["entity_id"]: e["name"] for e in entities}
+
+        async def _on_completed(image_id: str, poll: dict) -> dict:
             lookbook = self.scm.get_lookbook(image_id)
-            self.store.set_entity_lookbook(
-                session_id, lookbook["entity_id"], image_id, poll.get("image_url", ""),
+            image_path = await archive_generated_image(
+                poll["image_url"], story_name, "lookbook",
+                entity_names.get(lookbook["entity_id"], "核心素材"), image_id,
             )
+            self.store.set_entity_lookbook(session_id, lookbook["entity_id"], image_id, image_path)
+            return {"image_path": image_path}
 
         await self.image_tasks.run_batch(
             image_service,
@@ -725,20 +737,31 @@ class ScriptWorkflow(StepWorkflowBase):
         prompt: Optional[str] = None,
         model_config_id: Optional[str] = None,
     ) -> dict:
-        """单张定妆照重生成（可选改 prompt）"""
+        """单张核心素材重生成（可选改 prompt）"""
         row = self.scm.get_lookbook(image_id)
         if not row or row["script_session_id"] != session_id:
             raise ScriptWorkflowError(f"核心素材不存在: {image_id}")
         image_service = build_image_service_from_model_config(model_config_id)
+        story_name = self.store.story_title(session_id) or f"story_{session_id[:8]}"
+        entity_name = next(
+            (e["name"] for e in self.store.list_entities(session_id) if e["entity_id"] == row["entity_id"]),
+            "核心素材",
+        )
+
+        async def _on_completed(image_id: str, poll: dict) -> dict:
+            image_path = await archive_generated_image(
+                poll["image_url"], story_name, "lookbook", entity_name, image_id,
+            )
+            self.store.set_entity_lookbook(session_id, row["entity_id"], image_id, image_path)
+            return {"image_path": image_path}
+
         await self.image_tasks.run_single(
             image_service,
             ImageTaskSpec(image_id=image_id, prompt=prompt or row["prompt"]),
             LOOKBOOK_VIDEO_PARAMS,
             self.scm.update_lookbook,
             pre_update={"task_status": "processing", **({"prompt": prompt} if prompt else {})},
-            on_completed=lambda iid, poll: self.store.set_entity_lookbook(
-                session_id, row["entity_id"], iid, poll.get("image_url", ""),
-            ),
+            on_completed=_on_completed,
         )
         return self.scm.get_lookbook(image_id)
 

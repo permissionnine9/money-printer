@@ -72,7 +72,7 @@ class EntityUpsertRequest(BaseModel):
     meta: dict = Field(default_factory=dict)
 
 
-# ==================== 第 4 步：定妆照 ====================
+# ==================== 第 4 步：核心素材 ====================
 
 class LookbookGenerateRequest(BaseModel):
     entity_ids: list[str] = Field(min_length=1, description="勾选实体的 entity_id")

@@ -14,9 +14,9 @@ def cascade_regenerate(
     session_id: str,
     step: str,
 ) -> None:
-    """重生成级联清理：下游步骤结果（DB）+ 工作区分集/实体文件 + DB 定妆照/素材图任务
+    """重生成级联清理：下游步骤结果（DB）+ 工作区分集/实体文件 + DB 核心素材/素材图任务
 
-    已完成且有图的定妆照保留为历史素材（第 4 步素材库可复用）；未完成行删除。
+    已完成且有图的核心素材保留为历史素材（第 4 步素材库可复用）；未完成行删除。
     """
     sm.clear_steps_after(session_id, step)
     store.delete_story_content(session_id)

@@ -2,7 +2,7 @@
 
 不依赖 agent 端点。用法: uv run python tests/manual/test_phase1_data.py
 实体/分集读写已迁 WorkspaceStore（markdown 权威源）；ScriptManager 只剩
-定妆照/分集素材图两张任务状态机表。全程使用临时目录/临时 DB，不污染
+核心素材/分集素材图两张任务状态机表。全程使用临时目录/临时 DB，不污染
 data/sessions.db 与 workspace/。
 """
 import shutil
@@ -96,10 +96,10 @@ def test_workspace_entities(store: WorkspaceStore, sm: SessionManager) -> str:
     assert store.delete_entity(sid, "chr_002")
     assert store.get_entity(sid, "chr_002") is None
 
-    # 回写定妆照引用（任务本体在 DB，文件只存引用）
+    # 回写核心素材引用（任务本体在 DB，文件只存引用）
     assert store.set_entity_lookbook(sid, "chr_001", "lb_x", "static/x.png")
     assert store.get_entity(sid, "chr_001")["lookbook_image_path"] == "static/x.png"
-    print("  ✓ 实体 ID 分配唯一 / upsert / 删除 / 定妆照回写")
+    print("  ✓ 实体 ID 分配唯一 / upsert / 删除 / 核心素材回写")
     return sid
 
 
@@ -143,9 +143,10 @@ def test_cascade_cleanup(store: WorkspaceStore, sm: SessionManager, scm: ScriptM
     assert counts == {"episodes": 1, "entities": 1}, counts
     assert store.list_entities(sid) == [] and store.list_episodes(sid) == []
 
-    # DB 侧：定妆照/分集素材图任务表，返回 lookbook_images/episode_material_images 计数
+    # DB 侧：核心素材/分集素材图任务表，返回 lookbook_images/episode_material_images 计数
+    # （keep_completed_lookbooks 默认 False → lookbook_images_kept 恒 0）
     db_counts = scm.delete_script_data(sid)
-    assert db_counts == {"lookbook_images": 1, "episode_material_images": 1}, db_counts
+    assert db_counts == {"lookbook_images": 1, "lookbook_images_kept": 0, "episode_material_images": 1}, db_counts
     assert scm.list_lookbook(sid) == [] and scm.list_episode_materials(sid) == []
     assert scm.get_lookbook(lb["image_id"]) is None
     assert scm.get_episode_material(mat["image_id"]) is None
@@ -158,7 +159,9 @@ def main() -> None:
     try:
         sm = SessionManager(db_path=str(tmp / "test.db"), steps=SCRIPT_STEPS)
         scm = ScriptManager(db_path=str(tmp / "test.db"))
-        store = WorkspaceStore(workspace_dir=tmp / "workspace", session_manager=sm)
+        # 注入独立空库 ScriptManager：ID 分配并入 lookbook 保留行防撞，
+        # 不注入会延迟取 deps 单例（项目真实 DB，含历史 lookbook 行），chr_001 断言漂移
+        store = WorkspaceStore(workspace_dir=tmp / "workspace", session_manager=sm, script_manager=scm)
 
         test_session_manager_steps(sm)
         sid_entities = test_workspace_entities(store, sm)

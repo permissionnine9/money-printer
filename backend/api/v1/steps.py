@@ -119,7 +119,7 @@ async def get_material_pool(
     session_id: str,
     _session_info: dict = Depends(load_video_session),
 ):
-    """步骤3：素材池（选择弹窗分组数据：定妆照 / 本集素材 / 其他集素材，不跨 story）"""
+    """步骤3：素材池（选择弹窗分组数据：核心素材 / 本集素材 / 其他集素材，不跨 story）"""
     result = get_storyboard_workflow().list_material_pool(session_id)
     return {"success": True, "data": result}
 

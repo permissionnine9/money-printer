@@ -41,12 +41,14 @@ def build_image_service_from_model_config(model_config_id: str | None = None) ->
         config = manager.get_model(model_config_id)
         if not config:
             raise ImageModelNotConfiguredError(f"生图模型配置不存在: {model_config_id}")
+        if not config.get("enabled", True):
+            raise ImageModelNotConfiguredError(f"生图模型「{config['name']}」已停用，请在「模型管理」启用后重试")
     else:
         config = manager.get_default_model(model_type="image")
 
     if not config:
         raise ImageModelNotConfiguredError(
-            "未配置默认生图模型：请在「模型管理」添加模型类型为「生图」的配置并设为默认"
+            "未配置默认生图模型：请在「模型管理」添加模型类型为「生图」的配置并设为默认（已停用的模型不生效）"
         )
 
     api_key = (config["api_key"] or "").strip()

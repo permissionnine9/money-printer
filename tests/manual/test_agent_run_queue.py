@@ -2,18 +2,20 @@
 
 运行：uv run python tests/manual/test_agent_run_queue.py
 覆盖：
-1. 提交 8 个 run，前 5 个被领取执行、其余排队，并发峰值恰好 MAX_CONCURRENT_RUNS=5
+1. 提交 8 个 run，前 5 个被领取执行、其余排队，并发峰值恰好 max_concurrent=5
 2. FIFO：完成顺序与入队顺序一致
-3. 排队中 cancel **立即落终态**（同步返回即 done，不等 worker 领取），factory 不执行
+3. 排队中 cancel **立即落终态**（同步返回即 done，不等 worker 领取），factory 不执行，
+   error 事件带 reason=cancelled
 4. 取消后新入队 run 的 queue_position 排除已取消的排队 run
-5. 事件流含 queued（带 queue_position）/ started；观流 stream() 先 queued 后 started
+5. 事件流含 queued（带 queue_position）/ started；观流 stream() 首事件 queued 且含 started
+6. 前方任务被 worker 领取后，剩余排队者收到 position 递减的 queued 重发（数字不冻结）
 """
 import asyncio
 import sys
 
 sys.path.insert(0, ".")
 
-from backend.core.agent_sdk.registry import MAX_CONCURRENT_RUNS, AgentRunRegistry
+from backend.core.agent_sdk.registry import AgentRunRegistry
 
 
 async def main() -> None:
@@ -46,7 +48,9 @@ async def main() -> None:
     h7 = handles[7]
     assert h7.done and h7.success is False and "取消" in (h7.error or ""), \
         f"排队取消应立即落终态: {h7.to_dict()}"
-    assert "error" in [ev.type for _, ev in h7.events], "排队取消应立即发 error 事件"
+    err_events = [ev for _, ev in h7.events if ev.type == "error"]
+    assert err_events and err_events[0].reason == "cancelled", \
+        f"排队取消 error 事件应带 reason=cancelled: {err_events}"
 
     # 取消后再入队：queue_position 排除已取消的（前面只剩 task-5/task-6 两个有效排队者）
     ids.append(reg.start("task-8", make_factory(8)))
@@ -66,11 +70,16 @@ async def main() -> None:
     await watcher
 
     # 并发上限 + FIFO + 取消的未执行
-    assert peak == MAX_CONCURRENT_RUNS, f"并发峰值 {peak} ≠ {MAX_CONCURRENT_RUNS}"
+    assert peak == reg.max_concurrent, f"并发峰值 {peak} ≠ {reg.max_concurrent}"
     assert order == [0, 1, 2, 3, 4, 5, 6, 8], f"FIFO 顺序异常: {order}"
-    # 观流顺序与生命周期
-    assert stream_events[:2] == ["queued", "started"], f"观流首批事件异常: {stream_events[:3]}"
+    # 观流顺序与生命周期（多次 queued 合法：领取/取消后位置前移重发）
+    assert stream_events[0] == "queued" and "started" in stream_events, \
+        f"观流首批事件异常: {stream_events[:3]}"
     assert reg.get(ids[0]).to_dict()["status"] == "done"
+    # 位置前移：task-5 入队 position=5 → 5 个前方任务被逐个领取 4/3/2/1/0 →
+    # cancel(task-7) 后重发 0（7 在 5 之后，不影响其位置，但重发对全部排队者执行）
+    positions5 = [ev.queue_position for _, ev in reg.get(ids[5]).events if ev.type == "queued"]
+    assert positions5 == [5, 4, 3, 2, 1, 0, 0], f"queue_position 应随领取前移: {positions5}"
 
     print(f"✅ 全部断言通过：并发峰值={peak} 完成顺序={order} 排队取消即时生效 position 排除已取消")
 

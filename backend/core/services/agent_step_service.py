@@ -55,7 +55,8 @@ class AgentStepService:
             on_event,
         )
         if result.error:
-            raise self.error(f"{label}失败: {result.error}")
+            # interrupted=用户主动取消：带结构化 reason，registry 透传给前端区分「已取消/失败」
+            raise self.error(f"{label}失败: {result.error}", reason="cancelled" if result.interrupted else "")
         if parse is None:
             return result
         return parse(result.text)

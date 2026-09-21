@@ -1,14 +1,15 @@
-"""剧本数据管理 - 定妆照 / 分集素材图任务表（DB 侧状态机）
+"""剧本数据管理 - 核心素材 / 分集素材图任务表（DB 侧状态机）
 
 markdown 类产物（故事逻辑/大纲/分集设计/实体卡/分镜）已文件化到 workspace/
 （权威源见 workspace_store.py）；本管理器只保留生图任务状态机两张表：
-- lookbook_images:        剧本定妆照（agent 出 prompt + 确定性生图的状态机）
+- lookbook_images:        剧本核心素材（agent 出 prompt + 确定性生图的状态机）
 - episode_material_images: 分集素材图（视频工作流分镜参考图生成的状态机）
 
 （episodes / script_entities 两张影子表已退役：不再建 DDL、不再读写，
 仅由 migrate_db_to_workspace.py 在旧库中维护用于迁移对账。）
 """
 import logging
+import re
 import sqlite3
 import uuid
 from typing import Optional
@@ -18,9 +19,12 @@ from backend.core.utils.json_utils import dump_json
 
 logger = logging.getLogger(__name__)
 
+# 「已完成且有图」谓词（素材库展示口径与级联删除保留口径必须一致，单一来源）
+COMPLETED_LOOKBOOK_WHERE = "task_status = 'completed' AND IFNULL(image_path, '') != ''"
+
 
 class ScriptManager(BaseSQLiteManager):
-    """剧本数据管理器（定妆照 / 分集素材图任务状态机）"""
+    """剧本数据管理器（核心素材 / 分集素材图任务状态机）"""
 
     def _create_schema(self, conn):
         conn.execute("""
@@ -55,7 +59,7 @@ class ScriptManager(BaseSQLiteManager):
             )
         """)
 
-    # ==================== 定妆照 ====================
+    # ==================== 核心素材 ====================
 
     def insert_lookbook(
         self,
@@ -123,14 +127,28 @@ class ScriptManager(BaseSQLiteManager):
         )
 
     def list_completed_lookbooks(self) -> list[dict]:
-        """素材库：全部剧本会话已完成且有图的定妆照（跨会话，新 → 旧）"""
+        """素材库：全部剧本会话已完成且有图的核心素材（跨会话，新 → 旧）"""
         with self._connect() as conn:
             cursor = conn.execute(
-                "SELECT * FROM lookbook_images "
-                "WHERE task_status = 'completed' AND IFNULL(image_path, '') != '' "
+                f"SELECT * FROM lookbook_images WHERE {COMPLETED_LOOKBOOK_WHERE} "
                 "ORDER BY created_at DESC"
             )
             return [self._lookbook_to_dict(row) for row in cursor.fetchall()]
+
+    def max_entity_seq(self, prefix: str) -> int:
+        """实体 ID 防撞：lookbook 表中该前缀 entity_id 的最大序号（含级联删除保留的历史行）
+
+        新建实体分配 ID 时与文件扫描取 max，避免保留行/孤儿行的 entity_id 被新实体
+        复用（跨代错配）。Python 侧正则过滤（SQLite LIKE 的 `_` 是通配符，不能用）。
+        """
+        pattern = re.compile(rf"^{re.escape(prefix)}_(\d+)")
+        max_num = 0
+        with self._connect() as conn:
+            for (entity_id,) in conn.execute("SELECT DISTINCT entity_id FROM lookbook_images"):
+                m = pattern.match(entity_id or "")
+                if m:
+                    max_num = max(max_num, int(m.group(1)))
+        return max_num
 
     def list_completed_episode_materials(self) -> list[dict]:
         """素材管理：全部剧本会话已完成且有图的分集素材图（跨会话，新 → 旧）"""
@@ -219,9 +237,9 @@ class ScriptManager(BaseSQLiteManager):
     # ==================== 级联清理 ====================
 
     def delete_script_data(self, script_session_id: str, keep_completed_lookbooks: bool = False) -> dict:
-        """清空剧本会话的全部分集/实体/定妆照/分集素材图（大纲重生成时清下游）
+        """清空剧本会话的全部分集/实体/核心素材/分集素材图（大纲重生成时清下游）
 
-        keep_completed_lookbooks=True 时保留已完成且有图的定妆照行（作为历史素材，
+        keep_completed_lookbooks=True 时保留已完成且有图的核心素材行（作为历史素材，
         供第 4 步素材库复用）；未完成/失败行仍删除（避免前端死轮询）。
         分集素材图两种模式都全删（与集号强绑定，保留只会污染素材池）。
         """
@@ -231,7 +249,7 @@ class ScriptManager(BaseSQLiteManager):
             if keep_completed_lookbooks:
                 deleted = conn.execute(
                     "DELETE FROM lookbook_images WHERE script_session_id = ? "
-                    "AND NOT (task_status = 'completed' AND IFNULL(image_path, '') != '')",
+                    f"AND NOT ({COMPLETED_LOOKBOOK_WHERE})",
                     (script_session_id,),
                 ).rowcount
                 kept = lookbooks - deleted

@@ -61,7 +61,7 @@ const ModelsPage: React.FC = () => {
 
   const openCreate = () => {
     form.resetFields()
-    form.setFieldsValue({ model_type: filterType === 'all' ? 'image' : filterType, is_default: false })
+    form.setFieldsValue({ model_type: filterType === 'all' ? 'image' : filterType, is_default: false, enabled: true })
     setModal({ visible: true, editing: null, loading: false })
   }
 
@@ -73,6 +73,7 @@ const ModelsPage: React.FC = () => {
       model_id: model.model_id,
       is_default: model.is_default,
       model_type: model.model_type || 'image',
+      enabled: model.enabled !== false,
     })
     setModal({ visible: true, editing: model, loading: false })
   }
@@ -88,6 +89,7 @@ const ModelsPage: React.FC = () => {
         model_id: values.model_id || '',
         is_default: values.is_default || false,
         model_type: values.model_type || 'image',
+        enabled: values.enabled !== false,
       }
       const response = modal.editing
         ? await modelApi.update(modal.editing.id, payload)
@@ -136,6 +138,23 @@ const ModelsPage: React.FC = () => {
     }
   }
 
+  const handleToggleEnabled = async (model: ImageModelConfig, enabled: boolean) => {
+    // 先本地切换保证手感，失败再回滚刷新
+    setModels((prev) => prev.map((m) => (m.id === model.id ? { ...m, enabled } : m)))
+    try {
+      const response = await modelApi.setEnabled(model.id, enabled)
+      if (!response.success) {
+        message.error('操作失败')
+        await loadModels()
+      } else if (enabled && model.is_default) {
+        message.success(`已启用「${model.name}」，默认模型恢复生效`)
+      }
+    } catch (error) {
+      message.error((error as Error).message)
+      await loadModels()
+    }
+  }
+
   const columns = [
     {
       title: '名称',
@@ -148,6 +167,7 @@ const ModelsPage: React.FC = () => {
             {record.model_type === 'chat' ? 'Chat' : record.model_type === 'agent' ? 'Agent' : '生图'}
           </Tag>
           {record.is_default && <Tag color="green">默认</Tag>}
+          {record.enabled === false && <Tag>已停用</Tag>}
         </Space>
       ),
     },
@@ -178,11 +198,24 @@ const ModelsPage: React.FC = () => {
       ),
     },
     {
+      title: '启用',
+      dataIndex: 'enabled',
+      key: 'enabled',
+      width: 90,
+      render: (enabled: boolean | undefined, record: ImageModelConfig) => (
+        <Switch
+          checked={enabled !== false}
+          size="small"
+          onChange={(checked) => handleToggleEnabled(record, checked)}
+        />
+      ),
+    },
+    {
       title: '操作',
       key: 'actions',
       render: (_: unknown, record: ImageModelConfig) => (
         <Space>
-          {!record.is_default && (
+          {!record.is_default && record.enabled !== false && (
             <Button
               size="small"
               icon={<StarOutlined />}
@@ -312,6 +345,14 @@ const ModelsPage: React.FC = () => {
             extra="默认生图模型用于素材图/首尾帧生成；默认 Chat 模型用于脚本优化、思维导图、分片等 LLM 环节"
           >
             <Switch checkedChildren={<StarFilled />} unCheckedChildren={<StarOutlined />} />
+          </Form.Item>
+          <Form.Item
+            name="enabled"
+            label="启用模型"
+            valuePropName="checked"
+            extra="停用后该模型不参与默认解析与选择（如临时更换 Key/额度用尽时可停用而不删除）"
+          >
+            <Switch checkedChildren="启用" unCheckedChildren="停用" />
           </Form.Item>
         </Form>
       </Modal>

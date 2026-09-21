@@ -1,12 +1,14 @@
 /**
  * 第 4 步：全剧核心素材生成（实体卡片上直接生成 / 重新生成 / 删除，弹窗输入提示词，单卡片独立进度）
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Card, Empty, Image, Input, Modal, Popconfirm, Select, Space, Spin, Tag, Typography, message } from 'antd'
 import { AppstoreOutlined, CheckCircleOutlined, DeleteOutlined, PictureOutlined, RedoOutlined } from '@ant-design/icons'
 import type { AgentEvent, ImageModelConfig, LookbookImage, ScriptEntity, ScriptSessionDetail } from '@/types'
 import { entityApi, modelApi, scriptStepApi } from '@/api/client'
 import { useScriptSessionStore } from '@/stores/scriptSessionStore'
+import { hasRunningRun, isActiveRun, useAgentRunStore } from '@/stores/agentRunStore'
+import { useStartRun } from '@/hooks/useRunTask'
 import { usePolling } from '@/hooks/usePolling'
 import { AgentRunProgress } from './AgentRunProgress'
 import { LookbookLibraryModal } from './LookbookLibraryModal'
@@ -15,18 +17,19 @@ import { imageSrc } from '@/utils/imageSrc'
 const { Text } = Typography
 const { TextArea } = Input
 
-// 图片风格选项：zh 为中文风格要求（生成路径并入 style_prompt 给 agent；重新生成路径附加到生图 prompt）
+// 图片风格选项：zh 为中文风格要求（生成路径并入 style_prompt 给 agent）；
+// 重新生成路径按 base prompt 语言选用 zh/en（存量英文 prompt 拼中文会混排出图不稳）
 const IMAGE_STYLE_OPTIONS = [
-  { value: 'auto', label: '自动（AI 根据剧本气质判断）', zh: '' },
-  { value: 'realistic', label: '现实主义', zh: '写实摄影质感，真实自然光影与材质细节，像真实存在的照片' },
-  { value: '2d', label: '2D 插画', zh: '2D 手绘插画，干净线稿与扁平上色，明快配色' },
-  { value: '3d', label: '3D 卡通渲染', zh: '皮克斯式 3D 卡通渲染，柔和全局光照，圆润造型，高细节材质' },
-  { value: 'anime', label: '日式动漫', zh: '日式动漫赛璐璐风格，干净线稿，精致角色设计与背景美术' },
-  { value: 'guofeng', label: '国风动漫', zh: '国风动漫美术，东方古典元素与配色，飘逸写意的中国风' },
-  { value: 'comic', label: '美漫风', zh: '美式漫画风格，粗犷勾线与网点排线阴影，强对比动态构图' },
-  { value: 'ink', label: '水墨画', zh: '中国传统水墨画，毛笔笔触与留白意境，淡雅设色' },
-  { value: 'watercolor', label: '水彩手绘', zh: '水彩手绘质感，柔和晕染边缘与纸纹，清新通透' },
-  { value: 'cyberpunk', label: '赛博朋克', zh: '赛博朋克科幻风，霓虹灯光效与未来都市氛围，高对比冷暖色' },
+  { value: 'auto', label: '自动（AI 根据剧本气质判断）', zh: '', en: '' },
+  { value: 'realistic', label: '现实主义', zh: '写实摄影质感，真实自然光影与材质细节，像真实存在的照片', en: 'realistic photography style, shot on 35mm film, natural lighting, lifelike textures' },
+  { value: '2d', label: '2D 插画', zh: '2D 手绘插画，干净线稿与扁平上色，明快配色', en: '2D illustration style, clean linework, flat colors' },
+  { value: '3d', label: '3D 卡通渲染', zh: '皮克斯式 3D 卡通渲染，柔和全局光照，圆润造型，高细节材质', en: 'stylized 3D render, soft global illumination, subsurface scattering' },
+  { value: 'anime', label: '日式动漫', zh: '日式动漫赛璐璐风格，干净线稿，精致角色设计与背景美术', en: 'Japanese anime style, cel shading, clean line art' },
+  { value: 'guofeng', label: '国风动漫', zh: '国风动漫美术，东方古典元素与配色，飘逸写意的中国风', en: 'Chinese guofeng anime style, oriental classical aesthetics, elegant flowing design' },
+  { value: 'comic', label: '美漫风', zh: '美式漫画风格，粗犷勾线与网点排线阴影，强对比动态构图', en: 'American comic book style, bold ink outlines, halftone shading' },
+  { value: 'ink', label: '水墨画', zh: '中国传统水墨画，毛笔笔触与留白意境，淡雅设色', en: 'traditional Chinese ink painting, brush strokes, negative space, muted colors' },
+  { value: 'watercolor', label: '水彩手绘', zh: '水彩手绘质感，柔和晕染边缘与纸纹，清新通透', en: 'watercolor painting, soft bleeding edges, paper texture' },
+  { value: 'cyberpunk', label: '赛博朋克', zh: '赛博朋克科幻风，霓虹灯光效与未来都市氛围，高对比冷暖色', en: 'cyberpunk style, neon lighting, futuristic sci-fi atmosphere' },
 ]
 
 interface StepLookbookProps {
@@ -41,29 +44,49 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
   const [entities, setEntities] = useState<ScriptEntity[]>([])
   const [images, setImages] = useState<LookbookImage[]>([])
   const [models, setModels] = useState<ImageModelConfig[]>([])
-  const [runs, setRuns] = useState<Map<string, string>>(new Map()) // entity_id -> run_id
+  // entity_id -> run_id：仅驱动实体卡内联进度组件的挂载（生命周期归本地，
+  // 全局 store/Dock 负责终态通知与防重——store 派生会因 Dock removeRun 卸载内联组件断流）
+  const [runs, setRuns] = useState<Map<string, string>>(new Map())
   const [deleting, setDeleting] = useState('')
   const [modal, setModal] = useState<{ entity: ScriptEntity; image?: LookbookImage } | null>(null)
   const [libraryEntity, setLibraryEntity] = useState<ScriptEntity | null>(null)
   const [promptText, setPromptText] = useState('')
   const [styleType, setStyleType] = useState('auto')
   const [modelConfigId, setModelConfigId] = useState<string | undefined>(undefined)
-  const [confirming, setConfirming] = useState(false)
   const [completing, setCompleting] = useState(false)
 
+  // lookbook 任务在全局 store 跟踪（跨菜单/路由切换不丢、Dock 显示、防重复）；
+  // busyEntityIds 派生 per-entity 防重（同一实体重复提交，不同实体可并行）
+  const allRuns = useAgentRunStore((s) => s.runs)
+  const activeLookbookRuns = useMemo(
+    () => allRuns.filter((r) => isActiveRun(r, session.session_id, 'lookbook')),
+    [allRuns, session.session_id],
+  )
+  const anyLookbookRunning = activeLookbookRuns.length > 0
+  const busyEntityIds = useMemo(
+    () => new Set(activeLookbookRuns.map((r) => r.entityId).filter(Boolean) as string[]),
+    [activeLookbookRuns],
+  )
+  const { starting: confirming, launch } = useStartRun(session.session_id)
+
+  // 拉取序号：丢弃迟到的旧响应，避免终态最终拉取被 in-flight 轮询的旧数据覆盖
+  const entitiesFetchSeq = useRef(0)
   const loadEntities = useCallback(async () => {
+    const seq = ++entitiesFetchSeq.current
     try {
       const list = await entityApi.list(session.session_id)
-      setEntities(list || [])
+      if (seq === entitiesFetchSeq.current) setEntities(list || [])
     } catch {
       // 静默失败
     }
   }, [session.session_id])
 
+  const imagesFetchSeq = useRef(0)
   const loadImages = useCallback(async () => {
+    const seq = ++imagesFetchSeq.current
     try {
       const list = await scriptStepApi.listLookbook(session.session_id)
-      setImages(list || [])
+      if (seq === imagesFetchSeq.current) setImages(list || [])
     } catch {
       // 静默失败
     }
@@ -78,7 +101,8 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
       .catch(() => setModels([]))
   }, [loadEntities, loadImages])
 
-  // 生成中（run 活跃或有 pending/processing 图片）2s 轮询状态机
+  // 生成中（store 有活跃 run 或有 pending/processing 图片）2s 轮询状态机；
+  // 排队期间后端尚未写 DB 行，须以 store 的 run 活跃为准
   const hasActiveImages = images.some(
     (i) => i.task_status === 'pending' || i.task_status === 'processing'
   )
@@ -87,10 +111,10 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
       void loadImages()
       void loadEntities()
     },
-    { interval: 2000, enabled: runs.size > 0 || hasActiveImages }
+    { interval: 2000, enabled: anyLookbookRunning || hasActiveImages }
   )
 
-  // 实体的当前定妆照行：优先实体指向的行，否则取最新一条
+  // 实体的当前核心素材行：优先实体指向的行，否则取最新一条
   const imageByEntity = useMemo(() => {
     const m = new Map<string, LookbookImage>()
     for (const e of entities) {
@@ -107,57 +131,69 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
     setModal({ entity, image })
   }
 
-  const handleConfirm = async () => {
+  const handleConfirm = () => {
     if (!modal) return
     const { entity, image } = modal
     const style = IMAGE_STYLE_OPTIONS.find((s) => s.value === styleType && s.value !== 'auto')
-    setConfirming(true)
-    try {
-      let runId: string
-      if (image) {
-        // 重新生成不走 agent：中文风格要求附加到生图 prompt（提示词为空则沿用原 prompt 再附加）
-        let prompt = promptText || undefined
-        if (style) {
-          const base = promptText || image.prompt || ''
-          prompt = base ? `${base}，${style.zh}` : style.zh
+    void launch({
+      kind: 'lookbook',
+      label: `核心素材 - ${entity.name}`,
+      // 实体粒度守卫（同一实体防重复提交，不同实体可并行生成）——默认 kind 级守卫会拦住全部实体
+      guard: () => {
+        if (hasRunningRun(session.session_id, 'lookbook', entity.entity_id)) {
+          message.warning(`「${entity.name}」的核心素材正在生成中（见右上角后台任务），请等待完成后再试`)
+          return true
         }
-        runId = await scriptStepApi.regenerateLookbookImage(
-          session.session_id,
-          image.image_id,
-          prompt,
-          modelConfigId
-        )
-      } else {
+        return false
+      },
+      extra: { entityId: entity.entity_id, entityName: entity.name },
+      close: () => setModal(null),
+      invoke: async () => {
+        if (image) {
+          // 重新生成不走 agent：风格要求按 base prompt 语言附加（存量英文 prompt 拼中文会混排）
+          let prompt = promptText || undefined
+          if (style) {
+            const base = promptText || image.prompt || ''
+            if (/[一-鿿]/.test(base)) {
+              prompt = base ? `${base}，${style.zh}` : style.zh
+            } else {
+              prompt = base ? `${base}, ${style.en}` : style.en
+            }
+          }
+          const runId = await scriptStepApi.regenerateLookbookImage(
+            session.session_id,
+            image.image_id,
+            prompt,
+            modelConfigId
+          )
+          setRuns((prev) => new Map(prev).set(entity.entity_id, runId))
+          return runId
+        }
         // 生成走 agent：中文风格要求并入 style_prompt（优先级高于 agent 自行判断）
         const stylePrompt = [style ? `图片风格：${style.label}——${style.zh}` : '', promptText]
           .filter(Boolean)
           .join('\n')
-        runId = await scriptStepApi.generateLookbook(
+        const runId = await scriptStepApi.generateLookbook(
           session.session_id,
           [entity.entity_id],
           stylePrompt,
           modelConfigId
         )
-      }
-      setRuns((prev) => new Map(prev).set(entity.entity_id, runId))
-      message.success('核心素材生成任务已启动')
-      setModal(null)
-      void loadImages()
-    } catch (e) {
-      message.error((e as Error).message)
-    } finally {
-      setConfirming(false)
-    }
+        setRuns((prev) => new Map(prev).set(entity.entity_id, runId))
+        void loadImages()
+        return runId
+      },
+    })
   }
 
-  const handleRunDone = (entityId: string) => async (ev: AgentEvent) => {
+  // 内联进度的终态回调：只清理本地挂载映射并拉取数据；toast/刷新由全局 Dock 统一（避免双提示）
+  const handleRunDone = (entityId: string) => async (_ev: AgentEvent) => {
     setRuns((prev) => {
       if (!prev.has(entityId)) return prev
       const next = new Map(prev)
       next.delete(entityId)
       return next
     })
-    if (!ev.success) message.error(ev.error || '核心素材生成失败')
     await loadImages()
     await loadEntities()
   }
@@ -211,7 +247,7 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
     const img = imageByEntity.get(e.entity_id)
     const status = img?.task_status
     const runId = runs.get(e.entity_id)
-    const busy = !!runId || status === 'pending' || status === 'processing'
+    const busy = busyEntityIds.has(e.entity_id) || !!runId || status === 'pending' || status === 'processing'
     return (
       <div key={e.entity_id} style={{ width: 320, border: '1px solid #f0f0f0', borderRadius: 8, padding: 8 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 4, marginBottom: 6 }}>
