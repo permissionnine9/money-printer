@@ -1,18 +1,19 @@
 # Features 功能索引
 
-> 最后更新: 2026-09-19
+> 最后更新: 2026-09-21
 
 | 名称 | 文件 | 状态 | 核心代码路径 | 迭代记录 | tags |
 |------|------|------|------------|---------|------|
-| Agent 异步运行框架 | [agent-run-framework.md](agent-run-framework.md) | 已完成 | backend/core/agent_sdk/registry.py, backend/api/v1/agent_runs.py | 2026-09-19 初始创建 | backend, sse, asyncio, agent-sdk, registry |
+| Agent 异步运行框架 | [agent-run-framework.md](agent-run-framework.md) | 已完成 | backend/core/agent_sdk/registry.py, backend/api/v1/agent_runs.py | 2026-09-19 初始创建; 2026-09-21 同步重构 — registry 引入 FIFO 排队（MAX_CONCURRENT_RUNS=5 + 常驻 worker + queued/started 事件 + status 生命周期 + 排队即时取消）... | backend, sse, asyncio, agent-sdk, registry, queue |
 | 剧本实体库管理 | [entity-management.md](entity-management.md) | 已完成 | backend/api/v1/script_sessions.py, /api/v1/script-sessions/{session_id}/entities | 2026-09-19 初始创建 | 实体管理, 后端API, 文件化存储, Agent MCP, 前端组件 |
-| 前端公共设施 | [frontend-common.md](frontend-common.md) | 已完成 | frontend/src/components/common/SessionSider.tsx, frontend/src/components/layout/MainLayout.tsx | 2026-09-19 初始创建 | 前端, 公共组件, hooks, SSE, API客户端 |
-| 前端剧本工作台 | [frontend-script-workbench.md](frontend-script-workbench.md) | 已完成 | frontend/src/pages/ScriptWorkflowPage.tsx, frontend/src/components/script/StepIdeationChat.tsx | 2026-09-19 初始创建 | frontend, script-workflow, sse, polling, zustand |
-| 前端视频工作台（WorkflowPage 4 步向导） | [frontend-video-workbench.md](frontend-video-workbench.md) | 已完成 | frontend/src/pages/WorkflowPage.tsx, frontend/src/components/workflow/StepNavigator.tsx | 2026-09-19 初始创建 | 前端, 视频工作流, 页面组件, zustand, 轮询, SSE |
-| 剧本定妆照生成 | [lookbook-generation.md](lookbook-generation.md) | 已完成 | backend/api/v1/script_sessions.py, _require_default_image_model | 2026-09-19 初始创建 | 剧本工作流, 定妆照, 生图, AgentSDK, SQLite, 前端组件 |
-| 模型配置管理 | [model-management.md](model-management.md) | 已完成 | backend/api/v1/models.py, /api/v1/models | 2026-09-19 初始创建 | 模型配置, 后端API, 前端页面, SQLite |
-| 提示词管理 | [prompt-management.md](prompt-management.md) | 已完成 | backend/core/services/prompt_manager.py, PromptManager | 2026-09-19 初始创建 | 提示词模板, 后端API, 前端页面, Agent SDK, 文件存储 |
-| 剧本创作工作流 | [script-workflow.md](script-workflow.md) | 已完成 | backend/api/v1/script_sessions.py, /api/v1/script-sessions | 2026-09-19 初始创建 | 剧本工作流, 后端API, 前端页面, AgentSDK, SSE, workspace文件化 |
-| 分镜工作流 | [storyboard-workflow.md](storyboard-workflow.md) | 已完成 | backend/core/agents/storyboard.py, StoryboardWorkflow | 2026-09-19 初始创建 | 分镜, 视频工作流, AgentSDK, 文件化工作区, SSE |
-| 文件上传与会话资产管理 | [upload-and-assets.md](upload-and-assets.md) | 已完成 | backend/api/v1/_upload.py, UPLOAD_ROOT = static/uploads | 2026-09-19 初始创建 | 文件上传, 后端API, 资产管理, SQLite, 静态文件 |
-| 视频创作工作流（视频会话与生成） | [video-workflow.md](video-workflow.md) | 已完成 | backend/api/v1/sessions.py, backend/api/v1/steps.py | 2026-09-19 初始创建 | 后端API, 视频生成, ComfyUI, 会话管理, 前端页面 |
+| 前端公共设施 | [frontend-common.md](frontend-common.md) | 已完成 | frontend/src/components/common/SessionSider.tsx, frontend/src/components/layout/MainLayout.tsx | 2026-09-19 初始创建; 2026-09-19 自校修正; 2026-09-21 新增全局任务跟踪设施（AgentRunDock/agentRunStore/useRunTask/RunTaskBanner，四类 kind，started 事件驱动）... | 前端, 公共组件, hooks, SSE, API客户端, 全局任务跟踪, zustand |
+| 前端剧本工作台 | [frontend-script-workbench.md](frontend-script-workbench.md) | 已完成 | frontend/src/pages/ScriptWorkflowPage.tsx, frontend/src/components/script/StepIdeationChat.tsx | 2026-09-19 初始创建; 2026-09-21 StepIdeationChat 叙事优化（AI 输出即草稿/「采纳为故事逻辑」adoptStoryLogic/剧本名编辑 setStoryTitle/PromptViewerModal）... | frontend, script-workflow, sse, polling, zustand, 全局任务跟踪, 素材库 |
+| 前端视频工作台（WorkflowPage 4 步向导） | [frontend-video-workbench.md](frontend-video-workbench.md) | 已完成 | frontend/src/pages/WorkflowPage.tsx, frontend/src/components/workflow/StepNavigator.tsx | 2026-09-19 初始创建; 2026-09-21 Step6Videos 整体重构（955 行）：分镜轨道 renderTrain（overlap 叠层/连续勾选约束/longestRun 默认选最长连续段）、handleImport→handleGenerate→handleCancel 三段链路... | 前端, 视频工作流, 页面组件, zustand, 轮询, SSE, 全局任务跟踪 |
+| 剧本核心素材图生成 | [lookbook-generation.md](lookbook-generation.md) | 已完成 | backend/api/v1/script_sessions.py, backend/core/services/image_task_service.py | 2026-09-19 初始创建; 2026-09-21 同步重构 — 「定妆照」改「核心素材图」；生图 prompt 英文→中文（130-220 字，人物三视图/场景全景）；生图状态机统一至 ImageTaskService... | 剧本工作流, 核心素材图, 素材库, 生图, AgentSDK, SQLite, 前端组件 |
+| 核心素材图素材库 | [lookbook-library.md](lookbook-library.md) | 已实现（2026-09-21） | backend/core/services/lookbook_library_service.py, backend/api/v1/script_sessions.py | 2026-09-21 初始创建 — 随「核心素材图+素材库」功能落地；tests/manual/test_lookbook_library.py（218 行）覆盖保留语义/跨会话过滤/HTTP 层 | 素材库, lookbook, 核心素材图, 跨会话复用, 导入 |
+| 模型配置管理 | [model-management.md](model-management.md) | 已完成 | backend/api/v1/models.py, /api/v1/models | 2026-09-19 初始创建; 2026-09-19 自校修正（get_model_manager @lru_cache 单例等） | 模型配置, 后端API, 前端页面, SQLite |
+| 提示词管理 | [prompt-management.md](prompt-management.md) | 已完成 | backend/core/services/prompt_manager.py, PromptManager | 2026-09-19 初始创建 — 基于源码分析生成（含 prompt 事件透明化与 PromptViewerModal） | 提示词模板, 后端API, 前端页面, Agent SDK, 文件存储 |
+| 剧本创作工作流 | [script-workflow.md](script-workflow.md) | 已完成 | backend/api/v1/script_sessions.py, backend/core/agents/script_workflow.py | 2026-09-19 初始创建; 2026-09-21 同步重构 — ScriptWorkflow 注入 AgentStepService/ImageTaskService；新增 adopt_story_logic/set_story_title；「定妆照」改「核心素材图」... | 剧本工作流, 后端API, 前端页面, AgentSDK, SSE, workspace文件化 |
+| 分镜工作流 | [storyboard-workflow.md](storyboard-workflow.md) | 已完成 | backend/core/agents/storyboard.py, backend/core/services/material_pool_service.py | 2026-09-19 初始创建; 2026-09-21 同步重构 — StoryboardWorkflow 注入 AgentStepService/ImageTaskService/MaterialPoolService；新增参考图自动匹配（segment_material_match.md）、单分镜完成态... | 分镜, 视频工作流, AgentSDK, 文件化工作区, SSE |
+| 文件上传与会话资产管理 | [upload-and-assets.md](upload-and-assets.md) | 已完成（assets 管理线已删除） | backend/api/v1/uploads.py, UPLOAD_ROOT = static/uploads | 2026-09-19 初始创建; 2026-09-21 assets 路由整体删除（103 行）；_upload.py 删除、save_upload 内联进 uploads.py；main.py 收敛为 8 个 router；前端 assetApi 删除 | 文件上传, 后端API, 资产管理, SQLite, 静态文件 |
+| 视频创作工作流（视频会话与生成） | [video-workflow.md](video-workflow.md) | 已完成 | backend/api/v1/sessions.py, backend/core/workflows/video_workflow.py | 2026-09-19 初始创建; 2026-09-21 同步重构 — 生成链迁至 backend/core/workflows/video_workflow.py（617 行）；新增指定段生成/备份恢复/「导入到 ComfyUI」（UI 工作流写服务器）... | 后端API, 视频生成, ComfyUI, 会话管理, 前端页面 |

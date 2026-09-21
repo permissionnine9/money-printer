@@ -60,7 +60,7 @@ tags: 剧本工作流, 核心素材图, 素材库, 生图, AgentSDK, SQLite, 前
 
 ### 生成主流程（ScriptWorkflow.generate_lookbook）
 
-1. **前置校验**：`require_step_data(session_id, "episode_design")`（第 3 步未完成抛业务异常）；entity_ids 非空；勾选实体必须属于本会话（`store.list_entities` 对账，缺失抛 `实体不存在或不属于本会话`）；类型必须为 character/scene（否则抛 `仅人物/场景可生成定妆照，线索/伏笔不支持`）。
+1. **前置校验**：`require_step_data(session_id, "episode_design")`（第 3 步未完成抛业务异常）；entity_ids 非空；勾选实体必须属于本会话（`store.list_entities` 对账，缺失抛 `实体不存在或不属于本会话`）；类型必须为 character/scene（否则抛 `仅人物/场景可生成素材图，线索/伏笔不支持`）。
 2. **Agent 出 prompt**：`load_story_logic(session_id)[:1500]`（workspace_sections 服务，工作区文件优先，DB 老数据 fallback）；`self.prompts.render("lookbook_prompts", {story_logic, style_prompt, entities})` 渲染模板；经注入的 AgentStepService 单轮调用（LOOKBOOK_PROMPTS_SYSTEM，max_turns=2）；`extract_json_array(result.text)` 解析 JSON 数组。
 3. **缺漏兜底**：以勾选集为准，Agent 漏掉的实体用兜底 prompt（「名称+设定」）。
 4. **确定性生图（ImageTaskService.run_batch 统一状态机）**：
@@ -76,7 +76,7 @@ tags: 剧本工作流, 核心素材图, 素材库, 生图, AgentSDK, SQLite, 前
 
 ### 完成步骤（ScriptWorkflow.complete_lookbook）
 
-`ensure_can_execute(session_id, "lookbook_images")` 校验前置步骤链 → `save_step_result(session_id, "lookbook_images", {"completed": True}, success=True)`。无任何定妆照数量校验（数量校验只在前端按钮 disabled 层面）。
+`ensure_can_execute(session_id, "lookbook_images")` 校验前置步骤链 → `save_step_result(session_id, "lookbook_images", {"completed": True}, success=True)`。无任何素材图数量校验（数量校验只在前端按钮 disabled 层面）。
 
 ### Prompt 模板（backend/prompts/lookbook_prompts.md，2026-09-21 大改）
 
@@ -121,7 +121,7 @@ tags: 剧本工作流, 核心素材图, 素材库, 生图, AgentSDK, SQLite, 前
 
 ## 依赖与复用关系
 
-- 依赖: StepWorkflowBase（require_step_data/ensure_can_execute 步骤守卫，backend/core/agents/workflow_base.py）；run_agent/AgentRunOptions（backend/core/agent_sdk/wrapper.py）；PromptManager（backend/core/services/prompt_manager.py，渲染 backend/prompts/lookbook_prompts.md）；ImageService 工厂 build_image_service_from_model_config（backend/core/services/image_service.py，按「模型管理」配置构造）；start_agent_run/AgentRunRegistry（backend/deps.py + backend/core/agent_sdk/registry.py，异步 run + run_id）；WorkspaceStore（实体文件读写）；IMAGE_REQUEST_TIME_GAP（backend/core/config.py，12 秒提交间隔）；前端 antd（Card/Modal/Select/Image/Popconfirm 等）、usePolling（frontend/src/hooks/usePolling）、AgentRunProgress、useScriptSessionStore、imageSrc（frontend/src/utils/imageSrc.ts）
+- 依赖: StepWorkflowBase（require_step_data/ensure_can_execute 步骤守卫，backend/core/agents/workflow_base.py）；AgentStepService（backend/core/services/agent_step_service.py，agent 单轮调用模板）；PromptManager（backend/core/services/prompt_manager.py，渲染 backend/prompts/lookbook_prompts.md）；ImageService 工厂 build_image_service_from_model_config + ImageTaskService（生图状态机，backend/core/services/image_task_service.py）；run_agent_endpoint/AgentRunRegistry（backend/deps.py + backend/core/agent_sdk/registry.py，异步 run + run_id + 排队）；WorkspaceStore（实体文件读写）；IMAGE_REQUEST_TIME_GAP（backend/core/config.py，12 秒提交间隔）；前端 antd（Card/Modal/Select/Image/Popconfirm 等）、usePolling（frontend/src/hooks/usePolling）、AgentRunProgress（AgentRunDock 内）、useScriptSessionStore、imageSrc（frontend/src/utils/imageSrc.ts）
 - 被依赖: 核心素材图是后续分镜/视频工作流的视觉锚点——`backend/core/services/script_context_service.py` 的 `fetch_lookbook_images` 直查 `list_lookbook(task_status="completed")` 并以 `lookbook_{image_id}` 形态并入分镜素材池（image_type='lookbook'）；`backend/core/agents/storyboard.py` 将素材图作为独立素材组供分镜引用（素材池 ID 规则 `lookbook_lb_*`）；实体卡上下文对已有素材图的实体标注「已有素材图，勿重复生成」。实体 frontmatter 的 lookbook_image_id/path 引用主要供前端 StepLookbook 展示与迁移脚本使用
 - 可复用组件: ImageTaskService 生图状态机（run_batch/run_single）统一核心素材图批量/单张重生成/分集素材图三处；`_require_default_image_model` 前置校验被多条生图路由复用
 
@@ -130,7 +130,7 @@ tags: 剧本工作流, 核心素材图, 素材库, 生图, AgentSDK, SQLite, 前
 - **前后端批量能力不对齐**：后端 `generate_lookbook` 支持一次勾选多实体批量生成（entity_ids 列表 + 逐张间隔提交），但前端弹窗按单卡片触发、每次只传 `[entity.entity_id]` 一个实体；批量入口当前未在 UI 暴露。
 - **生图结果存内存缓存**：ImageService 的 OpenAI 协议为同步生成、结果缓存在实例 `_sync_results`；poll_i2i_task 的 timeout=180/poll_interval=5 形参保留兼容但未使用。服务重启后未轮询取回的任务结果丢失（DB 停在 processing）。
 - **失败不重试**：批量路径中单张提交失败/生成失败只置 task_status=failed 并记日志，不自动重试；重生成路径失败则抛错给 run 流。
-- **complete 无数量后端校验**：complete_lookbook 仅校验步骤链，不校验是否有定妆照；「至少一张」约束仅在前端按钮 disabled（直接调 API 可空完成）。
+- **complete 无数量后端校验**：complete_lookbook 仅校验步骤链，不校验是否有素材图；「至少一张」约束仅在前端按钮 disabled（直接调 API 可空完成）。
 - **重复生成产生多行**：同一实体重复生成会 insert 新行（旧行保留），前端展示按实体引用/最新行取；delete_lookbook 只删 DB 行，不清实体 frontmatter 引用（实体引用由下次生成成功覆盖）。
 - **prompt 风格统一性**：模板要求「本次生成的所有实体统一风格」；但分多次单实体生成时（当前前端形态），每次 Agent 独立判断风格，若用户未填 style_prompt 可能出现风格漂移——模板通过 story_logic 注入缓解但不强制跨批次一致。
 - **step 编号差异**：lookbook_prompts.md frontmatter 注释为 `step: 5`（prompt 管理器内含素材图等更多模板的排序），而工作流步骤名为第 4 步 lookbook_images，二者编号体系不同，勿混淆。

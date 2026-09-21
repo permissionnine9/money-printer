@@ -58,7 +58,7 @@ tags: AgentSDK, ClaudeSDKClient, AgentEvent, wrapper, 模型端点
 
 **典型调用方（backend/core/agents/）**
 
-- script_workflow.py：大纲生成/定妆照 prompt run_agent（max_turns=2、无 tools 纯文本输出）；分集设计 run_agent（mcp_servers={"script_design": ...} 进程内 MCP 写侧工具 + tools=READ_ONLY_TOOLS 读侧 + cwd=story_cwd + 轮次按集数估算上下限兜底）
+- script_workflow.py：大纲生成/核心素材图 prompt run_agent（max_turns=2、无 tools 纯文本输出）；分集设计 run_agent（mcp_servers={"script_design": ...} 进程内 MCP 写侧工具 + tools=READ_ONLY_TOOLS 读侧 + cwd=story_cwd + 轮次按集数估算上下限兜底）
 - storyboard.py：分镜大纲 run_agent（tools=READ_ONLY_TOOLS、cwd=story_cwd、max_turns=12，剧本目录内自主检索后输出 JSON）
 - cwd 来源：`WorkspaceStore.story_cwd(session_id)`（backend/core/persistence/workspace_store.py）返回剧本 story 根绝对路径；缺省 cwd 时子进程继承后端进程 cwd
 
@@ -71,7 +71,7 @@ tags: AgentSDK, ClaudeSDKClient, AgentEvent, wrapper, 模型端点
 - `backend/core/agent_sdk/registry.py` — AgentRunRegistry/RunHandle：后台 run（并发排队 MAX_CONCURRENT_RUNS=5）与 SSE 观流解耦；RunCoroFactory 签名 `(on_event, interrupt_event) -> Awaitable[dict]`
 - `backend/core/agent_sdk/__init__.py` — 包出口再导出 READ_ONLY_TOOLS/AgentRunOptions/run_agent/run_conversation/build_agent_env/sse_direct_response 等
 - `backend/core/services/agent_step_service.py` — AgentStepService.run 的 parse 回调：结构化产出的调用方解析侧
-- `backend/core/agents/script_workflow.py` — 构思对话 run_conversation、大纲/定妆照 prompt/分集设计 run_agent 调用方
+- `backend/core/agents/script_workflow.py` — 构思对话 run_conversation、大纲/核心素材图 prompt/分集设计 run_agent 调用方
 - `backend/core/agents/storyboard.py` — 分镜大纲/素材图/分镜提示词三处 run_agent（均 READ_ONLY_TOOLS + cwd，max_turns 分别 12/8/16）调用方
 - `backend/core/persistence/workspace_store.py` — story_cwd：run_agent 的 cwd 来源
 - `backend/core/persistence/model_manager.py` — 模型配置表 image_models（model_type='agent'）CRUD 与 get_default_model

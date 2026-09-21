@@ -26,7 +26,7 @@ tags: SessionManager, 步骤状态, 工作流, _success, 级联清空
 **步骤推进（save_step_result success=True）**
 
 1. 剧本第 1 步 — 两条完成路径：① `ideation_finalize`（`backend/core/agents/script_workflow.py`）由 LLM 收敛故事逻辑：story_logic 写工作区文件后 `save_step_result("story_ideation", ..., success=True)`；② `adopt_story_logic`：用户「采纳为故事逻辑」直接完成第 1 步，不经 LLM finalize 收敛。完成即 current_step 推进到 story_outline。对话轮次 `ideation_message` 不推进：首轮 `save_step_result(success=False)`（存 resume 句柄）、后续轮 `update_step_result`（保留原 `_success`、不动 current_step）
-2. 剧本第 2 步 — `generate_outline`：先 `clear_steps_after("story_outline")` + 工作区 `delete_story_content` + DB 定妆照/素材任务 `delete_script_data` 级联清下游，大纲写文件后 `save_step_result` 只存薄 envelope（指向 `01-outline/outline.md`）
+2. 剧本第 2 步 — `generate_outline`：先 `clear_steps_after("story_outline")` + 工作区 `delete_story_content` + DB 素材图/素材任务 `delete_script_data` 级联清下游，大纲写文件后 `save_step_result` 只存薄 envelope（指向 `01-outline/outline.md`）
 3. 剧本第 3 步 — `generate_episodes`：全量模式先级联清下游（clear_steps_after + 删工作区 + 删 DB），agent 经 MCP 工具逐集落库，集数校验通过后 `save_step_result("episode_design", success=True)`；单集重设计（`regenerate_episode_id` 非空）不推进不清理
 4. 剧本第 4 步 — `complete_lookbook`：手动确认（按需勾选无自然终点），`save_step_result("lookbook_images", {"completed": True}, success=True)`；此为最后一步，current_step 置 NULL
 5. 视频第 1 步 — `step_select_episode`（`backend/core/agents/workflow_v2.py`）：校验剧本会话 `episode_design` 已完成 + 分集存在 + `VideoParams` 合法后 `save_step_result(success=True)`（会话创建入口 `POST /api/v1/sessions/from-script` 同样校验剧本 episode_design 完成）
@@ -91,7 +91,7 @@ tags: SessionManager, 步骤状态, 工作流, _success, 级联清空
 - 两个 SessionManager 共用同一 db：`save_step_result` 校验 step_name 必须在本管理器 STEPS 内（非法抛 ValueError），跨工作流写会被拦，但 `get_all_step_results` 读侧不过滤（legacy 检测正利用旧步骤键的存在性）
 - 视频第 4 步是唯一「先落失败态再后台执行」的步骤：依赖 `_generating`/`_cancelled` 内嵌标志记录进度与取消请求；但 `_cancelled` 目前只写不读——后台生成链路（step_generate_videos → comfyui_service）无任何消费方，实际不会中断生成（原 `is_step_cancelled` 全库无调用点，该方法已删除）。后台任务亦无恢复机制，进程重启后 DB 可能永久停在 _generating=True
 - `save_aux_state` 复用 step_results 表存辅助状态（如 video_workflow 的 comfyui_import 导入状态，经 `_get_imported_state` 读取），但不推进状态机、不影响门禁——辅助状态与步骤完成态共用一张表靠键名区分
-- `clear_steps_after` 只清 DB step_results 与 status，不清工作区文件/DB 定妆照——各调用方需自行组合 `delete_story_content` + `delete_script_data`（script_workflow 已组合；storyboard 靠 write_storyboard 清目录重写）
+- `clear_steps_after` 只清 DB step_results 与 status，不清工作区文件/DB 核心素材图行——各调用方需自行组合 `delete_story_content` + `delete_script_data`（script_workflow 已组合；storyboard 靠 write_storyboard 清目录重写）
 - 人工编辑（update_step_result）设计为「不推进不重置」，但视频侧导图编辑例外：分镜变化会主动回退 segment_management 完成态
 - 单集重设计（regenerate_episode_id）与单张定妆照重生成均不推进步骤，只覆写产物
 - legacy 会话（旧 5/7 步）仅从列表隐藏，GET 详情仍可访问；`_get_video_segments` 优先读旧 generate_segment_scripts 结果做兜底

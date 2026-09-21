@@ -58,7 +58,7 @@ tags: 剧本工作流, 后端API, 前端页面, AgentSDK, SSE, workspace文件�
 | 路由 | 形态 | 行为 |
 |------|------|------|
 | POST /script-sessions | - | 创建（uuid4 会话）+ 即刻 `ensure_story` 建 workspace story 树 |
-| GET /script-sessions | - | 列表（title 经 workspace_projection.script_title，文件 outline.title 优先） |
+| GET /script-sessions | - | 列表（title 经 step_payload.script_title，文件 outline.title 优先） |
 | GET/DELETE /script-sessions/{sid} | - | 详情（step_results 经投影）/ 删除（session + script 数据 + story 树三处同删） |
 | POST /{sid}/ideation/message | A | 一轮构思对话（SSE 直跑，resume agent 会话） |
 | POST /{sid}/ideation/finalize | A | 让 AI 收敛故事逻辑（同 resume 会话），完成第 1 步 |

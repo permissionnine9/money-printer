@@ -10,7 +10,7 @@ tags: SSE, 事件流, 断线重连, AgentRun
 
 ## 逻辑概述
 
-耗时 agent 生成任务不占用 HTTP 请求同步执行：生成类 POST 接口经 `backend/deps.py` 的 `start_agent_run(label, factory)`（返回 `{"success": True, "data": {"run_id": ...}}`）调 `get_run_registry().start(label, factory)`，立即返回 12 位 hex `run_id`。run 生命周期 `status: queued → running → done`：`start()` 后 run 不一定立即执行——并发超限时先入队，业务 factory 由常驻 worker 协程领取后执行。执行期间 ClaudeSDKClient 流式消息归一为 `AgentEvent`（`backend/core/agent_sdk/events.py`），经 `RunHandle.emit` 写入每 run 独立的 `deque` 事件缓冲（maxlen=5000），`seq` 从 1 起单调递增（`_seq` 初始 0，emit 先自增再入缓冲）。
+耗时 agent 生成任务不占用 HTTP 请求同步执行：生成类 POST 接口经 `backend/deps.py` 的 `run_agent_endpoint(label, factory)`（原 `start_agent_run` 改名，签名不变；返回 `{"success": True, "data": {"run_id": ...}}`）调 `get_run_registry().start(label, factory)`，立即返回 12 位 hex `run_id`。run 生命周期 `status: queued → running → done`：`start()` 后 run 不一定立即执行——并发超限时先入队，业务 factory 由常驻 worker 协程领取后执行。执行期间 ClaudeSDKClient 流式消息归一为 `AgentEvent`（`backend/core/agent_sdk/events.py`），经 `RunHandle.emit` 写入每 run 独立的 `deque` 事件缓冲（maxlen=5000），`seq` 从 1 起单调递增（`_seq` 初始 0，emit 先自增再入缓冲）。
 
 观流走 `GET /api/v1/agent-runs/{run_id}/events?seq=N`（`backend/api/v1/agent_runs.py`，APIRouter 经 main.py include_router 挂载于 `/api/v1/agent-runs`）：`seq` 为客户端已消费的最大事件序号，用于断线重连增量续传，默认 0 即全量回放。响应为 `StreamingResponse(gen(), media_type='text/event-stream')`，事件序列固定为 `connected` → 逐业务事件（dict 已含 seq，自然含排队期的 `queued` 与领取时的 `started`）→ `done` 终态 → `data: [DONE]` 哨兵；所有 JSON `ensure_ascii=False`，行以 `\n\n` 结尾。
 
@@ -20,7 +20,7 @@ tags: SSE, 事件流, 断线重连, AgentRun
 
 **生成与观流主链路**
 
-1. 启动 run — 前端调生成类 POST 接口（如 `/steps/{session_id}/storyboard-outline/generate`、`/script-sessions/{session_id}/outline/generate`）→ 定义 `factory(on_event, interrupt)` 后调 `start_agent_run(label, factory)`（`backend/deps.py`）→ `AgentRunRegistry.start(label, factory)`：先 `_cleanup()`，生成 `run_id=uuid.uuid4().hex[:12]`（12 位 hex），创建 RunHandle（status='queued'）存入 `_runs` 并立即返回 run_id（`handle.task` 字段已删除）
+1. 启动 run — 前端调生成类 POST 接口（如 `/steps/{session_id}/storyboard-outline/generate`、`/script-sessions/{session_id}/outline/generate`）→ 定义 `factory(on_event, interrupt)` 后调 `run_agent_endpoint(label, factory)`（`backend/deps.py`，原 start_agent_run 改名）→ `AgentRunRegistry.start(label, factory)`：先 `_cleanup()`，生成 `run_id=uuid.uuid4().hex[:12]`（12 位 hex），创建 RunHandle（status='queued'）存入 `_runs` 并立即返回 run_id（`handle.task` 字段已删除）
 2. 领取执行 — worker 协程领取后 `_run(handle, factory)` await `factory(handle.emit, handle.interrupt_event)`（factory 签名 `(on_event, interrupt_event) -> Awaitable[dict]`）；factory 内调 wrapper 的 run_agent/run_conversation，ClaudeSDKClient 流式消息归一为 AgentEvent（构造处见 `backend/core/agent_sdk/wrapper.py`：prompt 事件在 LLM 调用前流出最终渲染提示词 system_prompt/user_prompt/model；流式 delta → thinking/text_delta；完整 assistant 消息与流式增量去重后补发；tool_use/tool_result 中 result_preview 按 `text[:50000]` 截断）
 3. 事件入缓冲 — `RunHandle.emit(event)`：`_seq` 自增 1 → `events.append((seq, event))`；有运行 loop 则 `loop.create_task(_notify())` 持 cond 锁 `notify_all`；无运行 loop（RuntimeError）直接 return（事件仍入 deque，靠消费侧轮询/后续 notify 兜底）
 4. 建立观流 — 前端 GET `/api/v1/agent-runs/${runId}/events`（初始 lastSeq=0 不带 seq 参数=全量回放）→ `stream_run_events`：run 不存在时 `HTTPException 404 detail='run 不存在或已过期: {run_id}'`，否则返回 `StreamingResponse(gen(), media_type='text/event-stream')`
@@ -67,7 +67,7 @@ tags: SSE, 事件流, 断线重连, AgentRun
 
 ## 涉及代码
 
-- `backend/deps.py` — `start_agent_run(label, factory)`：统一提交 agent 运行到 registry，返回 `{"success": True, "data": {"run_id": ...}}`
+- `backend/deps.py` — `run_agent_endpoint(label, factory)`（原 start_agent_run 改名）：统一提交 agent 运行到 registry，返回 `{"success": True, "data": {"run_id": ...}}`
 - `backend/api/v1/agent_runs.py` — SSE 观流端点（APIRouter 经 main.py include_router 挂载于 `/api/v1/agent-runs`）：`GET /{run_id}/events`（stream_run_events + gen 事件序列）、`GET /{run_id}`（get_run 轮询兜底，返回 `{'success':True,'data':handle.to_dict()}`，to_dict 含 run_id/label/status/done/success/error/result/last_seq，404 同上）、`POST /{run_id}/cancel`（cancel_run）
 - `backend/core/agent_sdk/registry.py` — `AgentRunRegistry`/`RunHandle`：start/_run/emit/stream/cancel/get/_cleanup；`MAX_CONCURRENT_RUNS=5`（并发上限，registry.py:22）+ `_pending` deque + 5 个常驻 worker 协程（FIFO 领取）；run status `queued→running→done`；`MAX_EVENT_BUFFER=5000`（每 run 事件缓冲 deque maxlen）、`MAX_RUNS=200`（注册表容量）；模块级 `_registry` + `get_run_registry()` 惰性创建进程内单例
 - `backend/core/agent_sdk/events.py` — `@dataclass AgentEvent`（type/delta/id/tool/input/result_preview/text/session_id/usage/message/system_prompt/user_prompt/model/queue_position，字段全带默认值，input/usage 用 `field(default_factory=dict)`，`queue_position: int = -1`）；type 取值：thinking/text_delta/tool_use/tool_result/result/error/prompt/queued/started；`to_dict(seq)`（seq 非 None 加 'seq'，其余字段仅非空写入，queue_position>=0 时输出）、`to_sse(seq)`（agent_runs.py 的 gen() 未用此方法，而是自行 json.dumps(to_dict 结果)）
@@ -84,7 +84,7 @@ tags: SSE, 事件流, 断线重连, AgentRun
 ## 相关功能
 
 - 构思对话（StepIdeationChat，POST 直跑 SSE：`/script-sessions/{session_id}/ideation/message`、`/script-sessions/{session_id}/ideation/finalize`）
-- 后台生成类接口（经 `backend/deps.py` 的 `start_agent_run` 启动 agent run 的接口，如分镜大纲 `/steps/{session_id}/storyboard-outline/generate`、脚本大纲 `/script-sessions/{session_id}/outline/generate` 等）
+- 后台生成类接口（经 `backend/deps.py` 的 `run_agent_endpoint` 启动 agent run 的接口，如分镜大纲 `/steps/{session_id}/storyboard-outline/generate`、脚本大纲 `/script-sessions/{session_id}/outline/generate` 等）
 
 ## 注意事项
 
