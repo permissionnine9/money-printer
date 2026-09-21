@@ -9,6 +9,7 @@ import {
   FileTextOutlined,
   FormOutlined,
   CloudServerOutlined,
+  PictureOutlined,
 } from '@ant-design/icons'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { SessionSider } from '@/components/common/SessionSider'
@@ -146,6 +147,7 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   const navItems = [
     { key: '/script', icon: <FormOutlined />, label: '创作剧本' },
     { key: '/', icon: <VideoCameraOutlined />, label: '视频生成工作流' },
+    { key: '/materials', icon: <PictureOutlined />, label: '素材管理' },
     { key: '/models', icon: <AppstoreOutlined />, label: '模型管理' },
     { key: '/prompts', icon: <FileTextOutlined />, label: '提示词管理' },
   ]

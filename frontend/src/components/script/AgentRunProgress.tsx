@@ -3,10 +3,11 @@
  */
 import React, { useEffect, useRef, useState } from 'react'
 import { Button, Collapse, Space, Spin, Typography, message } from 'antd'
-import { CheckCircleOutlined, CloseCircleOutlined, EyeOutlined, StopOutlined } from '@ant-design/icons'
+import { CheckCircleOutlined, ClockCircleOutlined, CloseCircleOutlined, EyeOutlined, StopOutlined } from '@ant-design/icons'
 import type { AgentEvent } from '@/types'
 import { agentRunApi } from '@/api/client'
 import { fetchSSE } from '@/api/sse'
+import { useAgentRunStore } from '@/stores/agentRunStore'
 import { PromptViewerModal } from '@/components/common'
 
 const { Text } = Typography
@@ -25,7 +26,8 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
   const [label, setLabel] = useState('')
   const [thinking, setThinking] = useState('')
   const [text, setText] = useState('')
-  const [status, setStatus] = useState<'running' | 'success' | 'error'>('running')
+  const [status, setStatus] = useState<'queued' | 'running' | 'success' | 'error'>('queued')
+  const [queuePosition, setQueuePosition] = useState(-1)
   const [errorMsg, setErrorMsg] = useState('')
   const [cancelling, setCancelling] = useState(false)
   const [prompt, setPrompt] = useState<{ systemPrompt: string; userPrompt: string; model: string } | null>(null)
@@ -37,11 +39,12 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
   }, [onDone])
 
   useEffect(() => {
-    // 新 run：重置展示状态
+    // 新 run：重置展示状态（初始 queued，started 事件后转 running）
     setLabel('')
     setThinking('')
     setText('')
-    setStatus('running')
+    setStatus('queued')
+    setQueuePosition(-1)
     setErrorMsg('')
     setCancelling(false)
     setPrompt(null)
@@ -67,6 +70,14 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
           setLabel(ev.label || '')
           retries = 0
           break
+        case 'queued':
+          // 入队回放/实时（幂等）：断线重连重复收到不影响状态
+          if (ev.queue_position !== undefined) setQueuePosition(ev.queue_position)
+          break
+        case 'started':
+          setStatus('running')
+          useAgentRunStore.getState().markRunRunning(runId)
+          break
         case 'prompt':
           // 赋值替换（幂等）：断线重连回放不会重复累积
           setPrompt({
@@ -88,6 +99,8 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
           if (ev.text) setText(ev.text)
           break
         case 'done':
+          // fail()（error 事件路径）已合成过终态通知，跳过防重复 onDone（双 toast）
+          if (finished) break
           finished = true
           if (ev.success) {
             setStatus('success')
@@ -148,7 +161,17 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
     }
   }
 
-  const statusText = status === 'running' ? '进行中…' : status === 'success' ? '已完成' : '失败'
+  const inFlight = status === 'running' || status === 'queued'
+  const statusText =
+    status === 'queued'
+      ? queuePosition > 0
+        ? `排队中（前面还有 ${queuePosition} 个任务）…`
+        : '排队中…'
+      : status === 'running'
+        ? '进行中…'
+        : status === 'success'
+          ? '已完成'
+          : '失败'
 
   return (
     <div style={{ border: '1px solid #f0f0f0', borderRadius: 8, padding: '12px 16px', background: '#fafafa' }}>
@@ -158,13 +181,14 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
             查看提示词
           </Button>
         )}
-          {status === 'running' && (
+          {inFlight && (
             <Button size="small" danger icon={<StopOutlined />} loading={cancelling} onClick={handleCancel}>
               取消
             </Button>
           )}
         </Space>
         <Space style={{width:'100%'}}>
+          {status === 'queued' && <ClockCircleOutlined style={{ color: '#faad14' }} />}
           {status === 'running' && <Spin size="small" />}
           {status === 'success' && <CheckCircleOutlined style={{ color: '#52c41a' }} />}
           {status === 'error' && <CloseCircleOutlined style={{ color: '#ff4d4f' }} />}

@@ -1,4 +1,5 @@
 export { LazyVideo } from './LazyVideo'
 export { MindmapView } from './MindmapView'
 export { PromptViewerModal } from './PromptViewerModal'
+export { RunTaskBanner } from './RunTaskBanner'
 export { SessionSider } from './SessionSider'

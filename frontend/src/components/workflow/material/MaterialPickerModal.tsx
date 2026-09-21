@@ -25,7 +25,7 @@ export interface MaterialPickerModalProps {
   onConfirm: (items: PoolMaterial[]) => void
 }
 
-const MaterialGrid: React.FC<{
+export const MaterialGrid: React.FC<{
   groups: { key: string; label: string; materials: PoolMaterial[] }[]
   selected: PoolMaterial[]
   onItemClick: (m: PoolMaterial) => void

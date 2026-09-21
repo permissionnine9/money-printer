@@ -106,6 +106,25 @@ export interface LookbookImage {
   updated_at: string
 }
 
+// 素材库条目（跨剧本会话/本剧本历史的已完成定妆照）
+export interface LookbookLibraryItem {
+  image_id: string
+  image_path: string
+  description: string
+  entity_id: string
+  entity_name: string // 空串 = 源实体已不存在（重建/删除）
+  entity_exists: boolean
+  created_at: string
+}
+
+export interface LookbookLibraryGroup {
+  key: string // 'current' | 源 session_id
+  label: string
+  session_id: string
+  is_current: boolean
+  materials: LookbookLibraryItem[]
+}
+
 // 构思对话消息（刷新还原用副本）
 export interface IdeationMessage {
   role: 'user' | 'assistant'
@@ -128,7 +147,7 @@ export interface ScriptSessionDetail {
 // ==================== Agent 运行事件（SSE） ====================
 
 export interface AgentEvent {
-  type: 'thinking' | 'text_delta' | 'tool_use' | 'tool_result' | 'result' | 'error' | 'connected' | 'final' | 'done' | 'prompt'
+  type: 'thinking' | 'text_delta' | 'tool_use' | 'tool_result' | 'result' | 'error' | 'connected' | 'final' | 'done' | 'prompt' | 'queued' | 'started'
   seq?: number
   delta?: string
   id?: string
@@ -141,6 +160,8 @@ export interface AgentEvent {
   message?: string
   label?: string
   last_seq?: number
+  // queued 事件（入队时前面待执行的任务数）
+  queue_position?: number
   // prompt 事件（本次 run 最终渲染的提示词）
   system_prompt?: string
   user_prompt?: string
@@ -282,4 +303,72 @@ export interface StepResponse {
   success: boolean
   message: string
   data?: any
+}
+
+// ==================== 素材管理 ====================
+
+/** 生成图素材的引用位置（实体 / 分镜） */
+export interface MaterialReference {
+  ref_type: 'entity' | 'segment'
+  script_session_id: string
+  script_title: string
+  entity_id?: string
+  entity_name?: string
+  episode_id?: string
+  segment_index?: number
+  segment_title?: string
+}
+
+/** 视频素材的引用位置 */
+export interface VideoReference {
+  video_session_id: string
+  script_title: string
+}
+
+/** 生成图素材条目（定妆照 / 分集素材图） */
+export interface GeneratedMaterialItem {
+  image_id: string
+  image_path: string
+  is_remote: boolean
+  description: string
+  script_session_id: string
+  script_title: string
+  created_at: string
+  size: number
+  reference_count: number
+  references: MaterialReference[]
+  entity_id?: string // 定妆照所属实体
+  episode_id?: string // 分集素材图所属分集
+  title?: string // 分集素材图标题
+}
+
+/** 文件型素材条目（上传参考图 / 视频） */
+export interface FileMaterialItem {
+  path: string
+  name: string
+  size: number
+  mtime: number
+  reference_count: number
+  references?: VideoReference[]
+  script_title?: string // 视频归属剧本（可查到时）
+}
+
+export interface MaterialListResponse {
+  kind: string
+  items: GeneratedMaterialItem[] | FileMaterialItem[]
+  total: number
+}
+
+/** 孤儿文件条目（无 DB 记录且无引用的磁盘文件） */
+export interface OrphanFileItem {
+  path: string
+  kind: 'image' | 'video' | 'upload'
+  size: number
+  mtime: number
+}
+
+export interface OrphanScanResponse {
+  items: OrphanFileItem[]
+  total: number
+  total_size: number
 }

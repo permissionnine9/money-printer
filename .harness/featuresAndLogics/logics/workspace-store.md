@@ -1,12 +1,12 @@
 ---
 name: 文件化工作区存储逻辑
-摘要: WorkspaceStore 以 markdown+frontmatter 文件树作为剧本/分镜产物权威源，原子写+双锁并发防护，返回 dict 与旧 SQLite row 形状一致
+摘要: WorkspaceStore 以 markdown+frontmatter 文件树作为剧本/分镜产物权威源，原子写+双锁并发防护，返回 dict 与旧 SQLite row 形状一致；ScriptManager 影子表已退役
 tags: WorkspaceStore, workspace, frontmatter, markdown, 持久化, 并发锁, MAP.md
 ---
 
 # 文件化工作区存储逻辑
 
-**最后更新:** 2026-09-19
+**最后更新:** 2026-09-21
 
 ## 逻辑概述
 
@@ -18,7 +18,7 @@ tags: WorkspaceStore, workspace, frontmatter, markdown, 持久化, 并发锁, MA
 2. **并发防护** — 原子写（tmp + os.replace）+ per-story 可重入线程锁（防并发 lost update）；实体 ID 分配另加进程级全局锁（ID 跨 story 全局唯一）
 3. **锚点定位** — story 目录定位优先读 sessions 表 workspace_path 锚点，失效再 glob `*-{会话id前8}` 兜底
 
-权威源切换历史：script_entities / episodes 两张历史表结构保留用于迁移对账，读写已切至 WorkspaceStore（见 `backend/core/persistence/script_manager.py` 模块注释）；存量数据迁移用 `backend/scripts/migrate_db_to_workspace.py`（--export/--verify/--cutover）。
+权威源切换历史：script_entities / episodes 两张影子表**已退役**——ScriptManager 删除了这两张表的 DDL 与全部读写，文件为唯一权威源；仅 `backend/scripts/migrate_db_to_workspace.py`（--export/--verify/--cutover）在旧库中维护它们用于迁移对账。ScriptManager 现只保留 lookbook_images / episode_material_images 两张生图任务状态机表（核心素材图/分集素材图），并附素材库配套方法：`list_completed_lookbooks()`（全局 completed 且 image_path 非空，跨剧本复用）、`insert_lookbook(..., image_path, meta)`（可直接落 completed 行）、`delete_script_data(keep_completed_lookbooks)`。
 
 ## 关键流程
 
@@ -47,7 +47,8 @@ workspace/
 3. `rename_story(sid, new_title)` — 剧名确定/变更时正名；目标目录已存在则抛 WorkspaceStoreError；改名后同步锚点与 MAP
 4. `write_outline` / `update_outline` — 落盘大纲时取 mindmap 根标题（`_mindmap_title` 解析首个 `# ` 行），目录名与剧名不一致即触发 rename_story 一次性正名；update_outline 强制 edited=True 且保留原 requirements
 5. `story_title` / `story_cwd` — 前者为目录名去掉 -sid8 后缀的展示名；后者返回 story 根绝对路径（resolve），是 agent run_agent 的 cwd 来源（消费方：script_workflow.py、storyboard.py）
-6. `delete_story(sid)` — shutil.rmtree 整棵树并清锚点（删除剧本会话时调用）
+6. `read_story_title` / `set_story_title`（新增）— 剧名读写，权威源为 story-logic.md frontmatter 的 title/title_source：`read_story_title` 供第 1 步阶段读取（大纲生成后展示名以 outline title 为准，优先级见 step_payload.script_title）；`set_story_title` 手动设定剧名（title_source='manual' 锁定，AI 收敛不再覆盖；置空则解除锁定），先经 `ensure_story` 定位（缺 story 时按 ensure_story 模式建树并回写 workspace_path 锚点），story 锁内保留正文整文件重写 frontmatter；不改目录名（目录正名仍走 write_outline 的 rename_story）
+7. `delete_story(sid)` — shutil.rmtree 整棵树并清锚点（删除剧本会话时调用）
 
 **通用文档读写原语**
 
@@ -69,14 +70,17 @@ workspace/
 2. `next_entity_id` — 仅预览用途；`_scan_next_entity_id` 在 `_ENTITY_ID_LOCK`（进程级，因 per-story 锁保护不到跨会话并发）内跨全工作区 glob `*/03-entities/{prefix}_*.md` 取 MAX+1，格式 `{prefix}_{n:03d}`
 3. `upsert_entity` — 签名与旧 ScriptManager.upsert_entity 一致；entity_id 指定但文件不存在默认报错（agent 自纠），create_if_missing=True 允许按给定 ID 直接新建（DB→文件迁移路径）；新建时 ID 分配与落盘在同一 `_ENTITY_ID_LOCK + story 锁` 内原子完成（防跨会话并发撞号）；meta 缺省回落旧文件的 meta
 4. 读写删均限定本 story（`_find_entity_file` 只在本会话实体目录内 glob——ID 全局唯一但写/删不得跨会话）；list_entities 排序与旧 DB 一致（entity_type ASC, entity_id ASC）
-5. `set_entity_lookbook` — 只回写 lookbook_image_id/path 引用到 frontmatter（定妆照任务本体仍在 DB）
+5. `entity_references`（新增）— 引用反查：该实体在全部分集中的引用方式（人物/场景 → 出场，即命中 character_ids/scene_ids；线索/伏笔 → 各集 refs 中该实体的 action 值），返回 `[{episode_id, title, actions}]`；实体不存在或不属于该会话返回 None
+6. `delete_entity_unreferenced`（新增）— 仅无引用实体可安全删除：同一 story 锁内校验无分集反向引用（character_ids/scene_ids/clue_refs/foreshadow_refs 四类合并查）后删文件，消除「先校验后删除」的 TOCTOU 竞态；被引用 raise ValueError（提示先移除引用再删除），不存在返回 False
+7. `set_entity_lookbook` — 只回写 lookbook_image_id/path 引用到 frontmatter（核心素材图任务本体仍在 DB）
 
 **分集设计与级联清理**
 
 1. `upsert_episode` — 校验 `ep_NN` 形态后整文件覆写；meta 缺省回落旧值、edited 保留旧值、created_at 保留旧值
 2. `update_episode_fields` — 人工编辑部分字段（allowed 集合：title/logline/conflict_chain/causality_chain/ending_summary/story_progress/character_ids/scene_ids/clue_refs/foreshadow_refs），title 变更联动文件名（复用 _replace_doc_file），edited=True
-3. `delete_story_content` — 大纲重生成的级联清理：清空 02-episodes 与 03-entities 全部 .md 返回计数；**04-storyboards 保留**（视频会话数据不因剧本侧操作被删，与旧行为一致）；定妆照/素材图任务表仍在 DB，由调用方另行清理
-4. `delete_episode` — 按 episode_id glob 删文件
+3. `delete_last_episode`（新增）— 删末集（分集重设计自纠用）：同一 story 锁内校验「只能删最后一集」（保持集号连续），非最后一集 raise ValueError，不存在返回 False
+4. `delete_story_content` — 大纲重生成的级联清理：清空 02-episodes 与 03-entities 全部 .md 返回计数；**04-storyboards 保留**（视频会话数据不因剧本侧操作被删，与旧行为一致）；核心素材图/素材图任务表仍在 DB，由调用方另行清理
+5. `delete_episode` — 按 episode_id glob 删文件
 
 **分镜（视频工作流产物）**
 
@@ -87,6 +91,10 @@ workspace/
 5. `update_segment_fields` — 单分镜部分更新（title/outline/mode/overlap/duration/prompt/reference_images），整文件重写并置 edited=True
 6. `episode_path` / `segment_path` — 返回分集/分镜文件绝对路径供 agent prompt 注入（消费方：storyboard.py 分镜大纲必读分集设计、上一分镜衔接）
 7. `read_storyboard` — 组回旧 step_results.storyboard_outline.result_data 形状（mindmap/edited/segments/segment_count），segments 按 index 排序
+
+**级联清理边界（上层 regeneration.py）**
+
+- `cascade_regenerate`（backend/core/services/regeneration.py）= `store.delete_story_content(session_id)` + `scm.delete_script_data(session_id, keep_completed_lookbooks=True)`：delete_story_content 语义不变（清 02-episodes/03-entities，04-storyboards 保留）；DB 侧清理**保留已完成且有图的核心素材图行**（进素材库供跨剧本复用），未完成/失败行仍删除（避免前端死轮询），分集素材图两种模式都全删（与集号强绑定）。
 
 **MAP.md 渲染与 Agent 入口**
 
@@ -103,22 +111,27 @@ workspace/
 
 - `backend/core/persistence/workspace_store.py` — WorkspaceStore 全部读写；WorkspaceStoreError（继承 ValueError 以复用 API/MCP 层既有捕获）；EPISODE_ID_PATTERN/ENTITY_ID_PATTERN
 - `backend/core/persistence/session_manager.py` — sessions 表 workspace_path 锚点列与 set_workspace_path/get_session
-- `backend/core/persistence/script_manager.py` — 生图任务状态机两张表保留；实体/分集读写已切至 WorkspaceStore
+- `backend/core/persistence/script_manager.py` — 仅保留生图任务状态机两张表（lookbook_images / episode_material_images）+ 素材库配套（list_completed_lookbooks / insert_lookbook(image_path, meta) / delete_script_data(keep_completed_lookbooks)）；episodes/script_entities 影子表已退役（删 DDL 与读写）
 - `backend/core/config.py` — WORKSPACE_DIR（项目根 workspace/，import 时即 mkdir）
 - `backend/core/utils/image_store.py` — sanitize_name（目录/文件名净化）
 - `backend/deps.py` — get_workspace_store()（注入 session_manager=get_script_session_manager() 的单例工厂）
-- `backend/core/services/workspace_projection.py` — 文件 + DB 薄 envelope 投影回旧 step_results JSON 形状（script_step_results/script_title/video_step_results）
-- `backend/api/v1/script_sessions.py` — 剧本会话 API（ensure_story/get_episode/list_episodes/upsert_entity/delete_story 等 + ID pattern 校验）
+- `backend/core/services/step_payload.py` — 投影读侧（替代已删除的 workspace_projection.py）：script_step_results / video_step_results（注入 comfyui_import 辅助状态）/ script_title（outline title 优先，回落 read_story_title）；无 DB 旧数据 fallback
+- `backend/core/services/workspace_sections.py` — 共享装配段消费方（agent_entry / episode_path / read_story_logic / read_outline / story_dir）
+- `backend/core/services/lookbook_library_service.py` — 素材库（消费 list_completed_lookbooks / list_entities / step_payload.script_title，跨剧本复用已完成核心素材图）
+- `backend/core/services/regeneration.py` — cascade_regenerate 级联清理（delete_story_content + delete_script_data(keep_completed_lookbooks=True)）
+- `backend/api/v1/script_sessions.py` — 剧本会话 API（ensure_story/get_episode/list_episodes/upsert_entity/delete_entity_unreferenced/delete_last_episode/set_story_title 等 + ID pattern 校验）
 - `backend/api/v1/sessions.py` — 视频会话 API（WorkspaceStoreError 捕获、video_step_results 投影）
 - `backend/core/agents/script_workflow.py` — agent_entry/story_cwd 消费方（大纲、分集设计）
 - `backend/core/agents/storyboard.py` — agent_entry/episode_path/segment_path/story_cwd 消费方（分镜）
-- `backend/scripts/migrate_db_to_workspace.py` — 存量迁移 --export/--verify/--cutover（幂等导出、逐键对账、切换清表）
+- `backend/scripts/migrate_db_to_workspace.py` — 存量迁移 --export/--verify/--cutover（幂等导出、逐键对账、切换清表）；影子表退役后仅此脚本维护旧表
+- `tests/manual/test_workspace_store.py` — 回归防线（覆盖新方法的锁/校验语义）；`tests/manual/test_phase1_data.py` — 已改为文件化架构（实体/分集读写走 WorkspaceStore 断言）
 
 ## 相关功能
 
 - 剧本工作流（构思/大纲/分集设计，见 features/script-workflow.md）
 - 分镜工作流（分镜大纲/细分镜，见 features/storyboard-workflow.md）
-- 实体管理（实体卡/定妆照引用，见 features/entity-management.md）
+- 实体管理（实体卡/核心素材图引用，见 features/entity-management.md）
+- 素材库（已完成核心素材图跨剧本复用，见 logics/image-generation-service.md）
 - Claude Agent SDK 封装逻辑（story_cwd 提供 run_agent 的 cwd、agent_entry 提供 prompt 注入，见 logics/agent-sdk-wrapper.md）
 
 ## 注意事项
@@ -127,16 +140,19 @@ workspace/
 - 实体 ID 全局唯一（跨 story 分配）但读写删限定本 story：跨会话传错 ID 会得到 None/报错而非命中他story 文件
 - per-story 锁是 RLock（可重入）：公开方法会嵌套调用（write_outline → rename_story），换成普通 Lock 会自死锁
 - `_ENTITY_ID_LOCK` 是进程级锁且只在新建路径上与 story 锁同持（锁序恒定 _ENTITY_ID_LOCK → story lock），跨会话并发新建实体不会撞号
+- 删实体优先走 `delete_entity_unreferenced`（同锁内校验+删除）；先 `entity_references` 反查再裸删会引入校验-删除 TOCTOU 窗口
 - 04-storyboards 在 delete_story_content（大纲重生成）中刻意保留；删除剧本会话走 delete_story 才整树删除
-- 定妆照/素材图任务本体在 DB（ScriptManager 两张任务表），实体文件只存 lookbook_image_id/path 引用——删实体文件不会清理任务记录
+- 核心素材图/素材图任务本体在 DB（ScriptManager 两张任务表），实体文件只存 lookbook_image_id/path 引用——删实体文件不会清理任务记录；级联清理经 delete_script_data(keep_completed_lookbooks=True) 保留已完成素材进素材库
 - 正文小节转义为双射往返，但只处理 `## ` 及以上行首标题；若 LLM 输出其他定界符形态（如正文里伪造 `## 梗概`）会被误切分——字段值渲染前已统一转义，风险仅在人工直接编辑文件破坏结构时出现
 - 锚点失效（目录被外部改名/移动）自动回退 glob 兜底，但目录名必须保留 `-{sid前8}` 后缀否则兜底也找不到
 - 原子写仅覆盖单文件：多文件操作（write_storyboard 整体重写）在 story 锁内串行执行，非事务性——中途崩溃可能留下半成品 vs 目录，重生成幂等覆盖
-- migrate 脚本仅在 cutover 前可用；cutover 后 DB 内容行已清、文件为唯一权威源；--verify 不对比时间戳（时间戳不保真）
+- 影子表退役后 DB 中 episodes/script_entities 仅存在于未迁移的旧库，且代码不再读写：存量数据只能经 migrate_db_to_workspace.py（--export/--verify/--cutover）对账迁移；--verify 不对比时间戳（时间戳不保真）
 - next_entity_id 仅预览用途（glob MAX+1 非原子），并发安全的新建必须走 upsert_entity 的空 ID 路径
+- 测试防线：tests/manual/test_workspace_store.py 为回归主力（新方法 delete_entity_unreferenced/delete_last_episode/set_story_title 等的锁与校验语义）；test_phase1_data.py 已改为文件化架构断言（实体/分集读写走 WorkspaceStore）
 
 ## 迭代记录
 
 | 日期 | 变更说明 |
 |------|---------|
 | 2026-09-19 | 初始创建 — 基于源码分析生成，覆盖目录树规范/定位与生命周期/读写原语/转义机制/实体注册表/分集/分镜/MAP 渲染/ID 校验 |
+| 2026-09-21 | 新方法 + 影子表退役 — 新增 read_story_title/set_story_title（剧名读写，set 经 ensure_story 模式联动锚点回写、manual 锁定）、entity_references/delete_entity_unreferenced（引用反查 + 同锁内无引用校验删除，消 TOCTOU）、delete_last_episode（只删末集保持集号连续）；ScriptManager 影子表彻底退役（删 DDL 与读写，仅 migrate_db_to_workspace.py 维护对账），保留两张生图任务表 + 素材库配套；级联清理补上层 cascade_regenerate 的 delete_script_data(keep_completed_lookbooks=True)；投影读侧 workspace_projection.py → step_payload.py、补 workspace_sections/lookbook_library_service/regeneration 引用；测试防线更新（test_phase1_data.py 已文件化） |

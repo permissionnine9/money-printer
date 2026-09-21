@@ -3,7 +3,7 @@
 1. story_ideation  故事构思：多轮对话盘问（Agent SDK resume 多轮），finalize 收敛故事逻辑
 2. story_outline   故事大纲：单次 agent run 产出 markmap markdown
 3. episode_design  分集设计：agent 通过进程内 MCP 工具注册全局实体并逐集落库（增量可见）
-4. lookbook_images 定妆照：agent 出英文 prompt + 确定性生图（复用 ImageService）
+4. lookbook_images 定妆照：agent 出中文 prompt + 确定性生图（复用 ImageService）
 """
 import asyncio
 import json
@@ -617,7 +617,7 @@ class ScriptWorkflow(StepWorkflowBase):
         on_event: OnEvent,
         interrupt: Optional[asyncio.Event] = None,
     ) -> dict:
-        """定妆照生成：agent 单轮出英文 prompt → 确定性生图（间隔提交+并发轮询）"""
+        """定妆照生成：agent 单轮出中文 prompt → 确定性生图（间隔提交+并发轮询）"""
         self.require_step_data(session_id, "episode_design")
         if not entity_ids:
             raise ScriptWorkflowError("请至少勾选一个实体")
@@ -674,14 +674,15 @@ class ScriptWorkflow(StepWorkflowBase):
             if e["entity_id"] not in prompts_by_entity:
                 if e["entity_type"] == "character":
                     fallback_prompt = (
-                        f"{e['name']}, {e['description']}, character turnaround sheet, front view, side view "
-                        "and back view of the same character, full body, height measurement chart with scale "
-                        "ruler, plain neutral background, consistent character design"
+                        f"{e['name']}的角色三视图设定素材图：{e['description']}。"
+                        "同一角色的正面、侧面、背面三个视角并排在同一画面，全部为全身像，"
+                        "三个视角严格保持同一套服装、发型与体貌，自然站姿。画面侧边带刻度身高标尺。"
+                        "干净的中性背景，画面中只有这一个角色的三个视角，无其他人物与场景道具。"
                     )
                 else:
                     fallback_prompt = (
-                        f"{e['name']}, {e['description']}, empty scene, establishing shot, no people, "
-                        "consistent scene design"
+                        f"{e['name']}的场景全景素材图：{e['description']}。"
+                        "全景定场镜头构图，呈现完整空间的标准视图，画面中无人物。"
                     )
                 prompts_by_entity[e["entity_id"]] = {
                     "prompt": fallback_prompt,

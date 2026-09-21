@@ -1,7 +1,7 @@
 /**
  * 第 3 步：分集设计（左侧集时间线 + 右侧单集详情编辑；人物/场景/线索伏笔实体库 Tabs）
  */
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Button, Card, Empty, Input, Modal, Select, Space, Spin, Tabs, Tag, Typography, message } from 'antd'
 import {
   CheckCircleOutlined,
@@ -16,7 +16,6 @@ import {
 } from '@ant-design/icons'
 import MarkdownIt from 'markdown-it'
 import type {
-  AgentEvent,
   EntityRef,
   EntityReferences,
   Episode,
@@ -24,10 +23,11 @@ import type {
   ScriptSessionDetail,
 } from '@/types'
 import { entityApi, scriptStepApi } from '@/api/client'
-import { useScriptSessionStore } from '@/stores/scriptSessionStore'
+import { useAgentRunStore } from '@/stores/agentRunStore'
+import { guardRunStart, useRunActive, useRunError } from '@/hooks/useRunTask'
 import { usePolling } from '@/hooks/usePolling'
+import { RunTaskBanner } from '@/components/common'
 import { ACTION_LABEL, buildScriptMarkdown, downloadTextFile, extractScriptTitle } from '@/utils/scriptMarkdown'
-import { AgentRunProgress } from './AgentRunProgress'
 import { imageSrc } from '@/utils/imageSrc'
 
 const { Text } = Typography
@@ -99,7 +99,6 @@ const SECTIONS: { key: SectionKey; title: string }[] = [
 ]
 
 export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session }) => {
-  const { refreshSession } = useScriptSessionStore()
   const canExecute = session.completed_steps?.includes('story_outline')
   const isCompleted = session.completed_steps?.includes('episode_design')
 
@@ -110,41 +109,62 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
   const [draft, setDraft] = useState<EpisodeDraft>(EMPTY_DRAFT)
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [run, setRun] = useState<{ id: string; active: boolean } | null>(null)
-  const [regenEpisodeId, setRegenEpisodeId] = useState('')
+  const [starting, setStarting] = useState(false)
   const [genModal, setGenModal] = useState<{ open: boolean; episodeId: string; extra: string }>({
     open: false,
     episodeId: '',
     extra: '',
   })
 
+  // 分集设计任务在全局 store 中跟踪（跨菜单切换不丢失，按钮据此防重复触发；含排队中）
+  const episodesRunning = useRunActive(session.session_id, 'episodes')
+  const episodesError = useRunError(session.session_id, 'episodes')
+  // 当前进行中的单集重设计目标集（批量生成时为 ''）
+  const regenEpisodeIdRunning = useAgentRunStore(
+    (s) =>
+      s.runs.find(
+        (r) =>
+          r.sessionId === session.session_id &&
+          r.kind === 'episodes' &&
+          (r.status === 'running' || r.status === 'queued'),
+      )?.episodeId || '',
+  )
+
   const [expandedId, setExpandedId] = useState('')
   const [detailId, setDetailId] = useState('')
   const [entityRefs, setEntityRefs] = useState<Record<string, EntityReferences>>({})
   const [refsLoading, setRefsLoading] = useState<Record<string, boolean>>({})
 
+  // 拉取序号：丢弃迟到的旧响应，避免终态最终拉取被 in-flight 轮询的旧数据覆盖
+  const episodesFetchSeq = useRef(0)
   const loadEpisodes = useCallback(async () => {
+    const seq = ++episodesFetchSeq.current
     try {
       const list = await scriptStepApi.listEpisodes(session.session_id)
-      setEpisodes(list || [])
+      if (seq === episodesFetchSeq.current) setEpisodes(list || [])
     } catch {
       // 静默失败（生成期间轮询）
     }
   }, [session.session_id])
 
+  const entitiesFetchSeq = useRef(0)
   const loadEntities = useCallback(async () => {
+    const seq = ++entitiesFetchSeq.current
     try {
       const list = await entityApi.list(session.session_id)
-      setEntities(list || [])
+      if (seq === entitiesFetchSeq.current) setEntities(list || [])
     } catch {
       // 静默失败
     }
   }, [session.session_id])
 
+  // 挂载/会话切换时全量拉取；任务结束后（running→false 跳变）做最终拉取兜底轮询尾差
   useEffect(() => {
-    void loadEpisodes()
-    void loadEntities()
-  }, [loadEpisodes, loadEntities])
+    if (!episodesRunning) {
+      void loadEpisodes()
+      void loadEntities()
+    }
+  }, [episodesRunning, loadEpisodes, loadEntities])
 
   // 实体引用集：点击实体卡/Tag 时加载（hook 必须位于 early return 之前，避免切换会话时 hooks 数量变化）
   const loadReferences = useCallback(
@@ -168,7 +188,7 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
       void loadEpisodes()
       void loadEntities()
     },
-    { interval: 2000, enabled: !!run?.active }
+    { interval: 2000, enabled: episodesRunning }
   )
 
   // 默认选中第一集
@@ -224,16 +244,26 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
     downloadTextFile(`${extractScriptTitle(outline)} 完整剧本.md`, content)
   }
 
+  // 发起生成（批量/单集 → run_id → 任务交给全局 AgentRunDock 跟踪）
   const executeGenerate = async (episodeId: string, extra: string) => {
+    if (guardRunStart(session.session_id, 'episodes', '分集设计', starting)) return
+    setStarting(true)
     setGenModal((m) => ({ ...m, open: false }))
     try {
       const runId = episodeId
         ? await scriptStepApi.regenerateEpisode(session.session_id, episodeId, extra)
         : await scriptStepApi.generateEpisodes(session.session_id, extra)
-      setRegenEpisodeId(episodeId)
-      setRun({ id: runId, active: true })
+      useAgentRunStore.getState().addRun({
+        runId,
+        sessionId: session.session_id,
+        kind: 'episodes',
+        episodeId: episodeId || undefined,
+      })
+      message.info(episodeId ? `${episodeId} 重新设计已发起，进度见右上角后台任务` : '分集设计生成已发起，进度见右上角后台任务')
     } catch (e) {
       message.error((e as Error).message)
+    } finally {
+      setStarting(false)
     }
   }
 
@@ -249,18 +279,6 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
     } else {
       void executeGenerate(episodeId, extra)
     }
-  }
-
-  const handleRunDone = async (ev: AgentEvent) => {
-    setRun((r) => (r ? { ...r, active: false } : r))
-    if (ev.success) {
-      message.success(regenEpisodeId ? `${regenEpisodeId} 重新设计完成` : '分集设计生成完成')
-      await refreshSession()
-    } else {
-      message.error(ev.error || '分集设计运行失败')
-    }
-    await loadEpisodes()
-    await loadEntities()
   }
 
   const saveDraft = async () => {
@@ -644,7 +662,7 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
             <Button
               size="small"
               icon={<RedoOutlined />}
-              disabled={run?.active}
+              disabled={episodesRunning || starting}
               onClick={() => openGenerate(selected.episode_id)}
             >
               重新设计
@@ -667,7 +685,7 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
         <Button
           type="primary"
           icon={<ThunderboltOutlined />}
-          disabled={run?.active}
+          disabled={episodesRunning || starting}
           onClick={() => openGenerate('')}
         >
           {episodes.length ? '重新生成分集设计' : '生成分集设计'}
@@ -679,13 +697,17 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
         {isCompleted && <Tag color="success">已完成</Tag>}
       </Space>
 
-      {run && (
+      {(episodesRunning || episodesError) && (
         <div style={{ marginBottom: 16 }}>
-          <AgentRunProgress runId={run.id} onDone={handleRunDone} />
+          <RunTaskBanner
+            active={episodesRunning}
+            error={episodesError}
+            activeText={regenEpisodeIdRunning ? `${regenEpisodeIdRunning} 重新设计中` : '分集设计生成中'}
+          />
         </div>
       )}
 
-      {episodes.length === 0 && !run ? (
+      {episodes.length === 0 && !episodesRunning ? (
         <Empty description="尚未生成分集，点击上方按钮开始" style={{ marginTop: 48 }} />
       ) : (
         <div style={{ display: 'flex', gap: 16 }}>
@@ -702,7 +724,7 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
           >
             {episodes.map((ep) => {
               const active = ep.episode_id === selectedId
-              const regenerating = regenEpisodeId === ep.episode_id && run?.active
+              const regenerating = regenEpisodeIdRunning === ep.episode_id
               return (
                 <div
                   key={ep.episode_id}
@@ -741,7 +763,7 @@ export const StepEpisodeDesign: React.FC<StepEpisodeDesignProps> = ({ session })
                 </div>
               )
             })}
-            {run?.active && !regenEpisodeId && (
+            {episodesRunning && !regenEpisodeIdRunning && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px' }}>
                 <Spin size="small" />
                 <Text type="secondary" style={{ fontSize: 12 }}>

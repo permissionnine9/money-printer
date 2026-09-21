@@ -15,10 +15,11 @@ import {
   SaveOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
-import type { AgentEvent, SessionDetail, StoryboardSegment } from '@/types'
+import type { SessionDetail, StoryboardSegment } from '@/types'
 import { stepApi } from '@/api/client'
-import { MindmapView } from '@/components/common'
-import { AgentRunProgress } from '@/components/script/AgentRunProgress'
+import { MindmapView, RunTaskBanner } from '@/components/common'
+import { useAgentRunStore } from '@/stores/agentRunStore'
+import { guardRunStart, useRunActive, useRunError } from '@/hooks/useRunTask'
 import { useSessionStore } from '@/stores/sessionStore'
 
 const { Text } = Typography
@@ -104,20 +105,32 @@ export const StepStoryboardOutline: React.FC<StepStoryboardOutlineProps> = ({ se
   const [editingMarkdown, setEditingMarkdown] = useState('')
   const [saving, setSaving] = useState(false)
   const [starting, setStarting] = useState(false)
-  const [run, setRun] = useState<{ id: string; active: boolean } | null>(null)
   const [promptModal, setPromptModal] = useState<{ open: boolean; extraPrompt: string }>({
     open: false,
     extraPrompt: '',
   })
 
-  // 发起生成（POST storyboard-outline/generate → run_id → 观流）
+  // 分镜大纲生成任务在全局 store 中跟踪（跨菜单切换不丢失，按钮据此防重复触发）
+  const outlineRunning = useRunActive(session.session_id, 'storyboard_outline')
+  const outlineError = useRunError(session.session_id, 'storyboard_outline')
+
+  // 大纲内容变化（生成完成/保存编辑后刷新）时回到预览模式（渲染期调整，避免 effect 级联渲染）
+  const [prevMindmap, setPrevMindmap] = useState(mindmap)
+  if (mindmap !== prevMindmap) {
+    setPrevMindmap(mindmap)
+    setViewMode('preview')
+  }
+
+  // 发起生成（POST storyboard-outline/generate → run_id → 任务交给全局 AgentRunDock 跟踪）
   const executeGenerate = async (prompt: string) => {
+    if (guardRunStart(session.session_id, 'storyboard_outline', '分镜大纲', starting)) return
     setStarting(true)
     setExtraPrompt(prompt)
     setPromptModal({ open: false, extraPrompt: '' })
     try {
       const runId = await stepApi.generateStoryboardOutline(session.session_id, prompt || undefined)
-      setRun({ id: runId, active: true })
+      useAgentRunStore.getState().addRun({ runId, sessionId: session.session_id, kind: 'storyboard_outline' })
+      message.info('分镜大纲生成已发起，进度见右上角后台任务')
     } catch (e) {
       message.error((e as Error).message)
     } finally {
@@ -137,17 +150,6 @@ export const StepStoryboardOutline: React.FC<StepStoryboardOutlineProps> = ({ se
       content: '重新生成将清空分镜配置、已生成的分镜提示词与视频数据，此操作不可撤销。是否继续？',
       onOk: () => executeGenerate(promptModal.extraPrompt),
     })
-  }
-
-  const handleRunDone = async (ev: AgentEvent) => {
-    setRun((r) => (r ? { ...r, active: false } : r))
-    if (ev.success) {
-      message.success('分镜大纲生成完成')
-      setViewMode('preview')
-      await refreshSession()
-    } else {
-      message.error(ev.error || '分镜大纲生成失败')
-    }
   }
 
   const saveEdit = async () => {
@@ -211,7 +213,7 @@ export const StepStoryboardOutline: React.FC<StepStoryboardOutlineProps> = ({ se
             />
             <Button
               icon={<RedoOutlined />}
-              disabled={run?.active}
+              disabled={outlineRunning || starting}
               onClick={() => setPromptModal({ open: true, extraPrompt })}
             >
               重新生成
@@ -227,13 +229,15 @@ export const StepStoryboardOutline: React.FC<StepStoryboardOutlineProps> = ({ se
         </Text>
       )}
 
-      {run && (
-        <div style={{ marginTop: 16 }}>
-          <AgentRunProgress runId={run.id} onDone={handleRunDone} />
-        </div>
+      {(outlineRunning || outlineError) && (
+        <RunTaskBanner
+          active={outlineRunning}
+          error={outlineError}
+          activeText={mindmap ? '正在重新生成分镜大纲，完成后将替换当前大纲' : '分镜大纲生成中'}
+        />
       )}
 
-      {!mindmap && !run && (
+      {!mindmap && (
         <div style={{ marginTop: 16, maxWidth: 640 }}>
           <div style={{ marginBottom: 4 }}>
             <Text type="secondary">补充要求（可选）</Text>
@@ -251,7 +255,7 @@ export const StepStoryboardOutline: React.FC<StepStoryboardOutlineProps> = ({ se
                 type="primary"
                 size="large"
                 icon={<ThunderboltOutlined />}
-                loading={starting}
+                loading={starting || outlineRunning}
                 onClick={() => executeGenerate(extraPrompt)}
               >
                 生成分镜大纲
@@ -304,16 +308,6 @@ export const StepStoryboardOutline: React.FC<StepStoryboardOutlineProps> = ({ se
         </div>
       )}
 
-      {!mindmap && run?.active === false && (
-        <div style={{ marginTop: 16 }}>
-          <Button
-            icon={<EditOutlined />}
-            onClick={() => setPromptModal({ open: true, extraPrompt })}
-          >
-            重试生成
-          </Button>
-        </div>
-      )}
     </Card>
     <Modal
       title={

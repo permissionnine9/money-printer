@@ -3,7 +3,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from backend.core.persistence.workspace_store import EPISODE_ID_PATTERN
+from backend.core.persistence.workspace_store import ENTITY_ID_PATTERN, EPISODE_ID_PATTERN
 
 
 # ==================== 会话 ====================
@@ -83,3 +83,8 @@ class LookbookGenerateRequest(BaseModel):
 class LookbookRegenerateRequest(BaseModel):
     prompt: Optional[str] = Field(default=None, description="新 prompt（空=沿用原 prompt）")
     model_config_id: Optional[str] = None
+
+
+class LookbookImportRequest(BaseModel):
+    entity_id: str = Field(pattern=ENTITY_ID_PATTERN, description="目标实体（当前会话）")
+    source_image_id: str = Field(min_length=1, description="素材库源图 image_id（全局唯一）")

@@ -12,6 +12,9 @@ import type {
   MaterialPoolGroup,
   ImageModelConfig,
   PromptTemplate,
+  LookbookLibraryGroup,
+  MaterialListResponse,
+  OrphanScanResponse,
 } from '@/types'
 
 const client = axios.create({
@@ -450,6 +453,21 @@ export const scriptStepApi = {
   deleteLookbookImage: async (sessionId: string, imageId: string): Promise<void> => {
     await client.delete(`/script-sessions/${sessionId}/lookbook/${imageId}`)
   },
+
+  // 素材库：全部剧本会话的已完成定妆照（含本剧本历史素材），按会话分组
+  getLookbookLibrary: async (sessionId: string): Promise<LookbookLibraryGroup[]> => {
+    const { data } = await client.get(`/script-sessions/${sessionId}/lookbook/library`)
+    return data.data.groups
+  },
+
+  // 从素材库复制素材到当前会话并锚定到实体
+  importLookbookImage: async (sessionId: string, entityId: string, sourceImageId: string): Promise<LookbookImage> => {
+    const { data } = await client.post(`/script-sessions/${sessionId}/lookbook/import`, {
+      entity_id: entityId,
+      source_image_id: sourceImageId,
+    })
+    return data.data.image
+  },
 }
 
 // 剧本实体库
@@ -494,6 +512,36 @@ export const settingsApi = {
   }): Promise<{ connected: boolean; message: string }> => {
     const { data } = await client.put(`/settings/comfyui-connection`, payload, { timeout: 60000 })
     return data
+  },
+}
+
+// ==================== 素材管理 API（/materials） ====================
+
+export const materialApi = {
+  // 素材列表（kind: lookbook 定妆照 / episode 分集素材图 / upload 上传参考图 / video 视频）
+  list: async (kind: string): Promise<MaterialListResponse> => {
+    const { data } = await client.get('/materials', { params: { kind } })
+    return data.data
+  },
+
+  // 删除生成图素材（被分镜/实体引用中时后端返回 409）
+  deleteImage: async (imageId: string): Promise<{ deleted: boolean; file_deleted: boolean }> => {
+    const { data } = await client.delete(`/materials/image/${imageId}`)
+    return data.data
+  },
+
+  // 孤儿文件扫描（无 DB 记录且无引用的磁盘文件）
+  scanOrphans: async (): Promise<OrphanScanResponse> => {
+    const { data } = await client.get('/materials/orphans')
+    return data.data
+  },
+
+  // 批量删除素材文件（被引用的拒删，返回逐条结果）
+  deleteFiles: async (
+    paths: string[]
+  ): Promise<{ deleted: string[]; failed: { path: string; reason: string }[] }> => {
+    const { data } = await client.post('/materials/files/delete', { paths })
+    return data.data
   },
 }
 

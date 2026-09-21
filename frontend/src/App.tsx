@@ -7,6 +7,7 @@ import WorkflowPage from './pages/WorkflowPage'
 import ScriptWorkflowPage from './pages/ScriptWorkflowPage'
 import ModelsPage from './pages/ModelsPage'
 import PromptsPage from './pages/PromptsPage'
+import MaterialsPage from './pages/MaterialsPage'
 
 import './App.css'
 
@@ -18,6 +19,7 @@ function App() {
         <Route path="/" element={<WorkflowPage />} />
         <Route path="/models" element={<ModelsPage />} />
         <Route path="/prompts" element={<PromptsPage />} />
+        <Route path="/materials" element={<MaterialsPage />} />
       </Routes>
     </MainLayout>
   )

@@ -87,6 +87,8 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [configLoading, setConfigLoading] = useState(false)
   const [completing, setCompleting] = useState(false)
+  // 提示词生成提交中：防重复点击（守卫依赖 addRun，POST 挂起期间连点会穿透守卫重复入队）
+  const [confirming, setConfirming] = useState(false)
   // 分镜大纲查看弹窗（大纲收拢到「分镜配置」右上角按钮）
   const [outlineOpen, setOutlineOpen] = useState(false)
   // 参考素材图编辑
@@ -203,23 +205,28 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
   }
 
   const confirmGeneratePrompt = async () => {
-    if (!selected) return
+    if (!selected || confirming) return
     if (hasRunningSegmentPrompt(session.session_id, selected.index)) {
       message.warning(`分镜 ${selected.index + 1} 的提示词正在生成中（见右上角任务卡片），请等待完成后再试`)
       return
     }
+    setConfirming(true)
     try {
       const runId = await stepApi.generateSegmentPrompt(session.session_id, selected.index)
       // 任务交给全局 AgentRunDock：进度弹窗可收起到右上角，跨步骤/跨页面持续跟踪
       useAgentRunStore.getState().addRun({
         runId,
         sessionId: session.session_id,
+        kind: 'segment_prompt',
         segmentIndex: selected.index,
         segmentTitle: selected.title,
       })
+      message.info(`分镜 ${selected.index + 1} 提示词生成已发起，进度见右上角后台任务`)
       setPromptModal({ open: false, context: null, loading: false })
     } catch (e) {
       message.error((e as Error).message)
+    } finally {
+      setConfirming(false)
     }
   }
 
@@ -257,7 +264,7 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
         <Button key="cancel" onClick={() => setPromptModal({ open: false, context: null, loading: false })}>
           取消
         </Button>,
-        <Button key="ok" type="primary" icon={<ThunderboltOutlined />} onClick={confirmGeneratePrompt}>
+        <Button key="ok" type="primary" icon={<ThunderboltOutlined />} loading={confirming} onClick={confirmGeneratePrompt}>
           确定（调用 video-prompt skill 生成）
         </Button>,
       ]}

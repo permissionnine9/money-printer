@@ -3,29 +3,30 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button, Card, Empty, Image, Input, Modal, Popconfirm, Select, Space, Spin, Tag, Typography, message } from 'antd'
-import { CheckCircleOutlined, DeleteOutlined, PictureOutlined, RedoOutlined } from '@ant-design/icons'
+import { AppstoreOutlined, CheckCircleOutlined, DeleteOutlined, PictureOutlined, RedoOutlined } from '@ant-design/icons'
 import type { AgentEvent, ImageModelConfig, LookbookImage, ScriptEntity, ScriptSessionDetail } from '@/types'
 import { entityApi, modelApi, scriptStepApi } from '@/api/client'
 import { useScriptSessionStore } from '@/stores/scriptSessionStore'
 import { usePolling } from '@/hooks/usePolling'
 import { AgentRunProgress } from './AgentRunProgress'
+import { LookbookLibraryModal } from './LookbookLibraryModal'
 import { imageSrc } from '@/utils/imageSrc'
 
 const { Text } = Typography
 const { TextArea } = Input
 
-// 图片风格选项：zh 为中文风格要求（并入 style_prompt 给 agent，生成路径）；en 为英文风格关键词（附加到生图 prompt，重新生成路径）
+// 图片风格选项：zh 为中文风格要求（生成路径并入 style_prompt 给 agent；重新生成路径附加到生图 prompt）
 const IMAGE_STYLE_OPTIONS = [
-  { value: 'auto', label: '自动（AI 根据剧本气质判断）', zh: '', en: '' },
-  { value: 'realistic', label: '现实主义', zh: '写实摄影质感，真实自然光影与材质细节，像真实存在的照片', en: 'realistic photography style, shot on 35mm film, natural lighting, lifelike textures' },
-  { value: '2d', label: '2D 插画', zh: '2D 手绘插画，干净线稿与扁平上色，明快配色', en: '2D illustration style, clean linework, flat colors' },
-  { value: '3d', label: '3D 卡通渲染', zh: '皮克斯式 3D 卡通渲染，柔和全局光照，圆润造型，高细节材质', en: 'stylized 3D render, soft global illumination, subsurface scattering' },
-  { value: 'anime', label: '日式动漫', zh: '日式动漫赛璐璐风格，clean line art，精致角色设计与背景美术', en: 'Japanese anime style, cel shading, clean line art' },
-  { value: 'guofeng', label: '国风动漫', zh: '国风动漫美术，东方古典元素与配色，飘逸写意的中国风', en: 'Chinese guofeng anime style, oriental classical aesthetics, elegant flowing design' },
-  { value: 'comic', label: '美漫风', zh: '美式漫画风格，粗犷勾线与网点排线阴影，强对比动态构图', en: 'American comic book style, bold ink outlines, halftone shading' },
-  { value: 'ink', label: '水墨画', zh: '中国传统水墨画，毛笔笔触与留白意境，淡雅设色', en: 'traditional Chinese ink painting, brush strokes, negative space, muted colors' },
-  { value: 'watercolor', label: '水彩手绘', zh: '水彩手绘质感，柔和晕染边缘与纸纹，清新通透', en: 'watercolor painting, soft bleeding edges, paper texture' },
-  { value: 'cyberpunk', label: '赛博朋克', zh: '赛博朋克科幻风，霓虹灯光效与未来都市氛围，高对比冷暖色', en: 'cyberpunk style, neon lighting, futuristic sci-fi atmosphere' },
+  { value: 'auto', label: '自动（AI 根据剧本气质判断）', zh: '' },
+  { value: 'realistic', label: '现实主义', zh: '写实摄影质感，真实自然光影与材质细节，像真实存在的照片' },
+  { value: '2d', label: '2D 插画', zh: '2D 手绘插画，干净线稿与扁平上色，明快配色' },
+  { value: '3d', label: '3D 卡通渲染', zh: '皮克斯式 3D 卡通渲染，柔和全局光照，圆润造型，高细节材质' },
+  { value: 'anime', label: '日式动漫', zh: '日式动漫赛璐璐风格，干净线稿，精致角色设计与背景美术' },
+  { value: 'guofeng', label: '国风动漫', zh: '国风动漫美术，东方古典元素与配色，飘逸写意的中国风' },
+  { value: 'comic', label: '美漫风', zh: '美式漫画风格，粗犷勾线与网点排线阴影，强对比动态构图' },
+  { value: 'ink', label: '水墨画', zh: '中国传统水墨画，毛笔笔触与留白意境，淡雅设色' },
+  { value: 'watercolor', label: '水彩手绘', zh: '水彩手绘质感，柔和晕染边缘与纸纹，清新通透' },
+  { value: 'cyberpunk', label: '赛博朋克', zh: '赛博朋克科幻风，霓虹灯光效与未来都市氛围，高对比冷暖色' },
 ]
 
 interface StepLookbookProps {
@@ -43,6 +44,7 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
   const [runs, setRuns] = useState<Map<string, string>>(new Map()) // entity_id -> run_id
   const [deleting, setDeleting] = useState('')
   const [modal, setModal] = useState<{ entity: ScriptEntity; image?: LookbookImage } | null>(null)
+  const [libraryEntity, setLibraryEntity] = useState<ScriptEntity | null>(null)
   const [promptText, setPromptText] = useState('')
   const [styleType, setStyleType] = useState('auto')
   const [modelConfigId, setModelConfigId] = useState<string | undefined>(undefined)
@@ -113,11 +115,11 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
     try {
       let runId: string
       if (image) {
-        // 重新生成不走 agent：英文风格关键词附加到生图 prompt（提示词为空则沿用原 prompt 再附加）
+        // 重新生成不走 agent：中文风格要求附加到生图 prompt（提示词为空则沿用原 prompt 再附加）
         let prompt = promptText || undefined
         if (style) {
           const base = promptText || image.prompt || ''
-          prompt = base ? `${base}, ${style.en}` : style.en
+          prompt = base ? `${base}，${style.zh}` : style.zh
         }
         runId = await scriptStepApi.regenerateLookbookImage(
           session.session_id,
@@ -171,6 +173,12 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
     } finally {
       setDeleting('')
     }
+  }
+
+  // 素材库导入完成：实体 frontmatter 锚点已变化，实体与素材都要刷新
+  const handleImported = async () => {
+    await loadImages()
+    await loadEntities()
   }
 
   const handleComplete = async () => {
@@ -250,11 +258,14 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
         <div title={e.description} style={{ fontSize: 12, color: '#888', marginTop: 6, maxHeight: 36, overflow: 'hidden' }}>
           {e.description}
         </div>
-        <div style={{ display: 'flex', justifyContent: img ? 'space-between' : 'center', marginTop: 6 }}>
+        <div style={{ display: 'flex', justifyContent: img ? 'space-between' : 'center', gap: 8, marginTop: 6 }}>
           {img ? (
             <>
               <Button size="small" icon={<RedoOutlined />} disabled={busy} onClick={() => openModal(e, img)}>
                 重新生成
+              </Button>
+              <Button size="small" icon={<AppstoreOutlined />} disabled={busy} onClick={() => setLibraryEntity(e)}>
+                从素材库选择
               </Button>
               <Popconfirm
                 title="确定删除此核心素材？"
@@ -272,15 +283,20 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
               </Popconfirm>
             </>
           ) : (
-            <Button
-              size="small"
-              type="primary"
-              icon={<PictureOutlined />}
-              disabled={busy}
-              onClick={() => openModal(e)}
-            >
-              生成核心素材
-            </Button>
+            <>
+              <Button
+                size="small"
+                type="primary"
+                icon={<PictureOutlined />}
+                disabled={busy}
+                onClick={() => openModal(e)}
+              >
+                生成核心素材
+              </Button>
+              <Button size="small" icon={<AppstoreOutlined />} disabled={busy} onClick={() => setLibraryEntity(e)}>
+                从素材库选择
+              </Button>
+            </>
           )}
         </div>
         {runId && (
@@ -333,7 +349,7 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
           type="primary"
           icon={<CheckCircleOutlined />}
           loading={completing}
-          disabled={isCompleted || images.length === 0}
+          disabled={isCompleted || imageByEntity.size === 0}
           onClick={handleComplete}
         >
           {isCompleted ? '本步骤已完成' : '完成本步骤'}
@@ -398,6 +414,15 @@ export const StepLookbook: React.FC<StepLookbookProps> = ({ session }) => {
           />
         </div>
       </Modal>
+
+      {/* 素材库选择弹窗（跨剧本 / 本剧本历史素材） */}
+      <LookbookLibraryModal
+        sessionId={session.session_id}
+        entity={libraryEntity}
+        open={!!libraryEntity}
+        onClose={() => setLibraryEntity(null)}
+        onImported={handleImported}
+      />
     </Card>
   )
 }

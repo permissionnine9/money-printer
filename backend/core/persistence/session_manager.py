@@ -268,6 +268,17 @@ class SessionManager(BaseSQLiteManager):
 
             return results
 
+    def list_all_step_results(self) -> list[dict]:
+        """全表步骤结果（跨会话）：[{session_id, step_name, result_data(JSON 字符串)}]
+
+        供素材管理扫描视频引用（video_path 只存在于各会话的 result_data JSON 中）。
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "SELECT session_id, step_name, result_data FROM step_results ORDER BY id"
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
     def get_step_results_map(self, session_id: str) -> dict:
         """按本管理器步骤序列收集步骤结果（无结果的步骤不包含）"""
         results = {}

@@ -14,6 +14,10 @@ from fastapi import APIRouter, Depends, HTTPException, Path
 
 from backend.core.agent_sdk import sse_direct_response
 from backend.core.persistence.workspace_store import ENTITY_ID_PATTERN, EPISODE_ID_PATTERN
+from backend.core.services.lookbook_library_service import (
+    import_lookbook_from_library,
+    list_lookbook_library,
+)
 from backend.core.services.step_payload import script_step_results, script_title
 from backend.deps import (
     get_model_manager,
@@ -34,6 +38,7 @@ from backend.schemas.script import (
     IdeationMessageRequest,
     IdeationTitleRequest,
     LookbookGenerateRequest,
+    LookbookImportRequest,
     LookbookRegenerateRequest,
     OutlineGenerateRequest,
     OutlineUpdateRequest,
@@ -369,6 +374,25 @@ async def complete_lookbook(session_id: str, _info: dict = Depends(load_script_s
 async def list_lookbook(session_id: str, entity_id: Optional[str] = None, task_status: Optional[str] = None, _info: dict = Depends(load_script_session)):
     rows = get_script_manager().list_lookbook(session_id, entity_id, task_status)
     return {"success": True, "data": {"images": rows, "total": len(rows)}}
+
+
+@router.get("/{session_id}/lookbook/library")
+async def get_lookbook_library(session_id: str, _info: dict = Depends(load_script_session)):
+    """素材库：全部存活剧本会话的已完成定妆照（含当前剧本历史素材），按会话分组"""
+    data = list_lookbook_library(
+        get_script_session_manager(), get_workspace_store(), get_script_manager(), session_id,
+    )
+    return {"success": True, "data": data}
+
+
+@router.post("/{session_id}/lookbook/import")
+async def import_lookbook_image(session_id: str, body: LookbookImportRequest, _info: dict = Depends(load_script_session)):
+    """从素材库复制素材到当前会话并锚定到实体（引用同一图片 URL，无额外存储）"""
+    data = import_lookbook_from_library(
+        get_workspace_store(), get_script_manager(),
+        session_id, body.entity_id, body.source_image_id,
+    )
+    return {"success": True, "data": data}
 
 
 @router.post("/{session_id}/lookbook/{image_id}/regenerate")

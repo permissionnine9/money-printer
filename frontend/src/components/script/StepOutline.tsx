@@ -13,11 +13,12 @@ import {
   SaveOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
-import type { AgentEvent, ScriptSessionDetail } from '@/types'
+import type { ScriptSessionDetail } from '@/types'
 import client, { scriptStepApi } from '@/api/client'
-import { MindmapView } from '@/components/common'
+import { MindmapView, RunTaskBanner } from '@/components/common'
 import { useScriptSessionStore } from '@/stores/scriptSessionStore'
-import { AgentRunProgress } from './AgentRunProgress'
+import { useAgentRunStore } from '@/stores/agentRunStore'
+import { guardRunStart, useRunActive, useRunError } from '@/hooks/useRunTask'
 
 const { Text } = Typography
 const { TextArea } = Input
@@ -44,11 +45,14 @@ export const StepOutline: React.FC<StepOutlineProps> = ({ session }) => {
   const [editingMarkdown, setEditingMarkdown] = useState('')
   const [saving, setSaving] = useState(false)
   const [starting, setStarting] = useState(false)
-  const [run, setRun] = useState<{ id: string; active: boolean } | null>(null)
   const [promptModal, setPromptModal] = useState<{ open: boolean; extraPrompt: string }>({
     open: false,
     extraPrompt: '',
   })
+
+  // 大纲生成任务在全局 store 中跟踪（跨菜单切换不丢失，按钮据此防重复触发）
+  const outlineRunning = useRunActive(session.session_id, 'outline')
+  const outlineError = useRunError(session.session_id, 'outline')
 
   // 会话切换时还原生成参数
   useEffect(() => {
@@ -57,12 +61,19 @@ export const StepOutline: React.FC<StepOutlineProps> = ({ session }) => {
     setTotalWordCount(req.total_word_count || 0)
     setSceneCount(req.scene_count || 0)
     setViewMode('preview')
-    setRun(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.session_id])
 
-  // 发起生成（POST outline/generate → run_id → 观流）
+  // 大纲内容变化（生成完成/保存编辑后刷新）时回到预览模式（渲染期调整，避免 effect 级联渲染）
+  const [prevMindmap, setPrevMindmap] = useState(mindmap)
+  if (mindmap !== prevMindmap) {
+    setPrevMindmap(mindmap)
+    setViewMode('preview')
+  }
+
+  // 发起生成（POST outline/generate → run_id → 任务交给全局 AgentRunDock 跟踪）
   const executeGenerate = async (regenExtraPrompt: string) => {
+    if (guardRunStart(session.session_id, 'outline', '故事大纲', starting)) return
     setStarting(true)
     setPromptModal({ open: false, extraPrompt: '' })
     try {
@@ -74,7 +85,8 @@ export const StepOutline: React.FC<StepOutlineProps> = ({ session }) => {
       })
       const runId = data?.data?.run_id
       if (!runId) throw new Error('未获取到 run_id')
-      setRun({ id: runId, active: true })
+      useAgentRunStore.getState().addRun({ runId, sessionId: session.session_id, kind: 'outline' })
+      message.info('大纲生成已发起，进度见右上角后台任务')
     } catch (e) {
       message.error((e as Error).message)
     } finally {
@@ -89,17 +101,6 @@ export const StepOutline: React.FC<StepOutlineProps> = ({ session }) => {
       content: '重新生成将清空下游已生成的分集设计、实体库与核心素材，此操作不可撤销。是否继续？',
       onOk: () => executeGenerate(promptModal.extraPrompt),
     })
-  }
-
-  const handleRunDone = async (ev: AgentEvent) => {
-    setRun((r) => (r ? { ...r, active: false } : r))
-    if (ev.success) {
-      message.success('大纲生成完成')
-      setViewMode('preview')
-      await refreshSession()
-    } else {
-      message.error(ev.error || '大纲生成失败')
-    }
   }
 
   const saveEdit = async () => {
@@ -187,7 +188,7 @@ export const StepOutline: React.FC<StepOutlineProps> = ({ session }) => {
               />
               <Button
                 icon={<RedoOutlined />}
-                disabled={run?.active}
+                disabled={outlineRunning || starting}
                 onClick={() => setPromptModal({ open: true, extraPrompt: '' })}
               >
                 重新生成
@@ -202,13 +203,15 @@ export const StepOutline: React.FC<StepOutlineProps> = ({ session }) => {
           </Text>
         )}
 
-        {run && (
-          <div style={{ marginTop: 16 }}>
-            <AgentRunProgress runId={run.id} onDone={handleRunDone} />
-          </div>
+        {(outlineRunning || outlineError) && (
+          <RunTaskBanner
+            active={outlineRunning}
+            error={outlineError}
+            activeText={mindmap ? '正在重新生成故事大纲，完成后将替换当前大纲' : '故事大纲生成中'}
+          />
         )}
 
-        {!mindmap && !run && (
+        {!mindmap && !outlineRunning && (
           <div style={{ marginTop: 16 }}>
             <Space wrap size={24}>
               <div>
@@ -266,7 +269,7 @@ export const StepOutline: React.FC<StepOutlineProps> = ({ session }) => {
                   type="primary"
                   size="large"
                   icon={<ThunderboltOutlined />}
-                  loading={starting}
+                  loading={starting || outlineRunning}
                   onClick={() => executeGenerate('')}
                 >
                   生成大纲

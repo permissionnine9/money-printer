@@ -18,6 +18,7 @@ from backend.api.v1 import (
     script_sessions,
     agent_runs,
     settings,
+    materials,
 )
 from backend.config import override_src_config
 from backend.core.errors import WorkflowError
@@ -80,6 +81,7 @@ app.include_router(prompts.router, prefix="/api/v1/prompts", tags=["提示词管
 app.include_router(settings.router, prefix="/api/v1/settings", tags=["系统设置"])
 app.include_router(script_sessions.router, prefix="/api/v1/script-sessions", tags=["剧本工作流"])
 app.include_router(agent_runs.router, prefix="/api/v1/agent-runs", tags=["Agent 运行"])
+app.include_router(materials.router, prefix="/api/v1/materials", tags=["素材管理"])
 
 
 @app.get("/")

@@ -7,7 +7,7 @@ tags: [安全, 门禁, ID校验, 路径穿越, workspace-store]
 # ID 命名与路径安全门禁
 
 **类别:** 门禁
-**最后更新:** 2026-09-19
+**最后更新:** 2026-09-21
 
 ## 原因
 
@@ -23,12 +23,14 @@ API 路径参数会被直接拼进 glob 模式与文件路径（backend/core/per
 
 ## 适用范围
 
-- backend/core/persistence/workspace_store.py —— `WorkspaceStore` 全部公开方法（全文 967 行）：任何会把 `episode_id`/`entity_id`/`entity_type`/`title`/`name` 拼进 glob 或文件路径的新增方法，首行必须调用 `_require_episode_id` / `_require_entity_id`。
+> **行号为 2026-09-19 快照，可能随版本漂移，以方法名为准**（本次修订不逐一重对标 L407/L517 等行号）。
+
+- backend/core/persistence/workspace_store.py —— `WorkspaceStore` 全部公开方法：任何会把 `episode_id`/`entity_id`/`entity_type`/`title`/`name` 拼进 glob 或文件路径的新增方法，首行必须调用 `_require_episode_id` / `_require_entity_id`。**后续新增方法均已遵守同一门禁**（均含 ID 校验/净化路径）：`read_story_title` / `set_story_title`（剧名读写）、`entity_references` / `delete_entity_unreferenced`（实体引用检查与安全删除：仅无引用实体可删）、`delete_last_episode`（删除最后一集）。
 - API/MCP 层：`EPISODE_ID_PATTERN` / `ENTITY_ID_PATTERN` 为 API schema 共享字符串（L47-48，注释 L45-46 说明 pydantic/FastAPI rust regex 引擎语义等价）；实际消费方：backend/schemas/script.py、backend/schemas/steps.py 的 Field(pattern=...)，backend/api/v1/script_sessions.py L48-49 的 `Path(pattern=...)` 路径参数。`WorkspaceStoreError` 继承 `ValueError`（L133-134），以复用 API/MCP 层既有捕获。
 - 净化与配置依赖：backend/core/utils/image_store.py 的 `sanitize_name`（L21-27）；backend/core/config.py L18-19 定义 `WORKSPACE_DIR`（项目根 workspace/，导入时 L24 `mkdir(parents=True, exist_ok=True)` 确保存在）；`WorkspaceStore.__init__`（workspace_store.py L186-197）缺省取该值并再次 mkdir。
 - 运行链（路径来源）：`session_manager` 缺省时 `_anchor_sm` 延迟导入 `backend.deps.get_script_session_manager` 单例（避免循环导入）；锚点回写——`ensure_story`/`rename_story` 调 `session_manager.set_workspace_path(sid, name)`，`delete_story` 置 None（L696）。
-- 回归防线：tests/manual/test_workspace_store.py（346 行，直接 python 运行的 smoke 断言集，非 pytest）。
-- 迁移永不 DROP 表：backend/scripts/migrate_db_to_workspace.py（L283/L321/L338 注释与实现均为「备份 + DELETE 行」，永不 DROP）；细则由 project-rules/workspace-authoritative-storage.md 约束。
+- 回归防线：tests/manual/ 现为 **6 个文件**（新增 test_agent_run_queue.py / test_lookbook_library.py / test_narrative_prompt_chain.py）；test_workspace_store.py（346 行，直接 python 运行的 smoke 断言集，非 pytest）仍为本门禁主防线；test_phase1_data.py 已改为**文件化架构下测试**（实体/分集读写走 WorkspaceStore，ScriptManager 仅剩任务状态机表）。
+- 迁移永不 DROP 表：backend/scripts/migrate_db_to_workspace.py（L283/L321/L338 注释与实现均为「备份 + DELETE 行」，永不 DROP）；细则由 project-rules/workspace-authoritative-storage.md 约束。ScriptManager 的 episodes/script_entities **影子表已退役**（DDL 与读写删除），迁移脚本仍用原生 SQL 只读对账 —— 本门禁（WorkspaceStore 的 ID 校验与路径净化）不受影响。
 
 ## 示例
 
@@ -113,3 +115,4 @@ _ENTITY_ID_RE = re.compile(r"^(chr|scn|clu|fs)_[0-9]{3,}\Z", re.ASCII)   # 至�
 |------|---------|
 | 2026-09-19 | 初始创建 — harness-init 基于源码分析自动生成 |
 | 2026-09-19 | 自校修正 — 测试文件行数 343→346、场景组 13→14（含 12b）；修正 `###` 转义语义（`#{2,}` 含 `###` 均转义，仅 `^##\s` 构成定界）；`upsert_entity` 校验行号 L434→L432-433（ensure_story 在 L435）；`WORKSPACE_DIR` 定义位置改为 config.py L18-19（`__init__` L186-197 为缺省取值处）；「迁移永不 DROP 表」由待补充占位改为已验证引用（migrate_db_to_workspace.py L283/L321/L338）；补充 PATTERN 实际消费方文件；「升级 ID 拒绝」措辞改「ID 变体拒绝」 |
+| 2026-09-21 | 迭代修订 — 适用范围追加 WorkspaceStore 新方法（read_story_title/set_story_title、entity_references/delete_entity_unreferenced（仅无引用实体可删）、delete_last_episode，均含 ID 校验/净化路径）；开头注明「行号为 2026-09-19 快照，以方法名为准」（L407/L517 等已漂移，不逐一重对标）；回归防线更新为 tests/manual 共 6 个文件（新增 test_agent_run_queue.py / test_lookbook_library.py / test_narrative_prompt_chain.py，test_phase1_data.py 已改文件化架构下测试）；补 ScriptManager episodes/script_entities 影子表退役说明（迁移脚本仍用原生 SQL 只读对账，本门禁不受影响） |

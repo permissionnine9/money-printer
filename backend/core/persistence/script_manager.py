@@ -64,13 +64,15 @@ class ScriptManager(BaseSQLiteManager):
         prompt: str,
         description: str = "",
         task_status: str = "pending",
+        image_path: str = "",
+        meta: Optional[dict] = None,
     ) -> dict:
         image_id = f"lb_{uuid.uuid4().hex[:10]}"
         now = self._now()
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO lookbook_images (image_id, script_session_id, entity_id, prompt, description, task_status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (image_id, script_session_id, entity_id, prompt, description, task_status, now, now),
+                "INSERT INTO lookbook_images (image_id, script_session_id, entity_id, prompt, description, task_status, image_path, meta, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (image_id, script_session_id, entity_id, prompt, description, task_status, image_path, dump_json(meta or {}), now, now),
             )
             conn.commit()
         return self.get_lookbook(image_id)
@@ -119,6 +121,26 @@ class ScriptManager(BaseSQLiteManager):
             "DELETE FROM lookbook_images WHERE image_id = ? AND script_session_id = ?",
             (image_id, script_session_id),
         )
+
+    def list_completed_lookbooks(self) -> list[dict]:
+        """素材库：全部剧本会话已完成且有图的定妆照（跨会话，新 → 旧）"""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM lookbook_images "
+                "WHERE task_status = 'completed' AND IFNULL(image_path, '') != '' "
+                "ORDER BY created_at DESC"
+            )
+            return [self._lookbook_to_dict(row) for row in cursor.fetchall()]
+
+    def list_completed_episode_materials(self) -> list[dict]:
+        """素材管理：全部剧本会话已完成且有图的分集素材图（跨会话，新 → 旧）"""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM episode_material_images "
+                "WHERE task_status = 'completed' AND IFNULL(image_path, '') != '' "
+                "ORDER BY created_at DESC"
+            )
+            return [row_to_dict(row, {"meta": {}}) for row in cursor.fetchall()]
 
     @staticmethod
     def _lookbook_to_dict(row: sqlite3.Row) -> dict:
@@ -196,14 +218,28 @@ class ScriptManager(BaseSQLiteManager):
 
     # ==================== 级联清理 ====================
 
-    def delete_script_data(self, script_session_id: str) -> dict:
-        """清空剧本会话的全部分集/实体/定妆照/分集素材图（大纲重生成时清下游）"""
+    def delete_script_data(self, script_session_id: str, keep_completed_lookbooks: bool = False) -> dict:
+        """清空剧本会话的全部分集/实体/定妆照/分集素材图（大纲重生成时清下游）
+
+        keep_completed_lookbooks=True 时保留已完成且有图的定妆照行（作为历史素材，
+        供第 4 步素材库复用）；未完成/失败行仍删除（避免前端死轮询）。
+        分集素材图两种模式都全删（与集号强绑定，保留只会污染素材池）。
+        """
         with self._connect() as conn:
             lookbooks = conn.execute("SELECT COUNT(*) FROM lookbook_images WHERE script_session_id = ?", (script_session_id,)).fetchone()[0]
             materials = conn.execute("SELECT COUNT(*) FROM episode_material_images WHERE script_session_id = ?", (script_session_id,)).fetchone()[0]
-            conn.execute("DELETE FROM lookbook_images WHERE script_session_id = ?", (script_session_id,))
+            if keep_completed_lookbooks:
+                deleted = conn.execute(
+                    "DELETE FROM lookbook_images WHERE script_session_id = ? "
+                    "AND NOT (task_status = 'completed' AND IFNULL(image_path, '') != '')",
+                    (script_session_id,),
+                ).rowcount
+                kept = lookbooks - deleted
+            else:
+                conn.execute("DELETE FROM lookbook_images WHERE script_session_id = ?", (script_session_id,))
+                kept = 0
             conn.execute("DELETE FROM episode_material_images WHERE script_session_id = ?", (script_session_id,))
             conn.commit()
-        counts = {"lookbook_images": lookbooks, "episode_material_images": materials}
+        counts = {"lookbook_images": lookbooks, "lookbook_images_kept": kept, "episode_material_images": materials}
         logger.info(f"[剧本] 清理下游数据 {script_session_id[:8]}...: {counts}")
         return counts

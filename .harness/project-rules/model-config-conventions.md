@@ -1,13 +1,13 @@
 ---
 name: model-config-conventions
-摘要: 模型配置统一存 SQLite image_models（model_type 分 image/chat/agent，同类型默认互斥）；agent 端点经 build_agent_env 注入子进程 env，image 端点经工厂函数构建；Agent 默认零工具、写侧仅经 MCP 注入，无内置默认与环境变量回退。
-tags: [模型配置, ModelManager, image_models, build_agent_env, claude-agent-sdk, Agent调用, MCP, 生图服务, ImageService]
+摘要: 模型配置统一存 SQLite image_models（model_type 分 image/chat/agent，同类型默认互斥）；agent 端点经 build_agent_env 注入子进程 env，image 端点经工厂函数构建；Agent 默认零工具、写侧仅经 MCP 注入，无内置默认与环境变量回退；结构化输出能力已移除（prompt 约束 + 调用方 parse 承担），SDK 流缓冲上限提升至 16MB。
+tags: [模型配置, ModelManager, image_models, build_agent_env, claude-agent-sdk, Agent调用, MCP, 生图服务, ImageService, MAX_STREAM_BUFFER_SIZE]
 ---
 
 # 模型配置与 Agent 调用约定
 
 **类别:** 实现规范
-**最后更新:** 2026-09-19
+**最后更新:** 2026-09-21
 
 ## 原因
 
@@ -72,8 +72,9 @@ router 挂载于 `app.include_router(models.router, prefix="/api/v1/models")`（
 
 ### 4. Agent 调用：AgentRunOptions 与 run_agent()（backend/core/agent_sdk/wrapper.py）
 
-- `READ_ONLY_TOOLS = ['Read', 'Grep', 'Glob']`（模块级常量，line 46）。代码注释承认（注释非事实采信来源，仅记录代码原文）：cwd 不是沙箱，`bypassPermissions` 下 Read/Grep/Glob 技术上可读任意绝对路径，「仅限工作区」由 system prompt 与 MAP.md 软约束。
-- `AgentRunOptions` dataclass：
+- `READ_ONLY_TOOLS = ['Read', 'Grep', 'Glob']`（模块级常量）。代码注释承认（注释非事实采信来源，仅记录代码原文）：cwd 不是沙箱，`bypassPermissions` 下 Read/Grep/Glob 技术上可读任意绝对路径，「仅限工作区」由 system prompt 与 MAP.md 软约束。
+- `MAX_STREAM_BUFFER_SIZE = 16*1024*1024`（模块常量，wrapper.py 约 L40）：SDK stream-json 单条消息解析缓冲上限。**动机**：Agent Read 图片时 tool_result 会回显整图 base64，2K/4K 原图会撑爆 SDK 默认 1MB 上限，报 `JSON message exceeded maximum buffer size of 1048576 bytes`；构造 `ClaudeAgentOptions` 时传 `max_buffer_size=MAX_STREAM_BUFFER_SIZE` 规避。
+- `AgentRunOptions` dataclass（**output_format 字段已删除**，结构化输出能力整体移除）：
 
 | 字段 | 默认 | 语义 |
 |------|------|------|
@@ -85,12 +86,11 @@ router 挂载于 `app.include_router(models.router, prefix="/api/v1/models")`（
 | cwd | None | Agent Read/Grep/Glob 边界锚点；缺省继承后端进程 cwd |
 | resume | None | 多轮 session_id |
 | interrupt | None | asyncio.Event |
-| output_format | None | JSON Schema 结构化输出 |
 | env | None | None 时调 `build_agent_env()` |
 
 - `run_agent()`：
   - `env = options.env or build_agent_env()`；
-  - 构造 `ClaudeAgentOptions(permission_mode='bypassPermissions', include_partial_messages=True, max_thinking_tokens=DEFAULT_THINKING_TOKENS=6000, setting_sources=[]（隔离子进程，不加载用户级/项目级设置与插件）, env=env, resume, cwd)`；`output_format` 非空时附加；
+  - 构造 `ClaudeAgentOptions(permission_mode='bypassPermissions', include_partial_messages=True, max_thinking_tokens=DEFAULT_THINKING_TOKENS=6000, setting_sources=[]（隔离子进程，不加载用户级/项目级设置与插件）, env=env, resume, cwd, max_buffer_size=MAX_STREAM_BUFFER_SIZE)`；
   - 发 LLM 调用前先 emit `type='prompt'` 事件（含最终 system_prompt / user_prompt / model=env.ANTHROPIC_MODEL），提示词透明化。
 - 消息处理：
 
@@ -99,19 +99,20 @@ router 挂载于 `app.include_router(models.router, prefix="/api/v1/models")`（
 | StreamEvent | content_block_start（tool_use 登记 id→name/index）；content_block_delta（thinking / text_delta / input_json_delta） |
 | AssistantMessage | ThinkingBlock / ToolUseBlock / TextBlock，与流式增量去重 |
 | UserMessage | ToolResultBlock → tool_result 事件，preview 截断 50000 字符 |
-| ResultMessage | success → text / session_id / structured_output / usage / cost_usd；否则 error 事件；收到后主动 break（Client 模式可多轮 query，不自动结束） |
+| ResultMessage | success → text / session_id / usage / cost_usd；否则 error 事件；收到后主动 break（Client 模式可多轮 query，不自动结束）。`structured_output` 读取已随 output_format 能力删除 |
 | ProcessError / CLIConnectionError | → error 事件 |
 | CancelledError | → interrupted=True |
 
-- `run_conversation()`：便捷 API，内部包装 `run_agent`（`mcp_servers=tools`、`resume=agent_session_id`）管理多轮 resume。
+- `run_conversation()`：便捷 API，内部包装 `run_agent`（`resume=agent_session_id`）管理多轮 resume；**签名已删除 tools（mcp_servers）参数** —— ideation 多轮对话不再支持 MCP 注入。结构化产出改由 **prompt 约束 + 调用方解析**（`AgentStepService.run` 的 parse 回调）承担。
 - SDK：claude-agent-sdk（pyproject 约束 `>=0.2.154`，uv.lock 锁定 0.2.154；`ClaudeSDKClient` 驱动本机 Claude Code CLI 子进程）；会话由 SDK 自动落盘 `~/.claude/projects/`。
 
 ### 5. 工具授权与写侧机制
 
-- wrapper 自身无写工具；写入能力仅经 `AgentRunOptions.mcp_servers` 由调用方注入进程内 MCP server。当前唯一注册点：`backend/core/agents/script_workflow.py` 中 `create_sdk_mcp_server(name='script_design', version='1.0.0', tools=[...])`，工具清单共 5 个：
+- wrapper 自身无写工具；写入能力仅经 `AgentRunOptions.mcp_servers` 由调用方注入进程内 MCP server。当前唯一注册点：`backend/core/agents/script_workflow.py` 中 `create_sdk_mcp_server(name='script_design', version='1.0.0', tools=[...])`，工具清单共 5 个（不变）：
   - `_upsert('character')` / `_upsert('scene')` / `_upsert('clue')` / `_upsert('foreshadow')`：四类实体卡的 upsert 工具；
   - `save_episode`：保存分集设计（含单集重设计约束 —— `single_episode_id` 非空时只允许保存该集；落盘前经 `_validate_episode` 校验），直接调 `self.store`（WorkspaceStore）的 `upsert_episode` 等方法落盘。
-- ScriptWorkflow 构造时 `store=None` 则经 `backend.deps.get_workspace_store()` 注入 WorkspaceStore。
+- script_workflow.py 现经**注入的 AgentStepService / ImageTaskService 编排**（ScriptWorkflow 构造签名含 `script_manager`），生图任务状态由 ImageTaskService 落 DB、不再在 workflow 内手写。
+- 核心素材图（原「定妆照」）生成 prompt 已由英文模板改为**中文**（人物三视图 / 场景全景，130-220 中文字）。
 
 ### 6. image 端点：生图服务工厂（backend/core/services/image_service.py）
 
@@ -161,7 +162,7 @@ router 挂载于 `app.include_router(models.router, prefix="/api/v1/models")`（
 4. 生图只经 `build_image_service_from_model_config(model_config_id)` 工厂构建 ImageService，不在生图链路里内置默认配置或加环境变量回退。
 5. 设默认模型走 `create_model(is_default)` / `update_model(is_default)` / `set_default`，依赖其同类型默认互斥逻辑（先清同类型再置目标）。
 6. 更新已有默认模型配置时依赖 `update_model` 的幂等保护（清除同类型默认时排除自身 id，`WHERE model_type=? AND id != ?`）。
-7. 多轮对话用 `run_conversation()`（内部包装 run_agent：`mcp_servers=tools`、`resume=agent_session_id`）管理 resume。
+7. 多轮对话用 `run_conversation()`（内部包装 run_agent：`resume=agent_session_id`）管理 resume；**不传 tools/mcp_servers**（签名已无该参数）。需要结构化产出时在 prompt 中约定输出格式，由调用方解析（如 `AgentStepService.run` 的 parse 回调）。
 
 ❌ **错误做法:**
 
@@ -173,6 +174,8 @@ router 挂载于 `app.include_router(models.router, prefix="/api/v1/models")`（
 6. 依赖生图 submit/poll 的 timeout / poll_interval 参数做异步等待 —— 参数未使用，实际是同步结果缓存在 `_sync_results`。
 7. 假定 chat 类型默认模型已有运行时消费方 —— 当前全库唯一读取点是 backend/config.py 启动日志（override_src_config），请求链路中无人消费。
 8. create/update 模型时使用 MODEL_TYPES 之外的 model_type —— 会 `raise ValueError`（API 层同样返回 400）。
+9. 期望 `AgentRunResult.structured_output` —— **已删除**（AgentRunOptions.output_format 与 msg.structured_output 读取均已移除），结构化产出改由 prompt 约束 + 调用方 parse 回调承担。
+10. 向 `run_conversation()` 传 tools/mcp_servers —— 签名已删除该参数，ideation 多轮对话不支持 MCP 注入。
 
 ## 待补充
 
@@ -186,3 +189,4 @@ router 挂载于 `app.include_router(models.router, prefix="/api/v1/models")`（
 |------|------|
 | 2026-09-19 | 初始创建 — harness-init 基于源码分析自动生成 |
 | 2026-09-19 | 自校修正：删除不存在的 llm_service.pyc 引用（第 7 节改为「chat 默认模型仅 config.py 启动日志读取，无运行时消费方」）；补全 models API schema（api_key 明文往返、image 类型 model_id 必填）；补全 script_design MCP 工具清单（upsert×4 + save_episode）；SDK 版本表述精确为 pyproject >=0.2.154 / uv.lock 锁定 0.2.154 |
+| 2026-09-21 | 迭代修订 — 删除 output_format 相关事实（AgentRunOptions.output_format、AgentRunResult.structured_output、ClaudeAgentOptions.output_format 注入与 ResultMessage structured_output 读取）；run_conversation 签名删除 tools（mcp_servers）参数；新增 wrapper 模块常量 MAX_STREAM_BUFFER_SIZE=16MB（Agent Read 图片时 tool_result 回显整图 base64 撑爆 SDK 默认 1MB，构造 ClaudeAgentOptions 传 max_buffer_size）；第 5 节补 script_workflow 经注入的 AgentStepService/ImageTaskService 编排（构造含 script_manager）、核心素材图 prompt 改中文（人物三视图/场景全景，130-220 中文字）；示例与错误做法同步修订 |

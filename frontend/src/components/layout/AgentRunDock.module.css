@@ -1,9 +1,33 @@
-.dock {
+/* 右上角悬浮按钮（默认收起态）；z-index 低于 antd Modal 遮罩(1000)，弹窗打开时沉到遮罩下 */
+.toggle {
   position: fixed;
   top: 72px; /* Header 64px + 8px */
   right: 16px;
+  z-index: 999;
+  background: #fff;
+  border-radius: 999px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  padding: 4px 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggleInner {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  padding: 2px 4px;
+}
+
+.dock {
+  position: fixed;
+  top: 108px; /* 悬浮按钮下方 */
+  right: 16px;
   width: 300px;
-  z-index: 1000;
+  max-height: calc(100vh - 140px); /* 多任务时不溢出视口 */
+  overflow-y: auto;
+  z-index: 999;
   display: flex;
   flex-direction: column;
   gap: 8px;
