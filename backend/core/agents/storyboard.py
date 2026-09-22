@@ -324,6 +324,19 @@ class StoryboardWorkflow(StepWorkflowBase):
 
         return {"segment": seg}
 
+    def update_segment_prompt(self, session_id: str, index: int, prompt: str) -> dict:
+        """手动编辑保存分镜提示词（直接落文件；不清参考图、不动 configured 完成态）"""
+        prompt = prompt.strip()
+        if not prompt:
+            raise StoryboardError("分镜提示词不能为空")
+        with self._segment_lock(session_id):
+            self._find_segment(self._get_outline_data(session_id), index)  # 存在性校验
+            script_session_id, episode_id = self._storyboard_loc(session_id)
+            seg = self.store.update_segment_fields(
+                script_session_id, episode_id, session_id, index, {"prompt": prompt},
+            )
+        return {"segment": seg}
+
     # ==================== 第 3 步：分镜参考素材图 ====================
 
     def list_material_pool(self, session_id: str) -> dict:

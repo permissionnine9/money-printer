@@ -30,6 +30,7 @@ import {
   CheckCircleOutlined,
   CopyOutlined,
   DeleteOutlined,
+  EditOutlined,
   FileTextOutlined,
   PictureOutlined,
   PlusOutlined,
@@ -104,6 +105,12 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
     context: PromptContextView | null
     loading: boolean
   }>({ open: false, context: null, loading: false })
+  // 分镜提示词手动编辑弹窗
+  const [promptEdit, setPromptEdit] = useState<{ open: boolean; text: string; saving: boolean }>({
+    open: false,
+    text: '',
+    saving: false,
+  })
   // 批量生成分镜脚本：勾选的分镜索引集合（仅全能参考模式可勾选）与批量提交中状态
   const [checkedIndexes, setCheckedIndexes] = useState<Set<number>>(new Set())
   const [batchStarting, setBatchStarting] = useState(false)
@@ -228,6 +235,29 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
       extra: { segmentIndex: selected.index, segmentTitle: selected.title },
       invoke: () => stepApi.generateSegmentPrompt(session.session_id, selected.index),
     })
+  }
+
+  const openPromptEdit = () => {
+    setPromptEdit({ open: true, text: selected?.prompt ?? '', saving: false })
+  }
+
+  const savePromptEdit = async () => {
+    if (!selected) return
+    const text = promptEdit.text.trim()
+    if (!text) {
+      message.warning('提示词不能为空')
+      return
+    }
+    setPromptEdit((s) => ({ ...s, saving: true }))
+    try {
+      await stepApi.updateSegmentPrompt(session.session_id, selected.index, text)
+      message.success('分镜提示词已保存')
+      setPromptEdit({ open: false, text: '', saving: false })
+      await refreshSession()
+    } catch (e) {
+      message.error((e as Error).message)
+      setPromptEdit((s) => ({ ...s, saving: false }))
+    }
   }
 
   const toggleChecked = (index: number, checked: boolean) => {
@@ -387,6 +417,31 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
           </div>
         )}
       </Spin>
+    </Modal>
+  )
+
+  const promptEditModalNode = (
+    <Modal
+      title={`编辑分镜提示词 - 分镜 ${(selected?.index ?? 0) + 1}${selected?.title ? `《${selected.title}》` : ''}`}
+      open={promptEdit.open}
+      onCancel={() => setPromptEdit({ open: false, text: '', saving: false })}
+      footer={[
+        <Button key="cancel" onClick={() => setPromptEdit({ open: false, text: '', saving: false })}>
+          取消
+        </Button>,
+        <Button key="save" type="primary" loading={promptEdit.saving} onClick={() => void savePromptEdit()}>
+          保存
+        </Button>,
+      ]}
+      width={720}
+      destroyOnHidden
+    >
+      <TextArea
+        value={promptEdit.text}
+        onChange={(e) => setPromptEdit((s) => ({ ...s, text: e.target.value }))}
+        autoSize={{ minRows: 12, maxRows: 24 }}
+        placeholder="输入分镜提示词…"
+      />
     </Modal>
   )
 
@@ -590,9 +645,14 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
                         </Button>
                       </Tooltip>
                       {selected.prompt && (
-                        <Button size="small" icon={<CopyOutlined />} onClick={copyPrompt}>
-                          复制
-                        </Button>
+                        <>
+                          <Button size="small" icon={<CopyOutlined />} onClick={copyPrompt}>
+                            复制
+                          </Button>
+                          <Button size="small" icon={<EditOutlined />} onClick={openPromptEdit}>
+                            编辑
+                          </Button>
+                        </>
                       )}
                     </Space>
                   }
@@ -708,6 +768,7 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
         )}
       </Card>
       {promptModalNode}
+      {promptEditModalNode}
       {/* 分镜大纲查看弹窗 */}
       <Modal
         title={

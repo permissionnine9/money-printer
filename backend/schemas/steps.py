@@ -33,6 +33,11 @@ class SegmentConfigUpdateRequest(BaseModel):
     overlap: Optional[int] = Field(None, ge=0, le=3, description="与上一分镜的重叠秒数（0-3）")
 
 
+class SegmentPromptUpdateRequest(BaseModel):
+    """步骤3：手动编辑保存分镜提示词"""
+    prompt: str = Field(..., min_length=1, description="分镜提示词正文")
+
+
 class SegmentReferenceImageIn(BaseModel):
     """步骤3：分镜参考图条目（保存时从素材源刷新 image_path）"""
     image_id: str = Field(..., description="素材池 ID（mat_* / lookbook_lb_*）")

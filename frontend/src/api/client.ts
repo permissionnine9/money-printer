@@ -179,6 +179,16 @@ export const stepApi = {
     return runId
   },
 
+  // 步骤3：手动编辑保存分镜提示词
+  updateSegmentPrompt: async (
+    sessionId: string,
+    index: number,
+    prompt: string
+  ): Promise<{ success: boolean; data: { segment: StoryboardSegment } }> => {
+    const { data } = await client.put(`/steps/${sessionId}/storyboard-segments/${index}/prompt`, { prompt })
+    return data
+  },
+
   // 步骤3：完成/取消完成单个分镜的配置（≥1 个分镜完成即可进入步骤4）
   completeSegment: async (sessionId: string, index: number, completed = true): Promise<StepResponse> => {
     const { data } = await client.post(`/steps/${sessionId}/storyboard-segments/${index}/complete`, { completed })

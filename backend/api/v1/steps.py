@@ -16,6 +16,7 @@ from backend.schemas.steps import (
     StoryboardOutlineGenerateRequest,
     StoryboardOutlineUpdateRequest,
     SegmentConfigUpdateRequest,
+    SegmentPromptUpdateRequest,
     SegmentReferenceImagesUpdateRequest,
     SegmentMaterialGenerateRequest,
     SegmentCompleteRequest,
@@ -111,6 +112,18 @@ async def update_segment_config(
     result = get_storyboard_workflow().update_segment_config(
         session_id, index, body.model_dump(exclude_none=True),
     )
+    return {"success": True, "data": result}
+
+
+@router.put("/{session_id}/storyboard-segments/{index}/prompt")
+async def update_segment_prompt(
+    session_id: str,
+    index: int,
+    body: SegmentPromptUpdateRequest,
+    _session_info: dict = Depends(load_video_session),
+):
+    """步骤3：手动编辑保存分镜提示词（不清参考图、不动 configured 完成态）"""
+    result = get_storyboard_workflow().update_segment_prompt(session_id, index, body.prompt)
     return {"success": True, "data": result}
 
 
