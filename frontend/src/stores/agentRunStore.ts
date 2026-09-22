@@ -5,11 +5,18 @@
 import { create } from 'zustand'
 
 /** 任务类型（判别字段：决定 Dock 的文案与终态刷新哪个会话 store） */
-export type AgentRunKind = 'segment_prompt' | 'outline' | 'episodes' | 'storyboard_outline' | 'lookbook'
+export type AgentRunKind =
+  | 'segment_prompt'
+  | 'segment_material'
+  | 'outline'
+  | 'episodes'
+  | 'storyboard_outline'
+  | 'lookbook'
 
 /** 任务类型元数据（单一来源）：label 为显示名；script=true 终态刷新 scriptSessionStore */
 export const RUN_KIND_META: Record<AgentRunKind, { label: string; script: boolean }> = {
   segment_prompt: { label: '分镜提示词', script: false },
+  segment_material: { label: '分镜素材图', script: false },
   outline: { label: '故事大纲', script: true },
   episodes: { label: '分集设计', script: true },
   storyboard_outline: { label: '分镜大纲', script: false },
@@ -41,6 +48,8 @@ export const runDisplayName = (
   switch (run.kind) {
     case 'segment_prompt':
       return `分镜 ${(run.segmentIndex ?? 0) + 1}${run.segmentTitle ? `《${run.segmentTitle}》` : ''}`
+    case 'segment_material':
+      return `分镜 ${(run.segmentIndex ?? 0) + 1}${run.segmentTitle ? `《${run.segmentTitle}》` : ''}素材图`
     case 'outline':
       return '故事大纲'
     case 'episodes':
@@ -127,3 +136,9 @@ export const hasRunningSegmentPrompt = (sessionId: string, segmentIndex: number)
   useAgentRunStore
     .getState()
     .runs.some((r) => isActiveRun(r, sessionId, 'segment_prompt') && r.segmentIndex === segmentIndex)
+
+/** 组件外可调用的防重复守卫：同会话同分镜是否已有进行中/排队中的素材图生成 */
+export const hasRunningSegmentMaterial = (sessionId: string, segmentIndex: number) =>
+  useAgentRunStore
+    .getState()
+    .runs.some((r) => isActiveRun(r, sessionId, 'segment_material') && r.segmentIndex === segmentIndex)

@@ -15,6 +15,7 @@ import threading
 from typing import Optional
 
 from backend.core.agent_sdk import AgentEvent
+from backend.core.agents.script_workflow import LOOKBOOK_VIDEO_PARAMS
 from backend.core.agents.system_prompts import (
     MATERIAL_GENERATE_SYSTEM,
     SEGMENT_PROMPT_SYSTEM,
@@ -32,7 +33,6 @@ from backend.core.services.image_service import build_image_service_from_model_c
 from backend.core.services.image_task_service import ImageTaskService, ImageTaskSpec
 from backend.core.services.material_pool_service import MaterialPoolService
 from backend.core.services.script_context_service import ScriptContextService
-from backend.core.services.video_prompt_skill import sync_video_prompt_skill
 from backend.core.services.workspace_sections import (
     get_selected_episode,
     load_story_outline,
@@ -480,7 +480,9 @@ class StoryboardWorkflow(StepWorkflowBase):
         # 3. 生图（OpenAI 协议：提交即同步完成，poll 取回缓存结果）+ 归档图库
         #    static/images/{story_name}/{episode_name}/（归档钩子回写 image_path/meta）
         image_service = build_image_service_from_model_config(model_config_id)
-        video_params = VideoParams(**selected.get("video_params", {}))
+        # 素材图生图参数对齐核心素材（Lookbook）写死 1080p/16:9：
+        # 用户视频参数（如 480p）会算出 864x480，低于生图 API 最小 655360 像素被拒
+        video_params = LOOKBOOK_VIDEO_PARAMS
         story_name = self.store.story_title(script_session_id) or f"story_{script_session_id[:8]}"
         episode_name = selected.get("episode_title") or episode_id
 
@@ -649,14 +651,9 @@ class StoryboardWorkflow(StepWorkflowBase):
         seg_path = self.store.segment_path(script_session_id, episode_id, session_id, index)
         episode_path = self.store.episode_path(script_session_id, episode_id)
 
-        # 渐进式披露：skill 规范全文同步进工作区，prompt 只留必读指引
-        story_root = self.store.story_dir(script_session_id)
-        skill_rel = sync_video_prompt_skill(story_root).relative_to(story_root).as_posix()
-
-        user_prompt = f"""## 提示词生成规范（必读，完整遵循）
-目录：{skill_rel}/
-1. 先 Read {skill_rel}/SKILL.md（总体流程与规范）
-2. 再依次 Read {skill_rel}/references/ 下 scene-expansion.md、cinematic-script.md、shot-and-sound.md
+        user_prompt = f"""## 提示词生成规范
+先调用 Skill 工具加载 video-prompt，严格遵循其规范与输出契约生成本分镜提示词
+（执行式：直接产出视频生成模型可读的指令）。
 
 ## 剧本工作区（你只可在该目录内使用 Read/Grep/Glob 自主检索，禁止越界）
 {workspace_section(self.store, script_session_id, episode_id)}
@@ -681,7 +678,7 @@ class StoryboardWorkflow(StepWorkflowBase):
 - 全剧主线与前后集衔接：01-outline/outline.md 与 02-episodes/ 相邻集文件
 
 ## 输出要求
-只输出本分镜的最终提示词文本（不要 JSON、不要解释、不要分镜表索引）。"""
+只输出本分镜的最终提示词正文（本分镜全文 ≤3000 字），格式遵循 video-prompt skill 的输出契约。"""
         system_prompt = SEGMENT_PROMPT_SYSTEM
 
         def _parse_prompt(text: str) -> str:
@@ -690,12 +687,14 @@ class StoryboardWorkflow(StepWorkflowBase):
                 raise StoryboardError("分镜提示词生成为空，请重试")
             return prompt_text
 
-        # 剧本目录内自主检索 + 必读 skill 规范文件，留足 Read 轮次
+        # 剧本目录内自主检索 + video-prompt skill（SDK 原生加载：Skill 工具 + 项目级发现）
         prompt_text = await self.agent_steps.run(
             "分镜提示词生成",
             prompt=user_prompt,
             system_prompt=system_prompt,
             cwd=self.store.story_cwd(script_session_id),
+            thinking_tokens=2500,
+            skills=["video-prompt"],
             max_turns=16,
             interrupt=interrupt,
             on_event=on_event,
@@ -789,7 +788,8 @@ class StoryboardWorkflow(StepWorkflowBase):
                     "max_images": self.MAX_AUTO_MATCH_REFS,
                 },
                 system_prompt=SEGMENT_REF_MATCH_SYSTEM,
-                max_turns=4,
+                thinking_tokens=2500,
+                max_turns=5,
                 interrupt=interrupt,
                 on_event=on_event,
                 parse=_parse_match,

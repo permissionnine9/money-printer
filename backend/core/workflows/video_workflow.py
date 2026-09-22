@@ -419,7 +419,7 @@ class VideoCreationWorkflowV2:
         if not parts:
             return ""
         parts.append("所有分镜共享以上语境，画面气质、光线情绪与节奏密度须与本集戏剧走向保持一致;")
-        parts.append("人物标准语言为普通话。")
+        parts.append("任务对话标准语言为‘普通话’。")
         return "\n".join(parts)
 
     async def prepare_comfyui_import(

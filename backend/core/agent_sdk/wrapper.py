@@ -32,6 +32,7 @@ from claude_agent_sdk import (
 
 from backend.core.agent_sdk.events import AgentEvent
 from backend.core.agent_sdk.model_env import build_agent_env
+from backend.core.utils.path_utils import PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +50,8 @@ MAX_STREAM_BUFFER_SIZE = 16 * 1024 * 1024
 READ_ONLY_TOOLS = ["Read", "Grep", "Glob"]
 
 
-def _build_allowed_tools(cwd: Optional[str], mcp_servers: Optional[dict]) -> list[str]:
-    """构造 dontAsk 模式下的自动放行清单：工作区路径规则 + MCP server 白名单
+def _build_allowed_tools(cwd: Optional[str], mcp_servers: Optional[dict], skills: Optional[list[str]]) -> list[str]:
+    """构造 dontAsk 模式下的自动放行清单：工作区路径规则 + MCP server 白名单 + skill 目录
 
     Read/Grep/Glob 必须带路径 specifier（裸 "Grep" 会放行任意 path 参数，可越界检索）；
     绝对路径规则用 // 前缀（gitignore 风格，见 Claude Code 权限规则语法）。
@@ -61,6 +62,10 @@ def _build_allowed_tools(cwd: Optional[str], mcp_servers: Optional[dict]) -> lis
         allowed += [f"Read(//{root}/**)", f"Grep(//{root}/**)", f"Glob(//{root}/**)"]
     for server_name in (mcp_servers or {}):
         allowed.append(f"mcp__{server_name}")
+    if skills:
+        # skill 的 references 按需 Read 深读（skill 目录在工作区外，须显式放行只读）
+        skill_root = (PROJECT_ROOT / ".claude" / "skills").resolve()
+        allowed.append(f"Read(//{skill_root}/**)")
     return allowed
 
 
@@ -77,6 +82,11 @@ class AgentRunOptions:
     # 工作目录（Read/Grep/Glob 的硬边界锚点：仅该目录内放行，越界路径由 CLI 权限系统拒绝；
     # 同时作为相对路径基准；缺省继承后端进程 cwd）
     cwd: Optional[str] = None
+    # 思考 token 预算（缺省 DEFAULT_THINKING_TOKENS；格式化输出类任务可调低加速）
+    thinking_tokens: Optional[int] = None
+    # 启用的 Claude Code skill（按 SKILL.md name；发现走项目根 .claude/skills/，
+    # Skill 工具自动启用，skill 目录 Read 自动放行）
+    skills: Optional[list[str]] = None
     # 多轮会话：要 resume 的 agent session_id（首轮留空由 SDK 生成）
     resume: Optional[str] = None
     # 触发后调用 client.interrupt() 取消运行
@@ -103,19 +113,25 @@ async def run_agent(
     """运行一次 agent，事件经 on_event 回调流出，返回最终结果"""
     env = options.env or build_agent_env()
 
+    # skills 需显式启用 Skill 工具（skills 选项只管权限放行，不管工具可用性）
+    tools = options.tools if options.tools is not None else []
+    if options.skills and options.tools is not None:
+        tools = [*tools, "Skill"]
+
     sdk_options = ClaudeAgentOptions(
         system_prompt=options.system_prompt,
         max_turns=options.max_turns,
-        tools=options.tools if options.tools is not None else [],
+        tools=tools,
         mcp_servers=options.mcp_servers or {},
         # dontAsk：未在 allowed_tools 白名单内的调用一律硬拒绝（无头模式无人工确认）
         permission_mode="dontAsk",
-        allowed_tools=_build_allowed_tools(options.cwd, options.mcp_servers),
+        allowed_tools=_build_allowed_tools(options.cwd, options.mcp_servers, options.skills),
+        # skill 发现依赖项目级配置扫描（setting_sources=[] 隔离模式下 CLI 不加载任何 skill）
+        setting_sources=["project"] if options.skills else [],
+        skills=options.skills,
         include_partial_messages=True,
-        max_thinking_tokens=DEFAULT_THINKING_TOKENS,
+        max_thinking_tokens=options.thinking_tokens or DEFAULT_THINKING_TOKENS,
         max_buffer_size=MAX_STREAM_BUFFER_SIZE,
-        # 隔离模式：禁止子进程加载任何用户级/项目级设置与插件
-        setting_sources=[],
         env=env,
         resume=options.resume,
         cwd=options.cwd,

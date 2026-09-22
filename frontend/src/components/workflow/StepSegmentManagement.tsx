@@ -240,11 +240,29 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
   }
 
   // 批量生成分镜脚本：勾选的分镜按顺序逐个加入任务队列（每个间隔 1 秒，相当于逐个点击；跳过弹窗预览）
-  const handleBatchGenerate = async () => {
+  const handleBatchGenerate = () => {
     const list = segments
       .filter((s) => checkedIndexes.has(s.index) && s.mode === 'all_reference')
       .sort((a, b) => a.index - b.index)
     if (!list.length) return
+    // 勾选中已有分镜脚本（提示词）时二次确认，避免误覆盖
+    const existingCount = list.filter((s) => s.prompt).length
+    if (existingCount > 0) {
+      Modal.confirm({
+        title: '部分分镜脚本已存在',
+        content: `勾选的 ${list.length} 个分镜中有 ${existingCount} 个已生成分镜脚本，重新生成将覆盖原有脚本。确定继续吗？`,
+        okText: '继续生成',
+        okType: 'danger',
+        cancelText: '取消',
+        onOk: () => void runBatchGenerate(list),
+      })
+      return
+    }
+    void runBatchGenerate(list)
+  }
+
+  // 批量入队执行（由 handleBatchGenerate 在二次确认后调用）
+  const runBatchGenerate = async (list: StoryboardSegment[]) => {
     setBatchStarting(true)
     try {
       for (let i = 0; i < list.length; i++) {
@@ -394,19 +412,21 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
             )}
             <Tooltip title="将勾选的分镜按顺序逐个加入提示词生成任务队列（仅全能参考模式，跳过生成前预览）">
               <Button
-                size="small"
-                type="primary"
+                size="middle"
+                type="default"
+                danger
                 icon={<ThunderboltOutlined />}
                 disabled={!checkedIndexes.size}
                 loading={batchStarting}
-                onClick={() => void handleBatchGenerate()}
+                onClick={handleBatchGenerate}
               >
                 批量生成分镜脚本
               </Button>
             </Tooltip>
             <Tooltip title="仅对勾选中「已生成分镜提示词」的分镜生效，未生成提示词的勾选将被忽略">
               <Button
-                size="small"
+                size="middle"
+                type="primary"
                 icon={<CheckCircleOutlined />}
                 disabled={!checkedPromptCount}
                 loading={batchCompleting}
@@ -495,18 +515,7 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
                           </Button>
                         </Popconfirm>
                       ) : (
-                        <Tooltip title={selected.prompt ? undefined : '请先生成分镜提示词，再完成配置'}>
-                          <Button
-                            size="small"
-                            type="primary"
-                            icon={<CheckCircleOutlined />}
-                            loading={completing}
-                            disabled={!selected.prompt}
-                            onClick={() => completeSegment(selected.index, true)}
-                          >
-                            完成当前分镜配置
-                          </Button>
-                        </Tooltip>
+                        null
                       )}
                       <Button size="small" icon={<FileTextOutlined />} onClick={() => setOutlineOpen(true)}>
                         查看分镜大纲
@@ -744,7 +753,6 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
           segmentMaterials={selected.reference_images || []}
           open={genOpen}
           onClose={() => setGenOpen(false)}
-          onGenerated={refreshSession}
         />
       )}
     </>

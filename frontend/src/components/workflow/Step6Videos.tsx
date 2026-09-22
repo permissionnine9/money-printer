@@ -253,7 +253,8 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
     setImportLoading(true)
     try {
       const response = await stepApi.importComfyUI(
-        session.session_id, effectiveSelected, globalPrompt.trim() || undefined,
+        // 输入框值未被用户编辑过（只是回显上次导入的 auto 值）时不回传，让后端每次重新自动生成
+        session.session_id, effectiveSelected, globalPromptTouched ? (globalPrompt.trim() || undefined) : undefined,
       )
       if (response.success) {
         message.success(response.message || '已导入到 ComfyUI，可点击「开始生成视频」执行')
@@ -675,8 +676,8 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
                     ↔{seg.overlap}s
                   </Tag>
                 )}
-                {inThisRun && renderStatusTag(getVideoStatus(video))}
               </div>
+                {inThisRun && renderStatusTag(getVideoStatus(video))}
             </div>
           )
         })}

@@ -55,6 +55,9 @@ export const AgentRunDock: React.FC = () => {
           }
           break
         }
+        case 'segment_material':
+          message.success(`${name}已生成并加入本分镜`)
+          break
         case 'episodes':
           message.success(run.episodeId ? `${run.episodeId} 重新设计完成` : `${RUN_KIND_META[run.kind].label}生成完成`)
           break
@@ -141,9 +144,11 @@ export const AgentRunDock: React.FC = () => {
           title={
             run.kind === 'segment_prompt'
               ? `生成分镜提示词 - ${runDisplayName(run)}`
-              : run.episodeId
-                ? `重新设计 ${run.episodeId}`
-                : `生成${RUN_KIND_META[run.kind].label}`
+              : run.kind === 'segment_material'
+                ? `AI 生成素材图 - ${runDisplayName(run)}`
+                : run.episodeId
+                  ? `重新设计 ${run.episodeId}`
+                  : `生成${RUN_KIND_META[run.kind].label}`
           }
           onCancel={() => ((run.status === 'running' || run.status === 'queued') ? collapseRun(run.runId) : removeRun(run.runId))}
           footer={

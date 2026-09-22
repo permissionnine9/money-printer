@@ -1,20 +1,20 @@
 /**
  * AI 生成素材图弹窗：自定义提示词（支持 @ 引用素材池图片）+ 上传自定义参考图
  * → 调用 Agent 需求理解（自动注入剧本大纲/本集脚本/当前分镜）→ 直接生图
- * → 归档本集图库并自动加入当前分镜（SSE 观流，AgentRunProgress）。
+ * → 归档本集图库并自动加入当前分镜（提交后任务进后台队列，进度见右上角「后台任务」浮窗）。
  */
 import React, { useEffect, useState } from 'react'
-import { Alert, Button, Card, Image, Modal, Select, Space, Tag, Typography, Upload, message } from 'antd'
+import { Button, Card, Image, Modal, Select, Space, Tag, Typography, Upload, message } from 'antd'
 import {
   DeleteOutlined,
-  PictureOutlined,
   PictureFilled,
   ThunderboltOutlined,
   UploadOutlined,
 } from '@ant-design/icons'
-import type { AgentEvent, ImageModelConfig, PoolMaterial } from '@/types'
+import type { ImageModelConfig, PoolMaterial } from '@/types'
 import { modelApi, stepApi, uploadApi } from '@/api/client'
-import { AgentRunProgress } from '@/components/script/AgentRunProgress'
+import { useStartRun } from '@/hooks/useRunTask'
+import { hasRunningSegmentMaterial } from '@/stores/agentRunStore'
 import { MentionImageInput } from './MentionImageInput'
 import { MaterialPickerModal } from './MaterialPickerModal'
 import { imageSrc } from '@/utils/imageSrc'
@@ -31,8 +31,6 @@ export interface MaterialGenerateModalProps {
   segmentMaterials?: PoolMaterial[]
   open: boolean
   onClose: () => void
-  /** 生成成功后回调（父组件刷新会话） */
-  onGenerated: () => void
 }
 
 export const MaterialGenerateModal: React.FC<MaterialGenerateModalProps> = ({
@@ -44,7 +42,6 @@ export const MaterialGenerateModal: React.FC<MaterialGenerateModalProps> = ({
   segmentMaterials,
   open,
   onClose,
-  onGenerated,
 }) => {
   const [pool, setPool] = useState<PoolMaterial[]>([])
   const [userPrompt, setUserPrompt] = useState('')
@@ -55,18 +52,12 @@ export const MaterialGenerateModal: React.FC<MaterialGenerateModalProps> = ({
   const [uploading, setUploading] = useState(false)
   const [models, setModels] = useState<ImageModelConfig[]>([])
   const [modelConfigId, setModelConfigId] = useState<string | undefined>(undefined)
-  const [submitting, setSubmitting] = useState(false)
-  const [run, setRun] = useState<{ id: string; active: boolean } | null>(null)
+  const { starting, launch } = useStartRun(sessionId)
 
+  // 打开时刷新素材池/模型列表（保留提示词与参考图，便于微调后重新生成）
   useEffect(() => {
     if (!open) return
-    setUserPrompt('')
-    setMentions([])
-    setUploadPaths([])
-    setPickedMaterials([])
     setPickerOpen(false)
-    setModelConfigId(undefined)
-    setRun(null)
     stepApi
       .getMaterialPool(sessionId)
       .then((groups) => setPool(groups.flatMap((g) => g.materials)))
@@ -77,6 +68,15 @@ export const MaterialGenerateModal: React.FC<MaterialGenerateModalProps> = ({
       .catch(() => setModels([]))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, open])
+
+  // 切换会话/分镜时才清空输入（提示词与参考图针对具体分镜）
+  useEffect(() => {
+    setUserPrompt('')
+    setMentions([])
+    setUploadPaths([])
+    setPickedMaterials([])
+    setModelConfigId(undefined)
+  }, [sessionId, segmentIndex])
 
   const handleUpload = async (file: File) => {
     setUploading(true)
@@ -99,59 +99,50 @@ export const MaterialGenerateModal: React.FC<MaterialGenerateModalProps> = ({
       message.warning('请填写提示词，或提供参考图（@ 素材图 / 选择素材图 / 上传参考图）')
       return
     }
-    setSubmitting(true)
-    try {
-      const runId = await stepApi.generateSegmentMaterial(sessionId, segmentIndex, {
-        user_prompt: userPrompt.trim(),
-        mentioned_image_ids: [...mentions, ...pickedMaterials].map((m) => m.image_id),
-        reference_paths: uploadPaths,
-        ...(modelConfigId ? { model_config_id: modelConfigId } : {}),
-      })
-      setRun({ id: runId, active: true })
-    } catch (e) {
-      message.error((e as Error).message)
-    } finally {
-      setSubmitting(false)
-    }
-  }
-
-  const handleRunDone = async (ev: AgentEvent) => {
-    setRun((r) => (r ? { ...r, active: false } : r))
-    if (ev.success) {
-      message.success('素材图已生成并加入本分镜')
-      onGenerated()
-      onClose()
-    } else {
-      message.error(ev.error || '素材图生成失败')
-    }
+    // 提交后任务进全局后台队列（AgentRunDock 跟踪进度，成功后自动刷新会话）
+    await launch({
+      kind: 'segment_material',
+      label: `分镜 ${segmentIndex + 1} 素材图`,
+      // 分镜粒度守卫（同分镜防重复；不同分镜可并行），替换默认的 kind 级守卫
+      guard: () => {
+        if (hasRunningSegmentMaterial(sessionId, segmentIndex)) {
+          message.warning(`分镜 ${segmentIndex + 1} 的素材图正在生成中（见右上角后台任务），请等待完成后再试`)
+          return true
+        }
+        return false
+      },
+      close: onClose,
+      extra: { segmentIndex, segmentTitle },
+      invoke: () =>
+        stepApi.generateSegmentMaterial(sessionId, segmentIndex, {
+          user_prompt: userPrompt.trim(),
+          mentioned_image_ids: [...mentions, ...pickedMaterials].map((m) => m.image_id),
+          reference_paths: uploadPaths,
+          ...(modelConfigId ? { model_config_id: modelConfigId } : {}),
+        }),
+      infoText: '素材图生成已发起，进度见右上角后台任务',
+    })
   }
 
   return (
     <Modal
       title={`AI 生成素材图 - 分镜 ${segmentIndex + 1}${segmentTitle ? `《${segmentTitle}》` : ''}`}
       open={open}
-      onCancel={() => {
-        if (run?.active) return // 生成中不允许关闭
-        onClose()
-      }}
-      footer={
-        run
-          ? null
-          : [
-              <Button key="cancel" onClick={onClose}>
-                取消
-              </Button>,
-              <Button
-                key="ok"
-                type="primary"
-                icon={<ThunderboltOutlined />}
-                loading={submitting}
-                onClick={handleSubmit}
-              >
-                生成（AI 需求理解 → 生图）
-              </Button>,
-            ]
-      }
+      onCancel={onClose}
+      footer={[
+        <Button key="cancel" onClick={onClose}>
+          取消
+        </Button>,
+        <Button
+          key="ok"
+          type="primary"
+          icon={<ThunderboltOutlined />}
+          loading={starting}
+          onClick={handleSubmit}
+        >
+          生成（AI 需求理解 → 生图）
+        </Button>,
+      ]}
       width={680}
       destroyOnHidden
     >
@@ -257,21 +248,6 @@ export const MaterialGenerateModal: React.FC<MaterialGenerateModalProps> = ({
         pool={pool}
         rows={4}
       />
-
-      {run && (
-        <div style={{ marginTop: 12 }}>
-          {run.active && (
-            <Alert
-              type="info"
-              showIcon
-              icon={<PictureOutlined />}
-              style={{ marginBottom: 8 }}
-              message="生成中：AI 需求理解 → 生图 → 归档本集图库（static/images/{剧本}/{本集}/）→ 自动加入本分镜"
-            />
-          )}
-          <AgentRunProgress runId={run.id} onDone={handleRunDone} />
-        </div>
-      )}
 
       <MaterialPickerModal
         sessionId={sessionId}
