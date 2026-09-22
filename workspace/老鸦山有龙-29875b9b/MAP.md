@@ -1,5 +1,5 @@
 ---
-updated_at: '2026-09-22T01:56:49.246612'
+updated_at: '2026-09-22T23:28:21.063915'
 ---
 
 # 工作区地图：老鸦山有龙
@@ -67,6 +67,7 @@ updated_at: '2026-09-22T01:56:49.246612'
   - `ep_01/vs-6b71172a/`（storyboard.md 导图 + seg_NN 分镜文件）
   - `ep_02/vs-81062821/`（storyboard.md 导图 + seg_NN 分镜文件）
   - `ep_02/vs-96400f63/`（storyboard.md 导图 + seg_NN 分镜文件）
+  - `ep_03/vs-ad1a24da/`（storyboard.md 导图 + seg_NN 分镜文件）
 
 ## 检索建议
 
