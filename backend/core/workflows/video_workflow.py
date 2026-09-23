@@ -424,6 +424,7 @@ class VideoCreationWorkflowV2:
 
     async def prepare_comfyui_import(
         self, session_id: str, segment_indexes: list[int] | None = None, global_prompt: str = "",
+        workflow_name: str | None = None,
     ) -> dict:
         """阶段一（导入到 ComfyUI）：收集素材 → 上传+构造 timeline+注入工作流 → 暂存 → 返回摘要
 
@@ -450,6 +451,7 @@ class VideoCreationWorkflowV2:
             prepared = await self.comfyui_service.prepare_import(
                 **materials, global_prompt=global_prompt,
                 ui_workflow_name=f"导入_{session_id[:8]}.json",
+                workflow_name=workflow_name,
             )
         except httpx.HTTPError as e:  # 连接失败/超时等网络异常
             raise WorkflowError(
@@ -468,6 +470,8 @@ class VideoCreationWorkflowV2:
             "global_prompt": global_prompt,
             "mock": prepared["mock"],
             "imported_at": datetime.now().isoformat(timespec="seconds"),
+            # 本次导入使用的工作流模板名（None = config 默认），前端下拉回显用
+            "workflow_name": prepared.get("workflow_name"),
             # UI 工作流落盘结果（mock / 落盘失败时为 None）：ComfyUI 网页打开检查/微调用
             "ui_workflow_name": prepared.get("ui_workflow_name"),
             "comfyui_url": COMFYUI_BASE_URL,

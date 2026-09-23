@@ -14,20 +14,24 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 LOCAL_PORT=8188
-REMOTE_PORT=8188
 HOSTS_JSON="$HOME/.claude/skills/comfyui-restart/hosts.json"
 HOST_ALIAS="gz15-a100"
 PID_FILE="/tmp/comfyui_tunnel_${HOST_ALIAS}.pid"
 
 cd "$(dirname "$0")"
 
-# 从 hosts.json 读取连接信息（host/port/user/password）
-read -r SSH_HOST SSH_PORT SSH_USER SSH_PASS < <(python3 - "$HOSTS_JSON" "$HOST_ALIAS" <<'PYEOF'
+# 从 hosts.json 读取连接信息（host/port/user/password/remote_port）
+# 用 Unit Separator(\x1f) 分隔：密码可能含空格或为空，按空白分词会字段错位
+IFS=$'\x1f' read -r SSH_HOST SSH_PORT SSH_USER SSH_PASS REMOTE_PORT < <(python3 - "$HOSTS_JSON" "$HOST_ALIAS" <<'PYEOF'
 import json, sys
 with open(sys.argv[1]) as f:
     cfg = json.load(f)
 host = cfg["hosts"][sys.argv[2]]
-print(host["host"], host["port"], host.get("user", "root"), host.get("password", ""))
+fields = [host["host"], str(host["port"]), host.get("user", "root"),
+          host.get("password", ""), str(host.get("remote_port", 8188))]
+if any("\x1f" in f for f in fields):
+    sys.exit("字段值含分隔符 \\x1f，无法安全解析")
+print("\x1f".join(fields))
 PYEOF
 )
 
@@ -70,11 +74,14 @@ cleanup() {
     echo ""
     echo -e "${YELLOW}停止 ComfyUI 隧道...${NC}"
     [ -n "$TUNNEL_PID" ] && kill "$TUNNEL_PID" 2>/dev/null
+    # kill $TUNNEL_PID 只能打到 sshpass，真正监听本地端口的 ssh 是其子进程，
+    # 不补杀会变孤儿继续占住 8188（新隧道 bind 失败或旧转发假存活）
+    pkill -f "ssh -N -L ${LOCAL_PORT}:127.0.0.1:" 2>/dev/null
     rm -f "$PID_FILE"
     echo -e "${GREEN}隧道已停止${NC}"
     exit 0
 }
-trap cleanup INT TERM
+trap cleanup INT TERM HUP
 
 # 断线重连循环
 while true; do

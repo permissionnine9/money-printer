@@ -66,6 +66,7 @@ class GenerateVideosRequest(BaseModel):
     """步骤4：生成视频（勾选分镜子集；缺省=全部已配置分镜）"""
     segment_indexes: Optional[list[int]] = Field(None, description="勾选参与生成的分镜 index 列表（须为已完成配置的分镜）")
     global_prompt: str = Field(default="", description="全局提示词（两段式导入时注入 timeline_data.globalPrompt，附加到整条时间轴）")
+    workflow_name: Optional[str] = Field(None, description="导入使用的 ComfyUI 工作流模板名（缺省 = config 默认模板）")
 
 
 class StepResponse(BaseModel):

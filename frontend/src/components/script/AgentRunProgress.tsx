@@ -1,12 +1,13 @@
 /**
- * Agent run 观流组件：连接 /agent-runs/{run_id}/events 展示状态行 / 思考折叠 / 最新文本，支持取消与断线重连
+ * Agent run 观流组件：经全局单连接事件流（agentRunStream）订阅 run 事件，
+ * 展示状态行 / 思考折叠 / 最新文本，支持取消
  */
 import React, { useEffect, useRef, useState } from 'react'
 import { Button, Collapse, Space, Typography, message } from 'antd'
 import { EyeOutlined, StopOutlined } from '@ant-design/icons'
 import type { AgentEvent } from '@/types'
 import { agentRunApi } from '@/api/client'
-import { fetchSSE } from '@/api/sse'
+import { agentRunStream } from '@/api/agentRunStream'
 import { useAgentRunStore } from '@/stores/agentRunStore'
 import { PromptViewerModal, RunStatusIcon, runStatusText } from '@/components/common'
 
@@ -18,9 +19,6 @@ export interface AgentRunProgressProps {
   /** 收到 done 事件（run 终态）后回调 */
   onDone?: (event: AgentEvent) => void
 }
-
-const MAX_RETRIES = 6
-const RETRY_INTERVAL = 2000
 
 export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDone }) => {
   const [label, setLabel] = useState('')
@@ -50,11 +48,7 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
     setPrompt(null)
     setPromptOpen(false)
 
-    let cancelled = false
     let finished = false
-    let retries = 0
-    let lastSeq = 0
-    const controller = new AbortController()
 
     const fail = (msg: string, reason = '') => {
       finished = true
@@ -64,11 +58,9 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
     }
 
     const handleEvent = (ev: AgentEvent) => {
-      if (ev.seq && ev.seq > lastSeq) lastSeq = ev.seq
       switch (ev.type) {
         case 'connected':
           setLabel(ev.label || '')
-          retries = 0
           break
         case 'queued':
           // 入队回放/实时（幂等）：断线重连重复收到不影响状态
@@ -119,37 +111,8 @@ export const AgentRunProgress: React.FC<AgentRunProgressProps> = ({ runId, onDon
       }
     }
 
-    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
-
-    const run = async () => {
-      while (!cancelled && !finished) {
-        await fetchSSE(
-          `/api/v1/agent-runs/${runId}/events${lastSeq ? `?seq=${lastSeq}` : ''}`,
-          undefined,
-          {
-            onEvent: handleEvent,
-            onError: (err) => {
-              // HTTP 层错误（如 run 不存在）：直接失败；读流中网络中断走重连
-              if (/^HTTP/.test(err.message)) fail(err.message)
-            },
-          },
-          controller.signal,
-        )
-        if (cancelled || finished) break
-        retries += 1
-        if (retries > MAX_RETRIES) {
-          fail('连接中断，已停止重试')
-          break
-        }
-        await sleep(RETRY_INTERVAL)
-      }
-    }
-    void run()
-
-    return () => {
-      cancelled = true
-      controller.abort()
-    }
+    const unsubscribe = agentRunStream.subscribe(runId, handleEvent)
+    return unsubscribe
   }, [runId])
 
   const handleCancel = async () => {

@@ -12,6 +12,7 @@ import logging
 import time
 import uuid
 from collections import deque
+from itertools import islice
 from typing import AsyncGenerator, Awaitable, Callable
 
 from backend.core.agent_sdk.events import AgentEvent
@@ -26,7 +27,7 @@ DEFAULT_MAX_CONCURRENT_RUNS = 5  # 同时执行 run 的默认上限（可由外�
 class RunHandle:
     """一个后台 agent run 的句柄"""
 
-    def __init__(self, run_id: str, label: str):
+    def __init__(self, run_id: str, label: str, global_cond: asyncio.Condition | None = None):
         self.run_id = run_id
         self.label = label
         self.created_at = time.time()
@@ -43,6 +44,9 @@ class RunHandle:
         self.result_data: dict = {}
         self.interrupt_event = asyncio.Event()
         self.cond = asyncio.Condition()
+        # registry 的全局通知条件（stream_all 多路观流用）：emit 时一并唤醒
+        self.global_cond = global_cond
+        self._notify_task: asyncio.Task | None = None
 
     def emit(self, event: AgentEvent) -> None:
         """记录事件并唤醒等待中的 SSE 流"""
@@ -55,11 +59,19 @@ class RunHandle:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self._notify())
+        # 去抖：已有未完成的唤醒任务时不再 create_task——高频 text_delta 合并为
+        # 一次唤醒（事件已先入缓冲，观流按 seq>cursor 一次追平，不丢事件不乱序）；
+        # 存到 _notify_task 同时持强引用防 GC
+        task = self._notify_task
+        if task is None or task.done():
+            self._notify_task = loop.create_task(self._notify())
 
     async def _notify(self) -> None:
         async with self.cond:
             self.cond.notify_all()
+        if self.global_cond is not None:
+            async with self.global_cond:
+                self.global_cond.notify_all()
 
     def to_dict(self) -> dict:
         return {
@@ -93,6 +105,8 @@ class AgentRunRegistry:
         self._worker_seq = 0
         # 同时执行的 run 上限（外部经 set_max_concurrent 调整，如系统设置 API）
         self.max_concurrent = DEFAULT_MAX_CONCURRENT_RUNS
+        # 全局通知条件：任何 run 的事件/注册/终态都唤醒 stream_all（单连接多路观流）
+        self._global_cond = asyncio.Condition()
 
     @property
     def active_workers(self) -> int:
@@ -112,7 +126,7 @@ class AgentRunRegistry:
         """提交一个 run 入队（FIFO，并发上限 max_concurrent），立即返回 run_id"""
         self._cleanup()
         run_id = uuid.uuid4().hex[:12]
-        handle = RunHandle(run_id, label)
+        handle = RunHandle(run_id, label, global_cond=self._global_cond)
         self._runs[run_id] = handle
         self._ensure_workers()
         self._pending.append((handle, factory))
@@ -203,6 +217,8 @@ class AgentRunRegistry:
             handle.done = True
             async with handle.cond:
                 handle.cond.notify_all()
+            async with self._global_cond:
+                self._global_cond.notify_all()
 
     def get(self, run_id: str) -> RunHandle | None:
         return self._runs.get(run_id)
@@ -236,7 +252,15 @@ class AgentRunRegistry:
         cursor = from_seq
         while True:
             async with handle.cond:
-                pending = [(seq, ev) for seq, ev in handle.events if seq > cursor]
+                events = handle.events
+                # seq 连续递增：seq>cursor 的新事件 = 自头部起的尾部切片，islice
+                # 只拷贝新增部分（原全量过滤在持锁下扫完整个 5000 长度缓冲）；
+                # 缓冲溢出丢最旧（cursor+1 < events[0][0]）时钳到 0 全量补发
+                if events:
+                    start = max(cursor + 1 - events[0][0], 0)
+                    pending = list(islice(events, start, None)) if start < len(events) else []
+                else:
+                    pending = []
                 if pending:
                     cursor = pending[-1][0]
                 elif handle.done:
@@ -246,6 +270,52 @@ class AgentRunRegistry:
                     continue
             for seq, ev in pending:
                 yield ev.to_dict(seq)
+
+    async def stream_all(self, from_cursors: dict[str, int] | None = None) -> AsyncGenerator[dict, None]:
+        """全局事件流：一条连接推送全部 run 的事件（帧带 run_id），供前端单连接多路观流
+
+        浏览器对同 host 的 HTTP/1.1 并发连接仅 6 个，per-run 观流会被批量任务
+        占满导致其他接口在浏览器侧排队 pending——所有 run 复用本流（事件量不变，
+        只是共享管道）。断线重连传 per-run 游标（run_id → 已消费 seq）增量续传，
+        前端 delta 为追加式，全量重放会重复累积；未跟踪的 run 从头回放并先发
+        connected 帧；run 终态在事件推完后补合成 done 帧（与单 run SSE 端点
+        语义对齐），随后本连接停止跟踪该 run（重连后可再次回放）。
+        """
+        cursors: dict[str, int] = dict(from_cursors or {})
+        finished: set[str] = set()  # 已推过 done 的 run（本连接内不再回放）
+        while True:
+            outgoing: list[tuple[str, dict]] = []
+            for run_id, handle in list(self._runs.items()):
+                if run_id in finished:
+                    continue
+                if run_id not in cursors:
+                    cursor = 0
+                    outgoing.append((run_id, {"type": "connected", "label": handle.label, "last_seq": handle._seq}))
+                else:
+                    cursor = cursors[run_id]
+                events = handle.events
+                if events and (start := max(cursor + 1 - events[0][0], 0)) < len(events):
+                    for seq, ev in islice(events, start, None):
+                        outgoing.append((run_id, ev.to_dict(seq)))
+                    cursor = events[-1][0]
+                if handle.done and cursor >= handle._seq:
+                    outgoing.append((run_id, {
+                        "type": "done",
+                        "success": handle.success,
+                        "error": handle.error,
+                        "reason": handle.reason,
+                        "result": handle.result_data,
+                    }))
+                    finished.add(run_id)
+                    cursors.pop(run_id, None)
+                else:
+                    cursors[run_id] = cursor
+            if outgoing:
+                for run_id, frame in outgoing:
+                    yield {"run_id": run_id, **frame}
+                continue
+            async with self._global_cond:
+                await self._global_cond.wait()
 
     def _cleanup(self) -> None:
         """清理最早完成的 run，防止注册表无限增长"""

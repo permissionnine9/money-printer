@@ -202,10 +202,13 @@ export const stepApi = {
   },
 
   // 步骤4两段式-阶段一：导入到 ComfyUI（上传素材+注入工作流暂存，不执行；段间重叠沿用分镜 overlap）
-  importComfyUI: async (sessionId: string, segmentIndexes?: number[], globalPrompt?: string): Promise<StepResponse> => {
+  importComfyUI: async (
+    sessionId: string, segmentIndexes?: number[], globalPrompt?: string, workflowName?: string,
+  ): Promise<StepResponse> => {
     const payload: Record<string, unknown> = {}
     if (segmentIndexes) payload.segment_indexes = segmentIndexes
     if (globalPrompt) payload.global_prompt = globalPrompt
+    if (workflowName) payload.workflow_name = workflowName
     const { data } = await client.post(`/steps/${sessionId}/comfyui/import`, payload)
     return data
   },
@@ -519,6 +522,8 @@ export interface ComfyUIConnection {
   host: string
   port: number | null
   user: string
+  /** 远程 ComfyUI 监听端口（隧道转发目标），默认 8188 */
+  remote_port: number
   password_set: boolean
   connected: boolean
 }
@@ -533,8 +538,13 @@ export const settingsApi = {
     const { data } = await client.get(`/settings/comfyui-connection`)
     return data
   },
+  // 可导入的 ComfyUI 工作流模板列表（「导入到 ComfyUI」下拉选项）
+  getComfyUIWorkflows: async (): Promise<{ workflows: { name: string; is_default: boolean }[] }> => {
+    const { data } = await client.get(`/settings/comfyui-workflows`)
+    return data
+  },
   updateComfyUIConnection: async (payload: {
-    host: string; port: number; user: string; password?: string;
+    host: string; port: number; user: string; password?: string; remote_port?: number;
   }): Promise<{ connected: boolean; message: string }> => {
     const { data } = await client.put(`/settings/comfyui-connection`, payload, { timeout: 60000 })
     return data

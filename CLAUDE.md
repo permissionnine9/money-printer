@@ -8,3 +8,5 @@
        user/default/workflows/money-printer/导入_{会话ID}.json
 
 ## 没有叫你操作comfyUI验证的时候，不要操作，但是读取是可以的
+
+## 不要帮我乱加代码，要考虑项目的架构，我最讨厌垃圾代码。

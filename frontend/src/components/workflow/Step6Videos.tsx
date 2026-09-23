@@ -14,7 +14,7 @@
  * 轨道始终可勾选：生成过之后可重新勾选 → 重新导入 → 再次生成（旧结果自动备份，
  * 可「恢复备份」回滚）。
  */
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useEffect } from 'react'
 import {
   Card,
   Button,
@@ -34,6 +34,7 @@ import {
   Empty,
   Alert,
   Input,
+  Select,
 } from 'antd'
 import {
   VideoCameraOutlined,
@@ -48,7 +49,7 @@ import {
   CloudUploadOutlined,
 } from '@ant-design/icons'
 import type { SessionDetail, ComfyUIImport } from '@/types'
-import { stepApi } from '@/api/client'
+import { stepApi, settingsApi } from '@/api/client'
 import { useSessionStore } from '@/stores/sessionStore'
 import { usePolling } from '@/hooks/usePolling'
 import { LazyVideo } from '@/components/common/LazyVideo'
@@ -182,6 +183,24 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
       setGlobalPrompt(importedInfo.global_prompt)
     }
   }, [importedInfo?.global_prompt, globalPromptTouched])
+  // 工作流模板下拉（「导入到 ComfyUI」注入哪套模板）；未手动选择时回显上次导入所用或默认
+  const [workflowOptions, setWorkflowOptions] = useState<{ name: string; is_default: boolean }[]>([])
+  const [selectedWorkflow, setSelectedWorkflow] = useState<string | null>(null)
+  const [workflowTouched, setWorkflowTouched] = useState(false)
+  useEffect(() => {
+    settingsApi.getComfyUIWorkflows()
+      .then((r) => setWorkflowOptions(r.workflows))
+      .catch(() => {/* 列表加载失败：下拉留空，导入仍走后端默认模板 */})
+  }, [])
+  useEffect(() => {
+    if (workflowTouched) return
+    if (importedInfo?.workflow_name) {
+      setSelectedWorkflow(importedInfo.workflow_name)
+    } else {
+      const def = workflowOptions.find((w) => w.is_default)
+      if (def) setSelectedWorkflow(def.name)
+    }
+  }, [importedInfo?.workflow_name, workflowOptions, workflowTouched])
   // 导入暂存与当前勾选一致时才允许「开始生成」
   const selectionMatchesImport = useMemo(
     () =>
@@ -255,6 +274,7 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
       const response = await stepApi.importComfyUI(
         // 输入框值未被用户编辑过（只是回显上次导入的 auto 值）时不回传，让后端每次重新自动生成
         session.session_id, effectiveSelected, globalPromptTouched ? (globalPrompt.trim() || undefined) : undefined,
+        selectedWorkflow || undefined,
       )
       if (response.success) {
         message.success(response.message || '已导入到 ComfyUI，可点击「开始生成视频」执行')
@@ -573,6 +593,20 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
           </Text>
         </Space>
         <Space style={{ flexShrink: 0 }}>
+          <Select
+            size="small"
+            style={{ minWidth: 210 }}
+            value={selectedWorkflow ?? undefined}
+            onChange={(v) => {
+              setWorkflowTouched(true)
+              setSelectedWorkflow(v)
+            }}
+            placeholder="工作流模板"
+            options={workflowOptions.map((w) => ({
+              value: w.name,
+              label: w.is_default ? `${w.name}（默认）` : w.name,
+            }))}
+          />
           <Button
             size="small"
             disabled={isGenerating || effectiveSelected.length === 0}
@@ -809,7 +843,9 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
           description={
             selectionMatchesImport ? (
               <div>
-                导入时间 {importedInfo.imported_at}，参数已注入远程工作流的「MiniMax H3 素材规划工作台」节点，点击「开始生成视频」执行
+                导入时间 {importedInfo.imported_at}
+                {importedInfo.workflow_name && <>，工作流模板 {importedInfo.workflow_name}</>}
+                ，参数已注入远程工作流的「MiniMax H3 素材规划工作台」节点，点击「开始生成视频」执行
                 {importedInfo.ui_workflow_name && importedInfo.comfyui_url && (
                   <div>
                     <a

@@ -30,6 +30,7 @@ import httpx
 from backend.core.config import (
     COMFYUI_BASE_URL,
     COMFYUI_MOCK,
+    COMFYUI_WORKFLOW_DIR,
     COMFYUI_WORKFLOW_PATH,
     COMFYUI_WORKFLOW_UI_PATH,
     COMFYUI_TIMELINE_FPS,
@@ -284,7 +285,10 @@ class ComfyUIClient:
         if path.suffix.lower() in _UPLOAD_IMAGE_EXTS:
             # 压缩失败时 compress_image 返回 (原字节, "image/png")，以 mime 判定成败：
             # 失败或压完反而更大（小 jpg 重压）则原样上传，文件名/mime 保持原值
-            compressed, comp_mime = compress_image(data, UPLOAD_IMAGE_MAX_SIZE, UPLOAD_IMAGE_QUALITY)
+            # PIL 压缩同步执行会阻塞事件循环（导入 ComfyUI 时逐张压缩，秒级尖峰），挪线程池
+            compressed, comp_mime = await asyncio.to_thread(
+                compress_image, data, UPLOAD_IMAGE_MAX_SIZE, UPLOAD_IMAGE_QUALITY,
+            )
             if comp_mime == "image/jpeg" and len(compressed) < len(data):
                 # 文件名带内容 hash：防同批 a.png/a.jpg 压缩后同名互撞（ComfyUI 对
                 # 同名不同内容返回 400），同内容则同名放行（幂等重传）
@@ -303,22 +307,57 @@ class ComfyUIClient:
             logger.info(f"[ComfyUI] 上传成功: {filename} -> {result}")
             return {"name": result.get("name", filename), "subfolder": result.get("subfolder", "")}
 
-    def load_workflow_template(self) -> dict:
-        """加载 API 格式工作流模板"""
-        if not COMFYUI_WORKFLOW_PATH.exists():
+    @staticmethod
+    def _resolve_workflow_path(workflow_name: str | None, *, api: bool) -> Path:
+        """按名称解析模板路径：None 用 config 默认；指定名在目录内查 `{name}_api.json` / `{name}.json`
+
+        resolve 后必须仍位于模板目录内（拒绝 `../` 等路径穿越）；指定名不存在时
+        抛 ValueError（前端可读），默认模板缺失保持 FileNotFoundError（部署问题）。
+        """
+        if not workflow_name:
+            return COMFYUI_WORKFLOW_PATH if api else COMFYUI_WORKFLOW_UI_PATH
+        path = (COMFYUI_WORKFLOW_DIR / f"{workflow_name}{'_api' if api else ''}.json").resolve()
+        if COMFYUI_WORKFLOW_DIR.resolve() not in path.parents:
+            raise ValueError(f"非法的工作流名称: {workflow_name}")
+        if not path.exists():
+            available = "、".join(w["name"] for w in ComfyUIClient.list_workflow_templates())
+            raise ValueError(f"未找到工作流模板「{workflow_name}」，可选: {available}")
+        return path
+
+    def load_workflow_template(self, workflow_name: str | None = None) -> dict:
+        """加载 API 格式工作流模板（可按名称覆盖默认）"""
+        path = self._resolve_workflow_path(workflow_name, api=True)
+        if not path.exists():
             raise FileNotFoundError(
-                f"未找到 ComfyUI 工作流模板: {COMFYUI_WORKFLOW_PATH}，"
+                f"未找到 ComfyUI 工作流模板: {path}，"
                 f"请将导出的 API 格式工作流保存到该路径"
             )
-        return json.loads(COMFYUI_WORKFLOW_PATH.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
 
-    def load_workflow_ui_template(self) -> dict:
+    def load_workflow_ui_template(self, workflow_name: str | None = None) -> dict:
         """加载 UI 格式工作流模板（网页可视化版，供导入后落盘到远程 workflows 库）"""
-        if not COMFYUI_WORKFLOW_UI_PATH.exists():
+        path = self._resolve_workflow_path(workflow_name, api=False)
+        if not path.exists():
             raise FileNotFoundError(
-                f"未找到 ComfyUI UI 格式工作流模板: {COMFYUI_WORKFLOW_UI_PATH}"
+                f"未找到 ComfyUI UI 格式工作流模板: {path}"
             )
-        return json.loads(COMFYUI_WORKFLOW_UI_PATH.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def list_workflow_templates() -> list[dict]:
+        """列出模板目录内可导入的工作流（X.json 与 X_api.json 成对才算完整）"""
+        default_stem = COMFYUI_WORKFLOW_PATH.stem.removesuffix("_api")
+        if not COMFYUI_WORKFLOW_DIR.exists():
+            return []
+        names = {
+            p.stem.removesuffix("_api")
+            for p in COMFYUI_WORKFLOW_DIR.glob("*_api.json")
+            if (COMFYUI_WORKFLOW_DIR / f"{p.stem.removesuffix('_api')}.json").exists()
+        }
+        return [
+            {"name": n, "is_default": n == default_stem}
+            for n in sorted(names, key=lambda x: (x != default_stem, x))
+        ]
 
     async def save_ui_workflow(self, filename: str, workflow: dict) -> str:
         """把 UI 格式工作流保存到远程 workflows 库（TimelineDirector 的 save_workflow 端点）"""
@@ -538,6 +577,7 @@ class VideoServiceComfyUI:
         reference_image_paths: dict[int, list[str]] | None = None,
         global_prompt: str = "",
         ui_workflow_name: str | None = None,
+        workflow_name: str | None = None,
     ) -> dict:
         """阶段一（导入）：构造 timeline → 校验 → 上传材料 → 注入工作流模板
 
@@ -560,7 +600,8 @@ class VideoServiceComfyUI:
         if self.mock:
             logger.info("[ComfyUI][mock] 导入跳过远程上传，timeline 使用本地文件名")
             return {"workflow": None, "timeline_data": timeline, "mock": True,
-                    "ui_workflow_name": None}
+                    "ui_workflow_name": None,
+                    "workflow_name": (workflow_name or "").strip() or None}
 
         # 1. 上传全部材料文件
         upload_paths = set(frame_image_paths.values()) | {
@@ -582,7 +623,7 @@ class VideoServiceComfyUI:
             raise ValueError(f"timeline_data 校验失败: {'; '.join(errors)}")
 
         # 3. 注入工作流模板（timeline_data → MiniMaxH3TimelinePlanner 素材规划工作台）
-        workflow = self.client.load_workflow_template()
+        workflow = self.client.load_workflow_template(workflow_name)
         workflow = ComfyUIClient.inject_timeline_data(workflow, timeline)
 
         # 4. UI 版同步落盘到远程 workflows 库（网页可见是增强能力，失败不阻断导入）
@@ -590,7 +631,7 @@ class VideoServiceComfyUI:
         if ui_workflow_name:
             try:
                 ui_workflow = ComfyUIClient.inject_timeline_data_ui(
-                    self.client.load_workflow_ui_template(), timeline
+                    self.client.load_workflow_ui_template(workflow_name), timeline
                 )
                 ui_workflow_saved = await self.client.save_ui_workflow(ui_workflow_name, ui_workflow)
             except Exception as e:
@@ -598,7 +639,8 @@ class VideoServiceComfyUI:
 
         logger.info("[ComfyUI] 导入完成，工作流已就绪（未提交执行）")
         return {"workflow": workflow, "timeline_data": timeline, "mock": False,
-                "ui_workflow_name": ui_workflow_saved}
+                "ui_workflow_name": ui_workflow_saved,
+                "workflow_name": (workflow_name or "").strip() or None}
 
     async def execute_imported(
         self, segments: list[dict], workflow: dict | None, timeline: dict,

@@ -19,6 +19,30 @@ def _load_run(run_id: str) -> RunHandle:
     return handle
 
 
+@router.get("/events")
+async def stream_all_events(cursors: str = ""):
+    """全局 SSE 观流：一条连接推送全部 run 的事件（帧带 run_id，前端按 run 分发）
+
+    浏览器对同 host 的 HTTP/1.1 并发连接仅 6 个，per-run 观流会被批量任务占满，
+    其余接口在浏览器侧排队 pending——多任务观流统一走本连接。
+
+    Args:
+        cursors: 断线重连续传游标，格式 run_id:seq 逗号分隔（仅未完成 run）
+    """
+    registry = get_run_registry()
+    from_cursors: dict[str, int] = {}
+    for chunk in filter(None, cursors.split(",")):
+        run_id, _, seq = chunk.partition(":")
+        if run_id and seq.isdigit():
+            from_cursors[run_id] = int(seq)
+
+    async def gen():
+        async for event in registry.stream_all(from_cursors):
+            yield sse_frame(event)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
 @router.get("/{run_id}/events")
 async def stream_run_events(run_id: str, seq: int = 0):
     """SSE 观流：先回放 seq 之后的缓冲事件，再实时推送；run 结束后发 [DONE]

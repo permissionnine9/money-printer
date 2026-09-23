@@ -557,7 +557,7 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
                 {/* 分镜配置 */}
                 <Card
                   size="small"
-                  title="分镜配置"
+                  title={"分镜配置 ·「"+(selected.title || selected.outline?.substring(0, 30) || `分镜 ${selected.index + 1}`)+"」"}
                   extra={
                     <Space size={8}>
                       {selected.configured ? (
@@ -573,7 +573,7 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
                         null
                       )}
                       <Button size="small" icon={<FileTextOutlined />} onClick={() => setOutlineOpen(true)}>
-                        查看分镜大纲
+                        当前分镜大纲
                       </Button>
                     </Space>
                   }

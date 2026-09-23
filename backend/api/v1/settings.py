@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from backend.core.agent_sdk import get_run_registry
 from backend.core.config import BASE_DIR
+from backend.core.services.comfyui_service import ComfyUIClient
 from backend.core.persistence.settings_manager import AGENT_CONCURRENCY_KEY, SettingsManager
 from backend.deps import get_settings_manager
 
@@ -40,6 +41,7 @@ class ComfyUIConnectionRequest(BaseModel):
     port: int = Field(..., ge=1, le=65535, description="SSH 端口")
     user: str = Field(default="root", description="SSH 用户名")
     password: str = Field(default="", description="SSH 密码（留空 = 保留原密码，仅改其他字段时用）")
+    remote_port: int = Field(default=8188, ge=1, le=65535, description="远程 ComfyUI 监听端口（隧道转发目标）")
 
 
 class AgentConcurrencyRequest(BaseModel):
@@ -62,7 +64,7 @@ def _comfyui_alive() -> bool:
 
 
 def _stop_tunnel() -> None:
-    """停掉旧隧道（PID 文件 + 按脚本名兜底），幂等"""
+    """停掉旧隧道（PID 文件 + 按脚本名兜底 + 补杀占端口的 ssh），幂等"""
     if _TUNNEL_PID_FILE.exists():
         try:
             pid = int(_TUNNEL_PID_FILE.read_text().strip())
@@ -71,6 +73,9 @@ def _stop_tunnel() -> None:
             pass
         _TUNNEL_PID_FILE.unlink(missing_ok=True)
     subprocess.run(["pkill", "-f", "start_comfyui_tunnel.sh"], capture_output=True)
+    # kill/pkill 只能打倒 wrapper 与 sshpass，真正监听本地 8188 的 ssh 是其子进程，
+    # 不补杀会残留孤儿占住端口（新隧道 bind 失败，或旧转发假存活导致新 remote_port 不生效）
+    subprocess.run(["pkill", "-f", "ssh -N -L 8188:127.0.0.1:"], capture_output=True)
 
 
 def _start_tunnel() -> None:
@@ -91,6 +96,7 @@ async def get_comfyui_connection():
         "host": entry.get("host", ""),
         "port": entry.get("port"),
         "user": entry.get("user", "root"),
+        "remote_port": entry.get("remote_port", 8188),
         "password_set": bool(entry.get("password")),
         "connected": _comfyui_alive(),
     }
@@ -105,6 +111,7 @@ async def update_comfyui_connection(request: ComfyUIConnectionRequest):
         "host": request.host.strip(),
         "port": request.port,
         "user": request.user.strip() or "root",
+        "remote_port": request.remote_port,
     })
     if request.password:
         entry["password"] = request.password
@@ -128,6 +135,12 @@ async def update_comfyui_connection(request: ComfyUIConnectionRequest):
         "connected": False,
         "message": "已保存，但隧道未能连通 ComfyUI（凭据错误或远程服务未启动），请检查后重试",
     }
+
+
+@router.get("/comfyui-workflows")
+async def list_comfyui_workflows():
+    """列出可导入的 ComfyUI 工作流模板（前端「导入到 ComfyUI」下拉选项）"""
+    return {"workflows": ComfyUIClient.list_workflow_templates()}
 
 
 @router.get("/agent-concurrency")

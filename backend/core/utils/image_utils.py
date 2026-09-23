@@ -1,4 +1,5 @@
 """图片公共工具：压缩 / 字节读取（视频服务与生图服务共享）"""
+import asyncio
 import io
 import logging
 import mimetypes
@@ -75,7 +76,8 @@ async def load_image_bytes(image_path: str, compress: bool = False, *, max_size:
             data = path.read_bytes()
 
         if compress:
-            return compress_image(data, max_size, quality)
+            # PIL 压缩（LANCZOS+optimize）4K 图达秒级，挪线程池防阻塞事件循环
+            return await asyncio.to_thread(compress_image, data, max_size, quality)
         return data, mimetypes.guess_type(image_path)[0] or "image/png"
     except Exception as e:
         logger.error(f"读取参考图失败 {image_path}: {e}")

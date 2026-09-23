@@ -9,6 +9,7 @@
 （storyboard.md 导图 + seg_NN 单镜文件，权威源为 WorkspaceStore）；
 DB step_results 只保留薄 envelope 与完成态标志。
 """
+import asyncio
 import logging
 import re
 import threading
@@ -200,11 +201,15 @@ class StoryboardWorkflow(StepWorkflowBase):
             ).model_dump())
 
         # 重生成 → 清下游（segment_management / generate_videos）；write_storyboard 清目录重写（级联重置配置与提示词）
-        self.sm.clear_steps_after(session_id, "storyboard_outline")
-        script_session_id, episode_id = self._storyboard_loc(session_id)
-        self.store.write_storyboard(script_session_id, episode_id, session_id, mindmap, segments)
-        self.sm.save_step_result(session_id, "storyboard_outline",
-                                 self._storyboard_envelope(session_id), success=True)
+        # 收尾是同步 SQLite + 全量文件重写，挪线程池防阻塞事件循环（多 run 并发收尾时其他接口排队）
+        def _persist_outline() -> None:
+            self.sm.clear_steps_after(session_id, "storyboard_outline")
+            script_session_id, episode_id = self._storyboard_loc(session_id)
+            self.store.write_storyboard(script_session_id, episode_id, session_id, mindmap, segments)
+            self.sm.save_step_result(session_id, "storyboard_outline",
+                                     self._storyboard_envelope(session_id), success=True)
+
+        await asyncio.to_thread(_persist_outline)
         logger.info(f"[分镜大纲] 会话 {session_id[:8]}... 生成分镜 {len(segments)} 个")
         return {"mindmap": mindmap, "segment_count": len(segments)}
 
@@ -527,14 +532,18 @@ class StoryboardWorkflow(StepWorkflowBase):
         image_path = archived.get("image_path", poll.get("image_url", ""))
 
         # 4. 自动关联当前分镜（锁内重读，防 lost update）
-        with self._segment_lock(session_id):
-            seg = self._find_segment(self._get_outline_data(session_id), index)
-            refs = list(seg.get("reference_images") or [])
-            if all(r.get("image_id") != mat_id for r in refs):
-                refs.append({"image_id": mat_id, "image_path": image_path, "description": description})
-            self._save_segment_change(
-                session_id, index, {"reference_images": refs}, stale_prompt=True,
-            )
+        # 持锁段为同步文件读写，挪线程池防阻塞事件循环（锁内无 await，线程间互斥语义不变）
+        def _link_material() -> None:
+            with self._segment_lock(session_id):
+                seg = self._find_segment(self._get_outline_data(session_id), index)
+                refs = list(seg.get("reference_images") or [])
+                if all(r.get("image_id") != mat_id for r in refs):
+                    refs.append({"image_id": mat_id, "image_path": image_path, "description": description})
+                self._save_segment_change(
+                    session_id, index, {"reference_images": refs}, stale_prompt=True,
+                )
+
+        await asyncio.to_thread(_link_material)
 
         logger.info(
             f"[素材生成] 会话 {session_id[:8]}... 分镜 {index} 素材 {mat_id}《{title}》完成 → {image_path}"
@@ -555,8 +564,9 @@ class StoryboardWorkflow(StepWorkflowBase):
 
         if effective_overlap > 0:
             overlap_rule = (
-                f"overlap={effective_overlap}：生成提示词时须承接上一分镜——开头加上「接续上一分镜」，"
-                f"并写明上一分镜的结尾状态和本分镜的起始状态（两者有约 {effective_overlap} 秒的内容重叠过渡）"
+                f"overlap={effective_overlap}：本分镜开头 [Shot 1]（00:00.0–{effective_overlap}s）逐项复现上一分镜的结尾状态"
+                f"（站位/姿势/朝向/动作相位/道具/机位/灯光/持续声音），新剧情从复现结束后开始；"
+                f"本分镜末尾保持一个稳定可延续的镜头供下段复现"
             )
         else:
             overlap_rule = "不承接上一分镜（overlap=0 或首个分镜），提示词中不得出现「接续」字样"
@@ -632,9 +642,10 @@ class StoryboardWorkflow(StepWorkflowBase):
 
         if effective_overlap > 0:
             rule = (
-                f"- overlap={effective_overlap}：本分镜与上一分镜关联。提示词开头必须加上「接续上一分镜」字样，"
-                f"且必须在提示词中明确写出上一分镜的结尾状态和本分镜的起始状态，"
-                f"两个状态之间有约 {effective_overlap} 秒的内容重叠过渡"
+                f"- overlap={effective_overlap}：本分镜与上一分镜重叠衔接。提示词的 [Shot 1] 覆盖 00:00.0–{effective_overlap}s，"
+                f"逐项复现「上一分镜已生成提示词」末尾的结尾状态（人物站位/姿势/表情/朝向/动作相位/手中道具/机位景别/灯光/持续的环境声），"
+                f"不加新动作、新台词、新构图；新剧情从复现结束后开始（真实切镜才开 [Shot 2]）。"
+                f"本分镜末尾保持一个稳定可延续的镜头供下段复现（本集最后一段除外）"
             )
         else:
             rule = "- overlap=0：本分镜不承接上一分镜，提示词中不得出现「接续」「承接」等衔接字样"
@@ -715,14 +726,18 @@ class StoryboardWorkflow(StepWorkflowBase):
         )
 
         # 第二步·落库：提示词与参考图一次写入；run 期间用户手动改过参考图则尊重用户（只落提示词）
-        with self._segment_lock(session_id):
-            script_session_id, episode_id = self._storyboard_loc(session_id)
-            current = self.store.read_segment(script_session_id, episode_id, session_id, index) or {}
-            fields: dict = {"prompt": prompt_text}
-            if (current.get("reference_images") or []) == entry_refs:
-                fields["reference_images"] = reference_images
-            self.store.update_segment_fields(script_session_id, episode_id, session_id, index, fields)
-            final_refs = fields.get("reference_images", current.get("reference_images") or [])
+        # 持锁段为同步文件读写，挪线程池防阻塞事件循环（锁内无 await，线程间互斥语义不变）
+        def _persist_prompt() -> list[dict]:
+            with self._segment_lock(session_id):
+                script_session_id, episode_id = self._storyboard_loc(session_id)
+                current = self.store.read_segment(script_session_id, episode_id, session_id, index) or {}
+                fields: dict = {"prompt": prompt_text}
+                if (current.get("reference_images") or []) == entry_refs:
+                    fields["reference_images"] = reference_images
+                self.store.update_segment_fields(script_session_id, episode_id, session_id, index, fields)
+                return fields.get("reference_images", current.get("reference_images") or [])
+
+        final_refs = await asyncio.to_thread(_persist_prompt)
 
         matched_ids = [r.get("image_id") for r in final_refs]
         logger.info(

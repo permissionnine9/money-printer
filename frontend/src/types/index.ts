@@ -251,6 +251,8 @@ export interface ComfyUIImport {
   global_prompt: string
   mock: boolean
   imported_at: string
+  // 本次导入使用的工作流模板名（null = config 默认）
+  workflow_name?: string | null
   // UI 工作流落盘结果（mock/落盘失败时无）：ComfyUI 网页「在 ComfyUI 中打开」直达链接用
   ui_workflow_name?: string
   comfyui_url?: string

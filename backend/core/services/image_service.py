@@ -223,12 +223,15 @@ class ImageService:
 
                 # b64_json 响应：落盘到 static/images/ 返回相对路径
                 if not image_url and item.get("b64_json"):
-                    import base64 as _b64
-                    img_dir = Path("static/images")
-                    img_dir.mkdir(parents=True, exist_ok=True)
-                    fname = f"openai_{_uuid.uuid4().hex[:8]}.png"
-                    (img_dir / fname).write_bytes(_b64.b64decode(item["b64_json"]))
-                    image_url = str(img_dir / fname)
+                    def _persist_b64() -> str:
+                        import base64 as _b64
+                        img_dir = Path("static/images")
+                        img_dir.mkdir(parents=True, exist_ok=True)
+                        fname = f"openai_{_uuid.uuid4().hex[:8]}.png"
+                        (img_dir / fname).write_bytes(_b64.b64decode(item["b64_json"]))
+                        return str(img_dir / fname)
+                    # b64 解码 + 落盘（多 MB 图几十 ms）挪线程池防阻塞事件循环
+                    image_url = await asyncio.to_thread(_persist_b64)
 
                 if not image_url:
                     return {"success": False, "error": f"响应中无图片: {str(data)[:300]}"}

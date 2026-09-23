@@ -8,6 +8,7 @@
 
 业务异常（StoryboardError）由 main.py 的全局异常 handler 统一转 HTTP detail。
 """
+import asyncio
 import logging
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 
@@ -95,7 +96,10 @@ async def update_storyboard_outline(
     _session_info: dict = Depends(load_video_session),
 ):
     """步骤2：保存人工编辑的导图（markdown 含 `- 分镜内容` 行，解析后同步 mindmap 与分镜列表）"""
-    result = get_storyboard_workflow().update_outline(session_id, body.mindmap)
+    # to_thread：锁内整段文件读写 + SQLite 同步执行会阻塞事件循环（Agent 运行期其他请求排队）
+    result = await asyncio.to_thread(
+        get_storyboard_workflow().update_outline, session_id, body.mindmap,
+    )
     return {"success": True, "data": result}
 
 
@@ -109,7 +113,8 @@ async def update_segment_config(
     _session_info: dict = Depends(load_video_session),
 ):
     """步骤3：更新分镜配置（分镜形式 / overlap；变化会清空该分镜已生成的提示词）"""
-    result = get_storyboard_workflow().update_segment_config(
+    result = await asyncio.to_thread(
+        get_storyboard_workflow().update_segment_config,
         session_id, index, body.model_dump(exclude_none=True),
     )
     return {"success": True, "data": result}
@@ -123,7 +128,9 @@ async def update_segment_prompt(
     _session_info: dict = Depends(load_video_session),
 ):
     """步骤3：手动编辑保存分镜提示词（不清参考图、不动 configured 完成态）"""
-    result = get_storyboard_workflow().update_segment_prompt(session_id, index, body.prompt)
+    result = await asyncio.to_thread(
+        get_storyboard_workflow().update_segment_prompt, session_id, index, body.prompt,
+    )
     return {"success": True, "data": result}
 
 
@@ -133,7 +140,7 @@ async def get_material_pool(
     _session_info: dict = Depends(load_video_session),
 ):
     """步骤3：素材池（选择弹窗分组数据：核心素材 / 本集素材 / 其他集素材，不跨 story）"""
-    result = get_storyboard_workflow().list_material_pool(session_id)
+    result = await asyncio.to_thread(get_storyboard_workflow().list_material_pool, session_id)
     return {"success": True, "data": result}
 
 
@@ -145,7 +152,9 @@ async def delete_material_image(
 ):
     """步骤3：删除分集素材图（素材池记录 + 磁盘归档文件；不清理分镜文件中的引用）"""
     selected = get_workflow().get_selected_episode(session_id)
-    get_storyboard_workflow().delete_material(selected["script_session_id"], image_id)
+    await asyncio.to_thread(
+        get_storyboard_workflow().delete_material, selected["script_session_id"], image_id,
+    )
     return {"success": True, "data": {"deleted": True, "image_id": image_id}}
 
 
@@ -157,7 +166,8 @@ async def update_segment_reference_images(
     _session_info: dict = Depends(load_video_session),
 ):
     """步骤3：保存分镜参考素材图（全量覆盖；换图会清空该分镜已生成的提示词）"""
-    result = get_storyboard_workflow().update_segment_reference_images(
+    result = await asyncio.to_thread(
+        get_storyboard_workflow().update_segment_reference_images,
         session_id, index, [item.model_dump() for item in body.reference_images],
     )
     return {"success": True, "data": result}
@@ -179,7 +189,8 @@ async def generate_segment_material(
     payload = body or SegmentMaterialGenerateRequest()
 
     # fail fast：校验失败直接 400（不进 agent run）
-    workflow.validate_segment_material_request(
+    await asyncio.to_thread(
+        workflow.validate_segment_material_request,
         session_id, index, payload.user_prompt, payload.mentioned_image_ids, payload.reference_paths,
     )
 
@@ -204,7 +215,7 @@ async def get_segment_prompt_context(
     _session_info: dict = Depends(load_video_session),
 ):
     """步骤3：分镜提示词生成弹窗的上下文预览（剧本大纲/本集脚本/分镜大纲/overlap 信息）"""
-    result = get_storyboard_workflow().build_prompt_context(session_id, index)
+    result = await asyncio.to_thread(get_storyboard_workflow().build_prompt_context, session_id, index)
     return {"success": True, "data": result}
 
 
@@ -236,7 +247,9 @@ async def complete_segment(
 ):
     """步骤3：完成/取消完成单个分镜的配置（≥1 个分镜完成即可进入步骤4）"""
     completed = body.completed if body else True
-    result = get_storyboard_workflow().complete_segment(session_id, index, completed)
+    result = await asyncio.to_thread(
+        get_storyboard_workflow().complete_segment, session_id, index, completed,
+    )
     message = "分镜配置已完成" if completed else "分镜配置已取消完成"
     return StepResponse(success=True, message=message, data=result)
 
@@ -279,7 +292,10 @@ async def step_4_comfyui_import(
 
     segment_indexes = body.segment_indexes if body else None
     global_prompt = body.global_prompt if body else ""
-    summary = await get_workflow().prepare_comfyui_import(session_id, segment_indexes, global_prompt)
+    workflow_name = body.workflow_name if body else None
+    summary = await get_workflow().prepare_comfyui_import(
+        session_id, segment_indexes, global_prompt, workflow_name,
+    )
 
     return StepResponse(
         success=True,

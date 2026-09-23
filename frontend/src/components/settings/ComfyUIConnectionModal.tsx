@@ -3,7 +3,7 @@
  * 在此粘贴完整 SSH 命令与密码保存（写 hosts.json），后端自动重启 SSH 隧道并探测连通性。
  */
 import React, { useEffect, useState } from 'react'
-import { Modal, Form, Input, Button, Tag, message, Typography } from 'antd'
+import { Modal, Form, Input, InputNumber, Button, Tag, message, Typography } from 'antd'
 import { ApiOutlined } from '@ant-design/icons'
 import { settingsApi, type ComfyUIConnection } from '@/api/client'
 
@@ -16,6 +16,7 @@ interface ComfyUIConnectionModalProps {
 
 interface ConnectionFormValues {
   command: string
+  remotePort?: number
   password?: string
 }
 
@@ -45,6 +46,7 @@ function readCachedValues(): ConnectionFormValues | null {
     if (typeof parsed?.command !== 'string') return null
     return {
       command: parsed.command,
+      ...(typeof parsed.remotePort === 'number' ? { remotePort: parsed.remotePort } : {}),
       password: typeof parsed.password === 'string' ? parsed.password : undefined,
     }
   } catch {
@@ -60,6 +62,7 @@ function writeCachedValues(values: ConnectionFormValues): void {
       STORAGE_KEY,
       JSON.stringify({
         command: values.command.trim(),
+        remotePort: values.remotePort ?? prev?.remotePort ?? 8188,
         password: values.password?.trim() || prev?.password || '',
       }),
     )
@@ -80,7 +83,10 @@ export const ComfyUIConnectionModal: React.FC<ComfyUIConnectionModalProps> = ({ 
       const result = await settingsApi.getComfyUIConnection()
       setStatus(result)
       if (result.host) {
-        form.setFieldsValue({ command: `ssh ${result.user}@${result.host} -p ${result.port ?? 22}` })
+        form.setFieldsValue({
+          command: `ssh ${result.user}@${result.host} -p ${result.port ?? 22}`,
+          remotePort: result.remote_port ?? 8188,
+        })
       }
     } catch (error) {
       message.error((error as Error).message)
@@ -111,6 +117,7 @@ export const ComfyUIConnectionModal: React.FC<ComfyUIConnectionModalProps> = ({ 
         port: parsed.port,
         user: parsed.user,
         password: values.password?.trim() || undefined,
+        remote_port: values.remotePort || 8188,
       })
       if (result.connected) {
         message.success(result.message)
@@ -163,6 +170,14 @@ export const ComfyUIConnectionModal: React.FC<ComfyUIConnectionModalProps> = ({ 
           ]}
         >
           <Input placeholder="ssh root@xxx.gz15.chenyu.cn -p 20505" disabled={loading || saving} />
+        </Form.Item>
+        <Form.Item
+          name="remotePort"
+          label="ComfyUI 端口（远程）"
+          initialValue={8188}
+          rules={[{ required: true, message: '请输入远程 ComfyUI 端口' }]}
+        >
+          <InputNumber min={1} max={65535} style={{ width: '100%' }} disabled={loading || saving} />
         </Form.Item>
         <Form.Item
           name="password"
