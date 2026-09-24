@@ -742,6 +742,8 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
   const isAllCompleted = completedCount === totalCount && !isBackgroundGenerating
   // 判断是否已被取消（有取消的视频且没有正在生成的）
   const isCancelled = cancelledCount > 0 && pendingCount === 0 && !isBackgroundGenerating
+  // 已请求停止、等待后台轮询检测到取消标志并落盘终态（最长约一个轮询周期）
+  const isCancelling = isBackgroundGenerating && stepResult?._cancelled === true
 
   const title = totalCount === 0 ? '生成视频' : isAllCompleted ? (
     <span>
@@ -754,6 +756,11 @@ export const Step6Videos: React.FC<Step6VideosProps> = ({ session }) => {
       视频生成已停止 ({completedCount}/{totalCount} 已完成)
       {cancelledCount > 0 && <Tag color="warning" style={{ marginLeft: 8 }}>{cancelledCount}个已取消</Tag>}
       {failedCount > 0 && <Tag color="error" style={{ marginLeft: 8 }}>{failedCount}个失败</Tag>}
+    </span>
+  ) : isCancelling ? (
+    <span>
+      <LoadingOutlined style={{ color: '#faad14', marginRight: 8 }} />
+      正在停止生成，请稍候...
     </span>
   ) : (
     <span>

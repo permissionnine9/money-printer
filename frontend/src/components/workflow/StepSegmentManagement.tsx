@@ -475,7 +475,7 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
                 loading={batchStarting}
                 onClick={handleBatchGenerate}
               >
-                批量生成分镜脚本
+                生成分镜脚本
               </Button>
             </Tooltip>
             <Tooltip title="仅对勾选中「已生成分镜提示词」的分镜生效，未生成提示词的勾选将被忽略">
@@ -487,7 +487,7 @@ export const StepSegmentManagement: React.FC<StepSegmentManagementProps> = ({ se
                 loading={batchCompleting}
                 onClick={() => void handleBatchComplete()}
               >
-                批量完成分镜配置
+                完成分镜配置
               </Button>
             </Tooltip>
           </Space>

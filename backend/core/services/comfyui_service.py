@@ -23,6 +23,7 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -55,6 +56,11 @@ UPLOAD_IMAGE_MAX_SIZE = 1920
 UPLOAD_IMAGE_QUALITY = 85
 # 需要压缩的图片后缀（音频等其余类型原样上传）
 _UPLOAD_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+class GenerationCancelledError(Exception):
+    """用户停止生成：轮询中检测到取消标志，任务已请求远程中断"""
+    pass
 
 
 def _align_segment_frames(raw_frames: int) -> int:
@@ -435,8 +441,24 @@ class ComfyUIClient:
             response.raise_for_status()
             return response.json().get(prompt_id, {})
 
-    async def wait_for_result(self, prompt_id: str, max_wait: float = 2400.0, poll_interval: float = 5.0) -> dict:
+    async def interrupt(self) -> None:
+        """中断远程正在执行的任务（best-effort：失败仅告警，由调用方落盘取消状态）"""
+        try:
+            # 中断是收尾动作，不值得等默认 120s 超时
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.post(f"{self.base_url}/interrupt")
+            logger.info("[ComfyUI] 已发送中断请求")
+        except Exception as e:
+            logger.warning(f"[ComfyUI] 中断请求失败（忽略，远程任务将自行结束）: {e}")
+
+    async def wait_for_result(
+        self, prompt_id: str, max_wait: float = 2400.0, poll_interval: float = 5.0,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> dict:
         """轮询直到执行完成，返回 history 条目
+
+        cancel_check 每轮轮询前调用，返回 True 时先请求远程中断再抛
+        GenerationCancelledError（由上层落盘取消状态）。
 
         轮询期间的瞬时连接错误（SSH 隧道抖动、远程重启）不视为任务失败，
         连续 ~5 分钟不可达才放弃（覆盖隧道 90s 重连与远程重启窗口）。
@@ -444,6 +466,10 @@ class ComfyUIClient:
         deadline = time.time() + max_wait
         consecutive_errors = 0
         while time.time() < deadline:
+            if cancel_check is not None and cancel_check():
+                logger.info(f"[ComfyUI] 检测到取消标志，中断任务: {prompt_id}")
+                await self.interrupt()
+                raise GenerationCancelledError(prompt_id)
             try:
                 history = await self.get_history(prompt_id)
                 consecutive_errors = 0
@@ -644,10 +670,12 @@ class VideoServiceComfyUI:
 
     async def execute_imported(
         self, segments: list[dict], workflow: dict | None, timeline: dict,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> dict:
         """阶段二（执行）：提交工作流 → 轮询结果 → 下载视频
 
         mock 模式（workflow 为 None）本地合成演示视频。
+        cancel_check 透传给轮询（用户停止生成时中断远程任务）。
 
         Returns:
             {"success", "video_path", "timeline_data", "mock", "prompt_id"}
@@ -665,7 +693,7 @@ class VideoServiceComfyUI:
 
         # 1. 提交 → 2. 轮询结果 → 3. 下载
         prompt_id = await self.client.submit_prompt(workflow)
-        history = await self.client.wait_for_result(prompt_id)
+        history = await self.client.wait_for_result(prompt_id, cancel_check=cancel_check)
         status = history.get("status", {})
         if status.get("status_str") == "error":
             raise RuntimeError(f"ComfyUI 执行失败: {json.dumps(status, ensure_ascii=False)[:500]}")
@@ -686,10 +714,12 @@ class VideoServiceComfyUI:
         audio_assets: list[dict] | None = None,
         reference_image_paths: dict[int, list[str]] | None = None,
         global_prompt: str = "",
+        cancel_check: Callable[[], bool] | None = None,
     ) -> dict:
         """生成完整视频：导入（上传+构造+注入）→ 执行（提交+轮询+下载）一步到位
 
         供 regenerate/legacy 一步式链路使用；两段式交互走 prepare_import + execute_imported。
+        cancel_check 透传给执行阶段轮询（用户停止生成时中断远程任务）。
 
         Returns:
             {"success", "video_path", "timeline_data", "mock", "prompt_id"}
@@ -698,4 +728,6 @@ class VideoServiceComfyUI:
             segments, frame_image_paths, audio_assets,
             reference_image_paths=reference_image_paths, global_prompt=global_prompt,
         )
-        return await self.execute_imported(segments, prepared["workflow"], prepared["timeline_data"])
+        return await self.execute_imported(
+            segments, prepared["workflow"], prepared["timeline_data"], cancel_check=cancel_check,
+        )

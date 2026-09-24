@@ -24,7 +24,7 @@ from backend.config import override_src_config
 from backend.core.agent_sdk import get_run_registry
 from backend.core.errors import WorkflowError
 from backend.core.persistence.settings_manager import AGENT_CONCURRENCY_KEY
-from backend.deps import get_settings_manager
+from backend.deps import get_settings_manager, get_workflow
 
 # 配置日志
 logging.basicConfig(
@@ -47,6 +47,11 @@ async def lifespan(app: FastAPI):
     saved = get_settings_manager().get(AGENT_CONCURRENCY_KEY)
     if saved:
         get_run_registry().set_max_concurrent(int(saved))
+
+    # 回收上次进程遗留的「生成中」悬挂状态（后台生成线程随进程死亡，不会自行恢复）
+    recovered = get_workflow().recover_stale_generations()
+    if recovered:
+        print(f"已回收 {recovered} 个悬挂的视频生成任务（落盘为已停止）")
 
     yield
     # 关闭时清理

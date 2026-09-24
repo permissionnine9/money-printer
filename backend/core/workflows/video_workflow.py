@@ -18,7 +18,7 @@ from backend.core.errors import WorkflowError
 from backend.core.models import VideoParams
 from backend.core.persistence import SessionManager
 from backend.core.persistence.workspace_store import WorkspaceStore
-from backend.core.services import VideoServiceComfyUI
+from backend.core.services import GenerationCancelledError, VideoServiceComfyUI
 from backend.core.services.workspace_sections import get_selected_episode
 
 logger = logging.getLogger(__name__)
@@ -498,6 +498,7 @@ class VideoCreationWorkflowV2:
         try:
             result = await self.comfyui_service.execute_imported(
                 imported.get("segments", []), imported.get("workflow"), imported["timeline_data"],
+                cancel_check=self._build_cancel_check(session_id),
             )
             result_data = self._finalize_video_result(
                 session_id, result, imported.get("segment_indexes", []),
@@ -508,6 +509,8 @@ class VideoCreationWorkflowV2:
                 "message": f"最终视频生成完成{mode_text}",
                 "data": result_data,
             }
+        except GenerationCancelledError:
+            return self._save_video_cancelled(session_id)
         except Exception as e:
             return self._save_video_failure(session_id, e)
 
@@ -620,6 +623,47 @@ class VideoCreationWorkflowV2:
         self.session_manager.save_step_result(session_id, "generate_videos", failure_data, success=False)
         return {"success": False, "error": f"视频生成失败: {str(error)}", "data": failure_data}
 
+    def _build_cancel_check(self, session_id: str):
+        """构造取消检测回调（传给 ComfyUI 轮询，每轮读一次 DB 的 _cancelled 标志）"""
+        def check() -> bool:
+            step = self.session_manager.get_step_result(session_id, "generate_videos")
+            return bool(step and step["result_data"].get("_cancelled") is True)
+        return check
+
+    def _save_video_cancelled(self, session_id: str) -> dict:
+        """停止生成落盘：pending 分段标记为 cancelled，退出 generating 态
+
+        保留 mark_videos_generating 写入的初始结构与备份字段（_old_video_path 等，
+        取消后「恢复备份」仍可用）；_cancelled 标志消费完毕一并清除。
+        """
+        logger.info(f"[步骤7][ComfyUI] 用户停止生成 - 会话: {session_id[:8]}...")
+        step = self.session_manager.get_step_result(session_id, "generate_videos")
+        data = (step or {}).get("result_data") or {}
+        videos = data.get("generated_videos", [])
+        for video in videos:
+            if video.get("task_status") == "pending":
+                video["task_status"] = "cancelled"
+        cancelled_data = {
+            **data,
+            "generated_videos": videos,
+            "_generating": False,
+            "_success": False,
+            "_cancelled": False,
+        }
+        self.session_manager.save_step_result(session_id, "generate_videos", cancelled_data, success=False)
+        return {"success": False, "message": "视频生成已停止", "data": cancelled_data}
+
+    def recover_stale_generations(self) -> int:
+        """启动回收：进程重启后后台生成线程必死，把悬挂的 _generating 状态落盘为已停止
+
+        返回回收的会话数（0 = 无悬挂）。
+        """
+        stale = self.session_manager.find_step_results_by_flag("generate_videos", "_generating", True)
+        for item in stale:
+            logger.warning(f"[启动回收] 会话 {item['session_id'][:8]}... 的生成任务随进程中断，落盘为已停止")
+            self._save_video_cancelled(item["session_id"])
+        return len(stale)
+
     async def _step_generate_videos_comfyui(
         self, session_id: str, extra_prompt: str = "", segment_indexes: list[int] | None = None,
     ) -> dict:
@@ -634,6 +678,7 @@ class VideoCreationWorkflowV2:
             # 生成最终视频（mock 模式本地合成演示视频）；globalPrompt 用本集戏剧基调（一步式无用户填写入口）
             result = await self.comfyui_service.generate_full_video(
                 **materials, global_prompt=self._auto_global_prompt(session_id),
+                cancel_check=self._build_cancel_check(session_id),
             )
 
             seg_indexes = [s.get("index", i) for i, s in enumerate(materials["segments"])]
@@ -645,5 +690,7 @@ class VideoCreationWorkflowV2:
                 "data": result_data
             }
 
+        except GenerationCancelledError:
+            return self._save_video_cancelled(session_id)
         except Exception as e:
             return self._save_video_failure(session_id, e)

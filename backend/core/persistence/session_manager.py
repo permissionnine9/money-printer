@@ -322,6 +322,29 @@ class SessionManager(BaseSQLiteManager):
                     completed.append(row['step_name'])
             return completed
 
+    def find_step_results_by_flag(self, step_name: str, flag_key: str, flag_value=True) -> list[dict]:
+        """跨会话查步骤结果：列出 result_data 中 flag_key == flag_value 的行（启动回收用）
+
+        Args:
+            step_name: 步骤名称
+            flag_key: result_data 中的标志键（如 "_generating"）
+            flag_value: 标志目标值
+
+        Returns:
+            [{"session_id", "result_data"}]，无匹配返回空列表
+        """
+        matches = []
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "SELECT session_id, result_data FROM step_results WHERE step_name = ?",
+                (step_name,),
+            )
+            for row in cursor.fetchall():
+                result_data = json.loads(row['result_data'])
+                if result_data.get(flag_key, not flag_value) == flag_value:
+                    matches.append({"session_id": row['session_id'], "result_data": result_data})
+        return matches
+
     def is_step_completed(self, session_id: str, step_name: str) -> bool:
         """检查步骤是否已成功完成
 

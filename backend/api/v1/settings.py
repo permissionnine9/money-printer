@@ -32,7 +32,7 @@ _TUNNEL_PID_FILE = Path("/tmp/comfyui_tunnel_gz15-a100.pid")
 _TUNNEL_LOG = Path("/tmp/comfyui_tunnel.log")
 _COMFYUI_ALIAS = "gz15-a100"
 _COMFYUI_LOCAL_URL = "http://127.0.0.1:8188"
-_TUNNEL_READY_TIMEOUT = 35  # 隧道脚本自带 15s 就绪等待 + 3s 重连间隔
+_TUNNEL_READY_TIMEOUT = 15  # 隧道脚本自带 15s 就绪等待 + 3s 重连间隔
 
 
 class ComfyUIConnectionRequest(BaseModel):
